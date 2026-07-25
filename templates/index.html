@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>تماشای مشترک | vergoboy.ir</title>
+<meta name="description" content="پخش‌کننده‌ی ویدیوی همزمان (Watch Party) vergoboy.ir — تماشای فیلم با هم، زیرنویس و دوبله‌ی اختصاصی هرکس، استریم زنده از دستگاه‌های خارجی.">
+
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><defs><linearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'><stop offset='0%25' stop-color='%23833AB4'/><stop offset='50%25' stop-color='%23FD1D1D'/><stop offset='100%25' stop-color='%23FCB045'/></linearGradient></defs><rect width='40' height='40' rx='10' fill='url(%23g)'/><text x='50%25' y='58%25' dominant-baseline='middle' text-anchor='middle' font-size='20' font-weight='900' fill='white'>%F0%9F%93%A1</text></svg>">
+
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header id="header">
+  <div class="header-inner">
+    <a href="/" class="logo">
+      <div class="logo-icon">V</div>
+      <div class="logo-text">
+        <span class="logo-name">vergoboy</span>
+        <span class="logo-sub">.ir</span>
+      </div>
+    </a>
+
+    <nav>
+      <a href="/" class="nav-link">🏠 خانه</a>
+      <a href="/#services" class="nav-link">⚡ سرویس‌ها</a>
+      <a href="/stream" class="nav-link active">🎬 استریم</a>
+      <a href="/donate" class="nav-link">💜 دونیت</a>
+      <a href="/#contact" class="nav-link">✉️ تماس</a>
+    </nav>
+
+    <button class="hamburger" id="hamburger" aria-label="منو">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+
+  <nav class="mobile-nav" id="mobile-nav">
+    <a href="/" class="nav-link">🏠 خانه</a>
+    <a href="/#services" class="nav-link">⚡ سرویس‌ها</a>
+    <a href="/stream" class="nav-link active">🎬 استریم</a>
+    <a href="/donate" class="nav-link">💜 دونیت</a>
+    <a href="/#contact" class="nav-link">✉️ تماس</a>
+  </nav>
+</header>
+
+<main class="page">
+  <div class="page-inner">
+
+    <div class="page-head">
+      <h1 class="gradient-text">تماشای مشترک</h1>
+      <p class="page-sub">فیلم رو هم‌زمان با بقیه تماشا کن — پخش، توقف و زمان برای همه یکی‌ست. <span id="onlinePill" class="online-pill">👥 <span id="onlineCountTop">۰</span> آنلاین</span></p>
+    </div>
+
+    <!-- ===================== مبل کاربران آنلاین (Sofa) ===================== -->
+    <section class="sofa-wrap card" id="sofaWrap">
+      <div class="sofa-scene" id="sofaScene">
+        <div class="sofa-couch" id="sofaCouch"></div>
+        <div class="sofa-people" id="sofaPeople"></div>
+      </div>
+      <p class="sofa-hint">👥 همه‌ی کسایی که الان توی اتاق‌ان، رو مبل نشستن</p>
+    </section>
+
+    <!-- ===================== پلیر ===================== -->
+    <section class="card player-wrap" id="playerWrap">
+      <div class="stage" id="stage">
+        <video id="video" playsinline preload="metadata"></video>
+        <audio id="dubAudio" preload="auto"></audio>
+
+        <div class="subtitle-overlay" id="subOverlay"></div>
+
+        <div class="stage-empty" id="stageEmpty">
+          <div class="stage-empty-icon" id="stageEmptyIcon">🎬</div>
+          <p id="stageEmptyText">هنوز ویدیویی برای پخش انتخاب نشده</p>
+          <div class="stage-progress-wrap" id="stageProgressWrap" hidden>
+            <div class="stage-progress-track">
+              <div class="stage-progress-fill" id="stageProgressBar"></div>
+            </div>
+            <span class="stage-progress-pct" id="stageProgressPct">۰٪</span>
+          </div>
+          <button class="btn-secondary" id="stageEmptyBtn" data-go-tab="add">➕ افزودن ویدیو</button>
+        </div>
+
+        <div class="live-badge" id="liveBadge" hidden>🔴 پخش زنده</div>
+        <div class="buffering" id="bufferSpinner" hidden></div>
+        <button class="big-play" id="bigPlay" hidden>▶</button>
+      </div>
+
+      <div class="controls" id="controls">
+        <div class="progress-row">
+          <span class="time cur" id="curTime">۰۰:۰۰</span>
+          <input type="range" id="seekBar" class="seek-bar" min="0" max="1000" value="0" step="0.1">
+          <span class="time dur" id="durTime">۰۰:۰۰</span>
+        </div>
+
+        <div class="buttons-row">
+          <div class="ctrl-group">
+            <button id="btnPlay" class="ctrl-btn ctrl-btn-main" title="پخش / مکث">▶</button>
+            <button id="btnPrev" class="ctrl-btn" title="آیتم قبلی">⏮</button>
+            <button id="btnNext" class="ctrl-btn" title="آیتم بعدی">⏭</button>
+            <button id="btnBack10" class="ctrl-btn" title="۱۰ ثانیه عقب">⏪</button>
+            <button id="btnFwd10" class="ctrl-btn" title="۱۰ ثانیه جلو">⏩</button>
+            <button id="btnMute" class="ctrl-btn" title="بی‌صدا">🔊</button>
+            <input type="range" id="volBar" class="vol-bar" min="0" max="1" step="0.01" value="1" title="میزان صدا">
+          </div>
+
+          <div class="now-playing" id="nowPlayingTitle">چیزی پخش نمی‌شود</div>
+
+          <div class="ctrl-group">
+            <div class="menu-wrap">
+              <button class="ctrl-btn" id="btnSpeed">۱x</button>
+              <div class="menu" id="speedMenu"></div>
+            </div>
+            <div class="menu-wrap">
+              <button class="ctrl-btn" id="btnQuality" title="کیفیت پخش">🖼</button>
+              <div class="menu" id="qualityMenu"></div>
+            </div>
+            <div class="menu-wrap">
+              <button class="ctrl-btn" id="btnAudioTrack" title="کانال صدا">🎧</button>
+              <div class="menu" id="audioMenu"></div>
+            </div>
+            <div class="menu-wrap">
+              <button class="ctrl-btn" id="btnSubtitle" title="زیرنویس">💬</button>
+              <div class="menu" id="subtitleMenu"></div>
+            </div>
+            <button class="ctrl-btn" id="btnSubStyle" title="استایل زیرنویس" data-go-tab="substyle">🎨</button>
+            <button class="ctrl-btn" id="btnPip" title="تصویر در تصویر">⧉</button>
+            <button class="ctrl-btn" id="btnShortcuts" title="راهنمای کلیدهای میانبر (؟)">⌨</button>
+            <button class="ctrl-btn" id="btnFullscreen" title="تمام‌صفحه (F)">⛶</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== پنل‌ها ===================== -->
+    <section class="panels-grid">
+
+      <div class="card tabs-card">
+        <div class="tabs" id="tabs">
+          <button class="tab-btn active" data-tab="playlist">🎬 پلی‌لیست</button>
+          <button class="tab-btn" data-tab="add">➕ افزودن ویدیو</button>
+          <button class="tab-btn" data-tab="live">📡 استریم خارجی</button>
+          <button class="tab-btn" data-tab="subaudio">🔤 زیرنویس و صدا</button>
+          <button class="tab-btn" data-tab="substyle">🎨 استایل زیرنویس</button>
+          <button class="tab-btn" data-tab="chat">💬 چت <span class="chat-badge" id="chatBadge" hidden>0</span></button>
+        </div>
+
+        <!-- پلی‌لیست -->
+        <div class="tab-panel" data-panel="playlist">
+          <ul class="playlist" id="playlistEl"></ul>
+          <p class="empty-hint" id="playlistEmptyHint">پلی‌لیست خالی‌ست. از تب «افزودن ویدیو» یکی اضافه کن.</p>
+          <div class="playlist-footer" id="playlistFooter" hidden>
+            <button class="btn-secondary btn-cleanup" id="btnCleanup" title="حذف فایل‌هایی که در پلی‌لیست نیستند از سرور">
+              🗑 پاکسازی فایل‌های یتیم
+            </button>
+            <span class="cleanup-status" id="cleanupStatus"></span>
+          </div>
+        </div>
+
+        <!-- افزودن ویدیو -->
+        <div class="tab-panel" data-panel="add" hidden>
+          <div class="mode-switch" id="addModeSwitch">
+            <button class="mode-btn active" data-mode="file">📁 آپلود فایل</button>
+            <button class="mode-btn" data-mode="url">🔗 لینک مستقیم</button>
+            <button class="mode-btn" data-mode="youtube">▶️ یوتیوب</button>
+          </div>
+
+          <form id="formFile" class="form-stack" data-mode-panel="file">
+            <label>عنوان (اختیاری)</label>
+            <input type="text" id="fileTitle" placeholder="مثلا: قسمت ۱ — فصل دوم">
+            <label>فایل ویدیو</label>
+            <input type="file" id="fileInput" accept="video/mp4,video/webm,video/ogg,.mp4,.webm,.ogv,.mov,.m4v,.mkv">
+            <div class="progress-track" id="uploadProgressTrack" hidden>
+              <div class="progress-fill" id="uploadProgressFill"></div>
+            </div>
+            <button type="submit" class="btn-primary">آپلود و افزودن به پلی‌لیست</button>
+            <p class="hint">فرمت‌های پشتیبانی‌شده: mp4، webm، ogg، mov، mkv — به‌صورت خودکار در چند کیفیت (تا ۳ سطح، بر پایه‌ی کیفیت خودِ فایل) آماده پخش می‌شود.</p>
+          </form>
+
+          <form id="formUrl" class="form-stack" data-mode-panel="url" hidden>
+            <label>عنوان (اختیاری)</label>
+            <input type="text" id="urlTitle" placeholder="مثلا: تریلر فیلم">
+            <label>لینک مستقیم ویدیو یا HLS (m3u8)</label>
+            <input type="text" id="urlInput" dir="ltr" placeholder="https://example.com/movie.mp4">
+            <button type="submit" class="btn-primary">افزودن به پلی‌لیست</button>
+            <p class="hint">پخش از همین ابتدا ممکنه شروع بشه در حالی که بقیه‌ی فیلم هنوز در حال آماده‌سازیه.</p>
+          </form>
+
+          <form id="formYoutube" class="form-stack" data-mode-panel="youtube" hidden>
+            <label>لینک یوتیوب (یا هر سایت پشتیبانی‌شده توسط yt-dlp)</label>
+            <div class="yt-url-row">
+              <input type="text" id="youtubeInput" dir="ltr" placeholder="https://youtu.be/..." style="flex:1">
+              <button type="button" class="btn-secondary" id="btnYtLoad">🔍 بارگذاری</button>
+            </div>
+
+            <div id="ytPreview" hidden>
+              <div class="yt-preview-box">
+                <img id="ytThumb" src="" alt="" class="yt-thumb">
+                <div class="yt-preview-info">
+                  <div id="ytPreviewTitle" class="yt-preview-title"></div>
+                  <label>عنوان سفارشی (اختیاری)</label>
+                  <input type="text" id="youtubeTitle" placeholder="خودکار از یوتیوب گرفته می‌شه">
+                  <label>کیفیت منبع دانلود (بعداً به‌صورت خودکار چند کیفیت داخلی هم از همین ساخته می‌شه)</label>
+                  <select id="ytQualitySelect" class="target-item-select" style="margin-bottom:0"></select>
+                </div>
+              </div>
+              <button type="submit" class="btn-primary" id="btnYoutubeSubmit">➕ افزودن به پلی‌لیست</button>
+            </div>
+
+            <div class="yt-status" id="ytStatus" hidden></div>
+            <p class="hint">افزودن الان انجام می‌شه و بلافاصله جواب می‌گیری؛ دانلود و آماده‌سازی در پس‌زمینه ادامه پیدا می‌کنه.</p>
+          </form>
+        </div>
+
+        <!-- استریم خارجی -->
+        <div class="tab-panel" data-panel="live" hidden>
+          <div class="live-grid">
+            <div class="live-col">
+              <h4>۱) ساخت کلید استریم</h4>
+              <p class="hint">یک کلید بساز و آدرس Push رو در نرم‌افزار پخشت (OBS، اپ موبایل و ...) بذار.</p>
+              <button id="btnGenKey" class="btn-secondary">🔑 ساخت کلید جدید</button>
+
+              <div id="keyResult" class="key-result" hidden>
+                <label>آدرس Push (Server)</label>
+                <div class="copy-field"><code id="pushUrlOut" dir="ltr"></code><button class="copy-btn" data-copy="pushUrlOut">کپی</button></div>
+                <label>کلید استریم (Stream Key)</label>
+                <div class="copy-field"><code id="streamKeyOut" dir="ltr"></code><button class="copy-btn" data-copy="streamKeyOut">کپی</button></div>
+                <label>آدرس پخش (HLS Playback)</label>
+                <div class="copy-field"><code id="playbackUrlOut" dir="ltr"></code><button class="copy-btn" data-copy="playbackUrlOut">کپی</button></div>
+                <button id="btnAddGeneratedLive" class="btn-primary">➕ افزودن این پخش زنده به پلی‌لیست</button>
+              </div>
+            </div>
+
+            <div class="live-col">
+              <h4>۲) یا وارد کردن دستی</h4>
+              <p class="hint">اگه از قبل آدرس HLS پخش زنده رو داری، مستقیم وارد کن.</p>
+              <form id="formLive" class="form-stack">
+                <label>عنوان</label>
+                <input type="text" id="liveTitle" placeholder="مثلا: پخش زنده دوربین">
+                <label>آدرس پخش HLS (m3u8)</label>
+                <input type="text" id="livePlayback" dir="ltr" placeholder="https://vergoboy.ir/hls/xxxx/index.m3u8">
+                <button type="submit" class="btn-primary">افزودن به پلی‌لیست</button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <!-- زیرنویس و صدای خارجی -->
+        <div class="tab-panel" data-panel="subaudio" hidden>
+          <label class="target-item-label">برای کدام ویدیوی پلی‌لیست اضافه شود؟</label>
+          <select id="subTargetSelect" class="target-item-select"></select>
+
+          <div class="subaudio-grid">
+            <div class="subaudio-col">
+              <h4>💬 افزودن زیرنویس</h4>
+              <p class="hint">برای فایل‌های MKV با زیرنویس داخلی (Softsub)، مرورگر نمی‌تواند زیرنویس داخل فایل را بخواند — باید فایل زیرنویس را جدا (vtt/srt) آپلود یا لینکش را وارد کنی.</p>
+
+              <div class="mode-switch" id="subModeSwitch">
+                <button class="mode-btn active" data-mode="subfile">📁 آپلود فایل</button>
+                <button class="mode-btn" data-mode="suburl">🔗 لینک خارجی</button>
+              </div>
+
+              <form id="formSubFile" class="form-stack" data-mode-panel="subfile">
+                <label>برچسب زیرنویس</label>
+                <input type="text" id="subFileLabel" placeholder="مثلا: فارسی">
+                <label>فایل زیرنویس (vtt یا srt)</label>
+                <input type="file" id="subFileInput" accept=".vtt,.srt">
+                <button type="submit" class="btn-primary">افزودن زیرنویس</button>
+              </form>
+
+              <form id="formSubUrl" class="form-stack" data-mode-panel="suburl" hidden>
+                <label>برچسب زیرنویس</label>
+                <input type="text" id="subUrlLabel" placeholder="مثلا: فارسی">
+                <label>لینک مستقیم فایل (vtt یا srt)</label>
+                <input type="text" id="subUrlInput" dir="ltr" placeholder="https://example.com/sub.srt">
+                <button type="submit" class="btn-primary">افزودن زیرنویس</button>
+              </form>
+            </div>
+
+            <div class="subaudio-col">
+              <h4>🎧 افزودن کانال صدا (دوبله)</h4>
+              <p class="hint">یک فایل صوتی جدا (مثلاً دوبله‌ی فارسی) که به‌صورت خودکار با تصویر سینک می‌شود.</p>
+              <form id="formAudioTrack" class="form-stack">
+                <label>برچسب کانال صدا</label>
+                <input type="text" id="audioLabel" placeholder="مثلا: دوبله فارسی">
+                <label>لینک مستقیم فایل صوتی (mp3, aac, ogg, ...)</label>
+                <input type="text" id="audioUrlInput" dir="ltr" placeholder="https://example.com/dub-fa.mp3">
+                <button type="submit" class="btn-primary">افزودن کانال صدا</button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <!-- استایل زیرنویس -->
+        <div class="tab-panel" data-panel="substyle" hidden>
+          <p class="hint">این تنظیمات فقط روی نمایش زیرنویس برای خودت اثر دارد و برای بقیه‌ی بیننده‌ها تغییری ایجاد نمی‌کند.</p>
+          <div class="substyle-grid">
+            <label>فونت
+              <select id="subFont">
+                <option value="Vazirmatn">وزیرمتن</option>
+                <option value="JetBrainsMono">جت‌برینز مونو</option>
+                <option value="Tahoma">Tahoma</option>
+                <option value="system-ui">پیش‌فرض سیستم</option>
+              </select>
+            </label>
+            <label>اندازه‌ی متن <span id="subSizeVal">28</span>px
+              <input type="range" id="subSize" min="14" max="64" value="28">
+            </label>
+            <label>رنگ متن
+              <input type="color" id="subColor" value="#ffffff">
+            </label>
+            <label>رنگ پس‌زمینه
+              <input type="color" id="subBg" value="#000000">
+            </label>
+            <label>شفافیت پس‌زمینه <span id="subBgOpacityVal">60</span>٪
+              <input type="range" id="subBgOpacity" min="0" max="100" value="60">
+            </label>
+            <label class="checkbox-label"><input type="checkbox" id="subOutline" checked> دور خط (Outline)</label>
+            <label class="checkbox-label"><input type="checkbox" id="subBold"> ضخیم (Bold)</label>
+            <label>فاصله از پایین صفحه <span id="subOffsetVal">40</span>px
+              <input type="range" id="subOffset" min="0" max="300" value="40">
+            </label>
+            <button id="btnSubReset" class="btn-secondary">بازنشانی به پیش‌فرض</button>
+          </div>
+          <div class="substyle-preview-wrap">
+            <div class="substyle-preview" id="subPreview">این یک پیش‌نمایش از زیرنویس شماست</div>
+          </div>
+        </div>
+
+        <!-- چت -->
+        <div class="tab-panel" data-panel="chat" hidden>
+          <div class="chat-toolbar">
+            <p class="hint" style="margin:0">چت فقط در حافظه‌ی سرور نگه داشته می‌شه؛ خودش هر ۲۴ ساعت پاک می‌شه، یا با دکمه‌ی روبه‌رو الان پاکش کن.</p>
+            <button class="btn-secondary" id="btnClearChat">🗑 پاک‌کردن چت</button>
+          </div>
+          <ul class="chat-feed" id="chatFeed"></ul>
+          <p class="empty-hint" id="chatEmptyHint">هنوز پیامی نیست — اولین نفر باش!</p>
+          <div class="chat-image-preview" id="chatImagePreview" hidden>
+            <img id="chatImagePreviewImg" src="" alt="">
+            <button id="btnChatImageRemove" class="pl-remove" title="حذف عکس">✕</button>
+          </div>
+          <form id="formChat" class="chat-input-row">
+            <button type="button" class="ctrl-btn" id="btnChatImage" title="افزودن عکس">🖼</button>
+            <input type="file" id="chatImageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+            <input type="text" id="chatTextInput" placeholder="پیامت رو بنویس…" maxlength="500" autocomplete="off">
+            <button type="submit" class="btn-primary">ارسال</button>
+          </form>
+        </div>
+      </div>
+
+      <aside class="card side-card">
+        <div class="side-section">
+          <div class="my-name-row">
+            <span>شما: <b id="myNameLabel">—</b></span>
+            <button class="link-btn" id="btnChangeName">تغییر نام</button>
+          </div>
+          <div class="my-avatar-row">
+            <img id="myAvatarPreview" class="my-avatar-img" src="" alt="" hidden>
+            <div id="myAvatarPlaceholder" class="my-avatar-placeholder">؟</div>
+            <button class="link-btn" id="btnChangeAvatar">تغییر عکس پروفایل</button>
+            <input type="file" id="avatarInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          </div>
+          <h4>👥 آنلاین (<span id="onlineCount">۰</span>)</h4>
+          <ul id="userList" class="user-list"></ul>
+        </div>
+        <div class="side-section">
+          <h4>🔔 رویدادهای اخیر</h4>
+          <ul id="notifyFeed" class="notify-feed"></ul>
+        </div>
+      </aside>
+    </section>
+
+  </div>
+</main>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- ===================== مودال نام ===================== -->
+<div class="modal-overlay" id="nameModal" hidden>
+  <div class="modal card">
+    <div class="logo-icon modal-logo">V</div>
+    <h3>به اتاق تماشای مشترک خوش اومدی</h3>
+    <p class="muted">یک اسم انتخاب کن تا بقیه بدونن کی پخش/توقف می‌کند</p>
+    <input type="text" id="nameInput" placeholder="مثلا: آرمان" maxlength="24" autocomplete="off">
+    <button id="btnJoin" class="btn-primary">ورود به اتاق</button>
+  </div>
+</div>
+
+<!-- ===================== مودال شورتکات ===================== -->
+<div class="modal-overlay shortcuts-overlay" id="shortcutsModal" hidden>
+  <div class="modal card shortcuts-card">
+    <div class="shortcuts-header">
+      <h3>⌨ کلیدهای میانبر</h3>
+      <button class="shortcuts-close" id="btnCloseShortcuts">✕</button>
+    </div>
+    <div class="shortcuts-grid">
+      <div class="sc-row"><kbd>Space</kbd><span>پخش / مکث</span></div>
+      <div class="sc-row"><kbd>←</kbd> <kbd>J</kbd><span>۱۰ ثانیه عقب</span></div>
+      <div class="sc-row"><kbd>→</kbd> <kbd>L</kbd><span>۱۰ ثانیه جلو</span></div>
+      <div class="sc-row"><kbd>↑</kbd><span>صدا بیشتر (+5٪)</span></div>
+      <div class="sc-row"><kbd>↓</kbd><span>صدا کمتر (−5٪)</span></div>
+      <div class="sc-row"><kbd>M</kbd><span>بی‌صدا / باصدا</span></div>
+      <div class="sc-row"><kbd>F</kbd><span>تمام‌صفحه</span></div>
+      <div class="sc-row"><kbd>P</kbd><span>آیتم قبلی</span></div>
+      <div class="sc-row"><kbd>N</kbd><span>آیتم بعدی</span></div>
+      <div class="sc-row"><kbd>1</kbd>–<kbd>9</kbd><span>رفتن به ۱۰٪–۹۰٪ فیلم</span></div>
+      <div class="sc-row"><kbd>0</kbd><span>رفتن به ابتدای فیلم</span></div>
+      <div class="sc-row"><kbd>?</kbd><span>نمایش/بستن این پنجره</span></div>
+      <div class="sc-row"><kbd>Esc</kbd><span>بستن این پنجره / خروج از تمام‌صفحه</span></div>
+    </div>
+    <p class="hint" style="margin-top:14px">کلیدها فقط وقتی فوکوس روی ویدیو یا صفحه‌ی اصلیه (نه روی فیلدهای متنی) کار می‌کنن.</p>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-main">
+      <div class="footer-brand">
+        <a href="/" class="logo">
+          <div class="logo-icon">V</div>
+          <div class="logo-text">
+            <span class="logo-name">vergoboy</span>
+            <span class="logo-sub">.ir</span>
+          </div>
+        </a>
+        <p>تماشای مشترک و همزمان فیلم با دوستات، با زیرنویس و کانال صدای اختصاصی هرکس ❤️</p>
+      </div>
+
+      <div class="footer-col">
+        <h4>دسترسی سریع</h4>
+        <ul class="footer-links">
+          <li><a href="/"><span class="fl-icon">🏠</span> خانه</a></li>
+          <li><a href="/#services"><span class="fl-icon">⚡</span> سرویس‌ها</a></li>
+          <li><a href="/stream"><span class="fl-icon">🎬</span> استریم</a></li>
+          <li><a href="/donate"><span class="fl-icon">💜</span> دونیت</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col">
+        <h4>ارتباط</h4>
+        <ul class="footer-links">
+          <li><a href="/#contact"><span class="fl-icon">✉️</span> تماس</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <span class="footer-copy">© <span id="year"></span> vergoboy.ir — ساخته‌شده با ❤️ توسط آرمان</span>
+      <div class="footer-right">
+        <span class="powered-by">⚡ Powered by Nginx</span>
+        <div class="enamad-wrap">
+          <a referrerpolicy="origin" target="_blank"
+             href="https://trustseal.enamad.ir/?id=6182694&Code=HP2ygsmOhTe6JHKgzphPaAbCyr7peRUm">
+            <img referrerpolicy="origin"
+                 src="https://trustseal.enamad.ir/logo.aspx?id=6182694&Code=HP2ygsmOhTe6JHKgzphPaAbCyr7peRUm"
+                 alt="اینماد" code="HP2ygsmOhTe6JHKgzphPaAbCyr7peRUm">
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="{{ url_for('static', filename='js/vendor/socket.io.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/vendor/hls.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

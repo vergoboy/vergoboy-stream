@@ -1,0 +1,596 @@
+from gevent import monkey
+monkey.patch_all()
+
+import gevent
+import json
+import os
+import shutil
+import subprocess
+import time
+import urllib.request
+import uuid
+
+from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask_socketio import SocketIO, emit
+
+from config import Config
+from srt_to_vtt import convert_srt_to_vtt
+from state import LOCK, room
+
+app = Flask(__name__, static_url_path="/stream/static", template_folder="templates")
+app.config.from_object(Config)
+
+# async_mode="threading": روش رسمی توصیه‌شده فعلی Flask-SocketIO که نیازی به
+# eventlet/gevent (که اولی deprecated شده) ندارد و با کمک پکیج simple-websocket
+# از WebSocket واقعی هم پشتیبانی می‌کند. برای حجم ترافیک یک «اتاق تماشای دوستانه»
+# کاملاً کافی است.
+socketio = SocketIO(
+    app,
+    path="stream/socket.io",
+    cors_allowed_origins="*",
+    async_mode="gevent",
+)
+
+
+def allowed(filename: str, exts: set) -> bool:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return ext in exts
+
+
+def new_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def broadcast_state():
+    socketio.emit("state_sync", room.to_public_dict())
+
+
+def broadcast_notify(ntype: str, name: str, **extra):
+    payload = {"type": ntype, "name": name, "ts": time.time()}
+    payload.update(extra)
+    socketio.emit("notify", payload)
+
+
+def url_ext(url: str) -> str:
+    clean = url.split("?", 1)[0].split("#", 1)[0]
+    return clean.rsplit(".", 1)[-1].lower() if "." in clean else ""
+
+
+def free_space_mb(path: str) -> float:
+    return shutil.disk_usage(path).free / (1024 * 1024)
+
+
+def _download_to_file(url: str, dest_path: str, timeout: int = 25) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest_path, "wb") as out:
+        shutil.copyfileobj(resp, out, length=1024 * 1024)
+
+
+# حداقل فضای آزاد لازم (مگابایت) قبل از شروع دانلود/تبدیل یک MKV.
+MIN_FREE_MB_FOR_TRANSCODE = 500
+
+TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+LANG_LABELS = {
+    "fa": "فارسی", "per": "فارسی", "fas": "فارسی",
+    "en": "انگلیسی", "eng": "انگلیسی",
+    "ar": "عربی", "ara": "عربی",
+}
+
+
+def _ffprobe_url(url: str, timeout: int = 20) -> dict:
+    """با ffprobe مستقیماً به URL وصل می‌شه (بدون دانلود کامل فایل) و اطلاعات
+    استریم‌ها رو برمی‌گردونه. ffmpeg/ffprobe خودشون کلاینت HTTP داخلی دارن و
+    فقط به‌اندازه‌ی لازم (معمولاً چند مگابایت اول، جایی که header اطلاعات
+    Track ها قرار داره) می‌خونن."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-print_format", "json", "-show_streams",
+                "-rw_timeout", str(timeout * 1_000_000),
+                url,
+            ],
+            capture_output=True, timeout=timeout + 10,
+        )
+        if proc.returncode != 0:
+            return {}
+        return json.loads(proc.stdout or "{}")
+    except Exception:
+        return {}
+
+
+def _find_text_subtitle_streams(probe_data: dict) -> list:
+    subs = []
+    for s in probe_data.get("streams", []):
+        if s.get("codec_type") == "subtitle" and s.get("codec_name") in TEXT_SUBTITLE_CODECS:
+            tags = s.get("tags") or {}
+            subs.append({
+                "index": s["index"],
+                "lang": (tags.get("language") or "")[:8],
+                "title": tags.get("title") or "",
+            })
+    return subs
+
+
+def _run_ffmpeg(cmd: list, timeout: int = 3600):
+    return subprocess.run(cmd, capture_output=True, timeout=timeout)
+
+
+def _process_remote_mkv(item_id: str, url: str, requester_name: str) -> None:
+    """
+    دانلود + تبدیل یک لینک MKV خارجی به MP4، در پس‌زمینه (gevent greenlet).
+    ffmpeg مستقیماً از روی URL می‌خونه (نه از فایل دانلودشده روی دیسک)، پس
+    فقط خروجی نهایی mp4 (و در صورت وجود، فایل‌های کوچک srt استخراج‌شده)
+    روی دیسک نوشته می‌شه.
+
+    اگه فایل، زیرنویس داخلی از نوع متنی (srt/ass و مشابه — نه زیرنویس‌های
+    تصویری مثل PGS) داشته باشه، خودکار استخراج و به آیتم وصل می‌شه؛ چون
+    مرورگر اصلاً نمی‌تونه زیرنویس داخل کانتینر MKV رو مستقیم بخونه.
+    """
+    out_path = os.path.join(Config.UPLOAD_DIR, f"{item_id}.mp4")
+
+    def fail(msg: str):
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        with LOCK:
+            item = room.find_item(item_id)
+            if item:
+                item["status"] = "error"
+                item["error"] = msg[:300]
+                room.save()
+                title = item["title"]
+            else:
+                title = ""
+        broadcast_state()
+        broadcast_notify("media_error", requester_name, title=title)
+
+    free_mb = free_space_mb(Config.UPLOAD_DIR)
+    if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
+        fail(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن.")
+        return
+
+    probe = _ffprobe_url(url)
+    sub_streams = _find_text_subtitle_streams(probe)[:4]  # حداکثر ۴ زیرنویس
+
+    # نکته‌ی مهم درباره‌ی ترتیب آرگومان‌های ffmpeg: در دستورات چندخروجی، هر
+    # گروه از آپشن‌ها باید بلافاصله قبل از فایل خروجی خودش بیاید، نه همه با
+    # هم در انتها — وگرنه ffmpeg همه‌چیز را روی اولین فایل خروجی اعمال می‌کند.
+    base_cmd = [
+        "ffmpeg", "-y", "-i", url,
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart",
+        out_path,
+    ]
+    sub_temp_paths = []
+    cmd = list(base_cmd)
+    for i, s in enumerate(sub_streams):
+        srt_path = os.path.join(Config.SUBS_DIR, f"{item_id}_{i}_tmp.srt")
+        cmd += ["-map", f"0:{s['index']}", "-c:s", "srt", srt_path]
+        sub_temp_paths.append((s, srt_path))
+
+    try:
+        result = _run_ffmpeg(cmd)
+        if result.returncode != 0 and sub_temp_paths:
+            # شاید استخراج زیرنویس باعث خطا شده؛ بدون زیرنویس دوباره امتحان کن
+            # تا حداقل خود ویدیو از دست نره.
+            for _, p in sub_temp_paths:
+                if os.path.exists(p):
+                    os.remove(p)
+            sub_temp_paths = []
+            result = _run_ffmpeg(base_cmd)
+
+        if result.returncode != 0:
+            stderr_txt = result.stderr.decode(errors="ignore")
+            if "No space left" in stderr_txt:
+                detail = "فضای دیسک سرور در حین تبدیل تمام شد"
+            else:
+                lines = stderr_txt.strip().splitlines()
+                detail = lines[-1] if lines else f"ffmpeg exit code {result.returncode}"
+            fail(f"تبدیل ویدیو ناموفق بود: {detail}")
+            return
+
+        new_subs = []
+        for s, srt_path in sub_temp_paths:
+            if os.path.exists(srt_path) and os.path.getsize(srt_path) > 10:
+                sub_id = new_id()
+                vtt_name = f"{sub_id}.vtt"
+                try:
+                    convert_srt_to_vtt(srt_path, os.path.join(Config.SUBS_DIR, vtt_name))
+                    label = s["title"] or LANG_LABELS.get(s["lang"], s["lang"]) or f"زیرنویس {len(new_subs) + 1}"
+                    new_subs.append({
+                        "id": sub_id, "label": label, "lang": s["lang"] or "und",
+                        "url": f"/stream/media/subs/{vtt_name}",
+                    })
+                except Exception:
+                    pass
+            if os.path.exists(srt_path):
+                try:
+                    os.remove(srt_path)
+                except OSError:
+                    pass
+
+        with LOCK:
+            item = room.find_item(item_id)
+            if item:
+                item["src"] = f"/stream/media/uploads/{item_id}.mp4"
+                item["status"] = "ready"
+                item.pop("error", None)
+                item.setdefault("subtitles", []).extend(new_subs)
+                room.save()
+                title = item["title"]
+            else:
+                title = ""
+        broadcast_state()
+        broadcast_notify("media_ready", requester_name, title=title)
+        if new_subs:
+            broadcast_notify("subtitle_auto_extracted", requester_name, title=title, count=len(new_subs))
+
+    except subprocess.TimeoutExpired:
+        fail("زمان تبدیل ویدیو بیش از حد طول کشید (timeout)")
+    except Exception as e:
+        fail(str(e))
+
+
+# ============================== صفحات ==============================
+@app.route("/stream/")
+@app.route("/stream")
+def index():
+    return render_template("index.html")
+
+
+# ====================== فایل‌های مدیا (fallback) ======================
+# در محیط Production بهتر است Nginx مستقیماً این مسیرها را serve کند
+# (سریع‌تر و با پشتیبانی صحیح از Range requests). این روت‌ها صرفاً برای
+# اجرای مستقل/توسعه هستند.
+@app.route("/stream/media/uploads/<path:filename>")
+def serve_upload(filename):
+    return send_from_directory(Config.UPLOAD_DIR, filename, conditional=True)
+
+
+@app.route("/stream/media/subs/<path:filename>")
+def serve_sub(filename):
+    return send_from_directory(Config.SUBS_DIR, filename, conditional=True)
+
+
+# ============================== REST API ==============================
+@app.route("/stream/api/state")
+def api_state():
+    return jsonify(room.to_public_dict())
+
+
+@app.route("/stream/api/upload", methods=["POST"])
+def api_upload():
+    f = request.files.get("file")
+    title = (request.form.get("title") or "").strip()
+    name = (request.form.get("name") or "ناشناس").strip()
+
+    if not f or f.filename == "":
+        return jsonify({"error": "فایلی انتخاب نشده"}), 400
+    if not allowed(f.filename, Config.ALLOWED_VIDEO_EXT):
+        return jsonify({"error": "فرمت ویدیو پشتیبانی نمی‌شود"}), 400
+
+    item_id = new_id()
+    ext = f.filename.rsplit(".", 1)[-1].lower()
+    fname = f"{item_id}.{ext}"
+    raw_path = os.path.join(Config.UPLOAD_DIR, fname)
+    f.save(raw_path)
+
+    if ext == "mkv":
+        mp4_fname = f"{item_id}.mp4"
+        mp4_path = os.path.join(Config.UPLOAD_DIR, mp4_fname)
+        if free_space_mb(Config.UPLOAD_DIR) < MIN_FREE_MB_FOR_TRANSCODE:
+            pass
+        else:
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-i", raw_path,
+                        "-c:v", "copy",
+                        "-c:a", "aac",
+                        "-movflags", "+faststart",
+                        mp4_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                os.remove(raw_path)
+                fname = mp4_fname
+                ext = "mp4"
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # ffmpeg نصب نیست یا خطا داد — فایل MKV اصلی نگه داشته می‌شه
+                if os.path.exists(mp4_path):
+                    try:
+                        os.remove(mp4_path)
+                    except OSError:
+                        pass
+
+    item = {
+        "id": item_id,
+        "type": "file",
+        "title": title or f.filename,
+        "src": f"/stream/media/uploads/{fname}",
+        "subtitles": [],
+        "audio_tracks": [],
+        "added_by": name,
+        "added_at": time.time(),
+        "status": "ready",
+    }
+    with LOCK:
+        room.add_item(item)
+        room.save()
+    broadcast_state()
+    broadcast_notify("playlist_add", name, title=item["title"])
+    return jsonify(item)
+
+
+@app.route("/stream/api/add-url", methods=["POST"])
+def api_add_url():
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    title = (data.get("title") or "").strip()
+    name = (data.get("name") or "ناشناس").strip()
+
+    if not url:
+        return jsonify({"error": "لینک خالی است"}), 400
+
+    item_id = new_id()
+    is_mkv = url_ext(url) == "mkv"
+
+    item = {
+        "id": item_id,
+        "type": "url",
+        "title": title or url.rsplit("/", 1)[-1] or "ویدیو",
+        # برای MKV هنوز src نهایی آماده نیست؛ تا تبدیل کامل بشه None می‌مونه
+        "src": None if is_mkv else url,
+        "subtitles": [],
+        "audio_tracks": [],
+        "added_by": name,
+        "added_at": time.time(),
+        "status": "processing" if is_mkv else "ready",
+    }
+    with LOCK:
+        room.add_item(item)
+        room.save()
+    broadcast_state()
+    if is_mkv:
+        broadcast_notify("playlist_add_processing", name, title=item["title"])
+        gevent.spawn(_process_remote_mkv, item_id, url, name)
+    else:
+        broadcast_notify("playlist_add", name, title=item["title"])
+    return jsonify(item)
+
+
+@app.route("/stream/api/live/new-key", methods=["POST"])
+def api_new_key():
+    key = uuid.uuid4().hex[:10]
+    return jsonify(
+        {
+            "key": key,
+            "push_url": Config.RTMP_PUSH_URL_TEMPLATE.format(key=key),
+            "playback_url": Config.HLS_PLAYBACK_URL_TEMPLATE.format(key=key),
+        }
+    )
+
+
+@app.route("/stream/api/add-live", methods=["POST"])
+def api_add_live():
+    data = request.get_json(force=True, silent=True) or {}
+    playback_url = (data.get("playback_url") or "").strip()
+    title = (data.get("title") or "پخش زنده").strip()
+    name = (data.get("name") or "ناشناس").strip()
+    key = (data.get("key") or "").strip()
+
+    if not playback_url:
+        return jsonify({"error": "آدرس پخش (HLS) خالی است"}), 400
+
+    item_id = new_id()
+    item = {
+        "id": item_id,
+        "type": "live",
+        "title": title,
+        "src": playback_url,
+        "key": key,
+        "subtitles": [],
+        "audio_tracks": [],
+        "added_by": name,
+        "added_at": time.time(),
+        "status": "ready",
+    }
+    with LOCK:
+        room.add_item(item)
+        room.save()
+    broadcast_state()
+    broadcast_notify("playlist_add_live", name, title=title)
+    return jsonify(item)
+
+
+@app.route("/stream/api/playlist/<item_id>", methods=["DELETE"])
+def api_remove_item(item_id):
+    name = request.args.get("name", "ناشناس")
+    with LOCK:
+        item = room.find_item(item_id)
+        title = item["title"] if item else "ویدیو"
+        room.remove_item(item_id)
+        room.save()
+    broadcast_state()
+    broadcast_notify("playlist_remove", name, title=title)
+    return jsonify({"ok": True})
+
+
+@app.route("/stream/api/subtitle-upload", methods=["POST"])
+def api_subtitle_upload():
+    f = request.files.get("file")
+    item_id = request.form.get("item_id")
+    label = (request.form.get("label") or "زیرنویس").strip()
+    lang = (request.form.get("lang") or "fa").strip()
+    name = (request.form.get("name") or "ناشناس").strip()
+
+    if not f or not item_id:
+        return jsonify({"error": "ورودی ناقص است"}), 400
+    if not allowed(f.filename, Config.ALLOWED_SUB_EXT):
+        return jsonify({"error": "فقط فایل vtt یا srt پذیرفته می‌شود"}), 400
+
+    sub_id = new_id()
+    ext = f.filename.rsplit(".", 1)[-1].lower()
+    raw_path = os.path.join(Config.SUBS_DIR, f"{sub_id}.{ext}")
+    f.save(raw_path)
+
+    if ext == "srt":
+        vtt_name = f"{sub_id}.vtt"
+        convert_srt_to_vtt(raw_path, os.path.join(Config.SUBS_DIR, vtt_name))
+        url = f"/stream/media/subs/{vtt_name}"
+    else:
+        url = f"/stream/media/subs/{sub_id}.{ext}"
+
+    with LOCK:
+        item = room.find_item(item_id)
+        if not item:
+            return jsonify({"error": "آیتم پلی‌لیست پیدا نشد"}), 404
+        item.setdefault("subtitles", []).append(
+            {"id": sub_id, "label": label, "lang": lang, "url": url}
+        )
+        room.save()
+    broadcast_state()
+    broadcast_notify("subtitle_add", name, title=item.get("title", ""), label=label)
+    return jsonify({"id": sub_id, "url": url})
+
+
+@app.route("/stream/api/subtitle-url", methods=["POST"])
+def api_subtitle_url():
+    data = request.get_json(force=True, silent=True) or {}
+    item_id = data.get("item_id")
+    url = (data.get("url") or "").strip()
+    label = (data.get("label") or "زیرنویس").strip()
+    lang = (data.get("lang") or "fa").strip()
+    name = (data.get("name") or "ناشناس").strip()
+
+    if not item_id or not url:
+        return jsonify({"error": "ورودی ناقص است"}), 400
+
+    ext = url_ext(url)
+    if ext not in ("vtt", "srt"):
+        return jsonify({"error": "فقط لینک مستقیم به فایل vtt یا srt پذیرفته می‌شود"}), 400
+
+    sub_id = new_id()
+    raw_path = os.path.join(Config.SUBS_DIR, f"{sub_id}.{ext}")
+    try:
+        _download_to_file(url, raw_path, timeout=15)
+    except Exception as e:
+        return jsonify({"error": f"دریافت فایل زیرنویس ناموفق بود: {e}"}), 400
+
+    if ext == "srt":
+        vtt_name = f"{sub_id}.vtt"
+        convert_srt_to_vtt(raw_path, os.path.join(Config.SUBS_DIR, vtt_name))
+        sub_url = f"/stream/media/subs/{vtt_name}"
+    else:
+        sub_url = f"/stream/media/subs/{sub_id}.{ext}"
+
+    with LOCK:
+        item = room.find_item(item_id)
+        if not item:
+            return jsonify({"error": "آیتم پلی‌لیست پیدا نشد"}), 404
+        item.setdefault("subtitles", []).append(
+            {"id": sub_id, "label": label, "lang": lang, "url": sub_url}
+        )
+        room.save()
+    broadcast_state()
+    broadcast_notify("subtitle_add", name, title=item.get("title", ""), label=label)
+    return jsonify({"id": sub_id, "url": sub_url})
+
+
+@app.route("/stream/api/audio-track", methods=["POST"])
+def api_add_audio_track():
+    data = request.get_json(force=True, silent=True) or {}
+    item_id = data.get("item_id")
+    label = (data.get("label") or "دوبله").strip()
+    url = (data.get("url") or "").strip()
+    name = (data.get("name") or "ناشناس").strip()
+
+    if not item_id or not url:
+        return jsonify({"error": "ورودی ناقص است"}), 400
+
+    with LOCK:
+        item = room.find_item(item_id)
+        if not item:
+            return jsonify({"error": "آیتم پلی‌لیست پیدا نشد"}), 404
+        item.setdefault("audio_tracks", []).append({"id": new_id(), "label": label, "url": url})
+        room.save()
+    broadcast_state()
+    broadcast_notify("audio_track_add", name, title=item.get("title", ""), label=label)
+    return jsonify({"ok": True})
+
+
+# ============================== Socket.IO ==============================
+@socketio.on("connect")
+def on_connect():
+    emit("state_sync", room.to_public_dict())
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    sid = request.sid
+    with LOCK:
+        user = room.users.pop(sid, None)
+        names = [u["name"] for u in room.users.values()]
+    if user:
+        broadcast_notify("leave", user["name"])
+        socketio.emit("presence", {"online": len(names), "names": names})
+
+
+@socketio.on("join")
+def on_join(data):
+    data = data or {}
+    name = (data.get("name") or "ناشناس").strip()[:24] or "ناشناس"
+    with LOCK:
+        room.users[request.sid] = {"name": name}
+        names = [u["name"] for u in room.users.values()]
+    emit("state_sync", room.to_public_dict())
+    broadcast_notify("join", name)
+    socketio.emit("presence", {"online": len(names), "names": names})
+
+
+@socketio.on("control")
+def on_control(data):
+    data = data or {}
+    action = data.get("action")
+    name = (data.get("name") or "ناشناس").strip() or "ناشناس"
+
+    with LOCK:
+        if action == "play":
+            room.set_play(float(data.get("at", room.current_position())))
+        elif action == "pause":
+            room.set_pause(float(data.get("at", room.current_position())))
+        elif action == "seek":
+            room.seek(float(data.get("to", 0)))
+        elif action == "rate":
+            room.set_rate(float(data.get("rate", 1.0)))
+        elif action == "select":
+            room.select_item(int(data.get("index")))
+        else:
+            return
+        room.save()
+        payload = room.to_public_dict()
+
+    socketio.emit("state_sync", payload, include_self=False)
+    broadcast_notify(f"ctrl_{action}", name, extra=data)
+
+
+@socketio.on("request_sync")
+def on_request_sync():
+    emit("state_sync", room.to_public_dict())
+
+
+if __name__ == "__main__":
+    from gevent import pywsgi
+    from geventwebsocket.handler import WebSocketHandler
+    server = pywsgi.WSGIServer(
+        (Config.HOST, Config.PORT),
+        app,
+        handler_class=WebSocketHandler,
+    )
+    print(f" * Running on http://{Config.HOST}:{Config.PORT} (gevent)")
+    server.serve_forever()

@@ -1,0 +1,28 @@
+[Unit]
+Description=vergoboy.ir — Watch Party Stream Player (Flask + Socket.IO)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/stream
+Environment="STREAM_HOST=127.0.0.1"
+Environment="STREAM_PORT=8801"
+Environment="STREAM_SECRET_KEY=CHANGE_THIS_TO_A_RANDOM_SECRET"
+# اگه ساختار سرور RTMP/HLS موجودت با مقدار پیش‌فرض config.py فرق دارد،
+# همین‌جا override کن (در غیر این صورت این دو خط رو حذف کن):
+# Environment="STREAM_RTMP_PUSH_TEMPLATE=rtmp://vergoboy.ir:1935/live/{key}"
+# Environment="STREAM_HLS_PLAYBACK_TEMPLATE=https://vergoboy.ir/hls/{key}/index.m3u8"
+ExecStart=/opt/stream/venv/bin/python3 /opt/stream/app.py
+Restart=always
+RestartSec=3
+
+# محدودیت‌های امنیتی پایه
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/stream/media /opt/stream/data
+
+[Install]
+WantedBy=multi-user.target
