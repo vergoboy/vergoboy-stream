@@ -75,6 +75,7 @@ export function Player({
   const [activeCueText, setActiveCueText] = useState<string[]>([]);
   const [currentAudioTrackId, setCurrentAudioTrackId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -171,7 +172,7 @@ export function Player({
         const HlsMod = (await import("hls.js")).default;
         if (cancelled) return;
         if (HlsMod.isSupported()) {
-          const hls = new HlsMod({ startLevel: 0 });
+          const hls = new HlsMod({ startLevel: 0, liveSyncDurationCount: Number.MAX_SAFE_INTEGER });
           hlsRef.current = hls;
           hls.on(HlsMod.Events.MANIFEST_PARSED, () => {
             setLevels(hls.levels.map((l) => ({ height: l.height, label: levelLabelFromUrl(l.url) || `${l.height}p` })));
@@ -377,6 +378,32 @@ export function Player({
     return () => clearInterval(t);
   }, [dragging, item?.type]);
 
+  // ---- stall detection: reload HLS if video freezes for ~6s while playing ----
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || item?.type === "live" || !item?.src) return;
+    let lastPos = v.currentTime || 0;
+    let stallCount = 0;
+    const t = setInterval(() => {
+      if (!playing) { lastPos = v.currentTime || 0; stallCount = 0; return; }
+      const pos = v.currentTime || 0;
+      if (pos === lastPos && v.readyState > 1 && !v.seeking) {
+        stallCount++;
+        if (stallCount >= 3) {
+          const hls = hlsRef.current;
+          if (hls) {
+            v.currentTime = pos + 0.01;
+            stallCount = 0;
+          }
+        }
+      } else {
+        stallCount = 0;
+      }
+      lastPos = pos;
+    }, 2000);
+    return () => clearInterval(t);
+  }, [playing, item?.type, item?.src]);
+
   // ---- dub audio track sync ----
   useEffect(() => {
     const v = videoRef.current;
@@ -496,6 +523,10 @@ export function Player({
         case "M":
           setMuted((m) => !m);
           break;
+        case "d":
+        case "D":
+          setShowDebug((s) => !s);
+          break;
         case "f":
         case "F":
           toggleFullscreen();
@@ -544,6 +575,10 @@ export function Player({
   const processing = !item || item.status === "queued" || item.status === "encoding" || item.status === "error";
   const def = defaultRendition(item);
   const defProgress = def ? transcodeProgress[`${item?.id}:${def.label}`] : undefined;
+  const totalDuration = defProgress?.duration ?? duration;
+  const encodedSeconds = defProgress?.encoded_seconds ?? 0;
+
+  const [debugInfo, setDebugInfo] = useState<Record<string, string> | null>(null);
 
   return (
     <>
@@ -677,34 +712,42 @@ export function Player({
           }`}
         >
           <div className="mb-2 flex items-center gap-2.5">
-            <span className="min-w-[46px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]">{formatTime(curTime)}</span>
-            <input
-              type="range"
-              min={0}
-              max={duration || 0}
-              step={0.1}
-              value={dragging ? dragValueRef.current : curTime}
-              disabled={item?.type === "live"}
-              onMouseDown={() => setDragging(true)}
-              onTouchStart={() => setDragging(true)}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                dragValueRef.current = v;
-                setCurTime(v);
-                const vid = videoRef.current;
-                if (vid) vid.currentTime = v;
-              }}
-              onMouseUp={() => {
-                setDragging(false);
-                seek(dragValueRef.current);
-              }}
-              onTouchEnd={() => {
-                setDragging(false);
-                seek(dragValueRef.current);
-              }}
-              className="h-1.5 flex-1 cursor-pointer accent-[color:var(--color-amber)]"
-            />
-            <span className="min-w-[46px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]">{formatTime(duration)}</span>
+            <span className="min-w-[90px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]" dir="ltr">{formatTime(curTime)}{isFinite(totalDuration) && totalDuration > 0 ? ` / ${formatTime(totalDuration)}` : ""}</span>
+            <div className="relative flex-1">
+              {!processing && encodedSeconds > 0 && encodedSeconds < totalDuration && (
+                <div
+                  className="pointer-events-none absolute bottom-0 left-0 z-[1] h-1.5 rounded-full bg-white/15"
+                  style={{ width: `${(encodedSeconds / totalDuration) * 100}%` }}
+                />
+              )}
+              <input
+                type="range"
+                min={0}
+                max={isFinite(totalDuration) ? totalDuration || 0 : (duration || 0)}
+                step={0.1}
+                value={dragging ? dragValueRef.current : curTime}
+                disabled={item?.type === "live"}
+                onMouseDown={() => setDragging(true)}
+                onTouchStart={() => setDragging(true)}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  dragValueRef.current = v;
+                  setCurTime(v);
+                  const vid = videoRef.current;
+                  if (vid) vid.currentTime = v;
+                }}
+                onMouseUp={() => {
+                  setDragging(false);
+                  seek(dragValueRef.current);
+                }}
+                onTouchEnd={() => {
+                  setDragging(false);
+                  seek(dragValueRef.current);
+                }}
+                className="relative z-[2] h-1.5 w-full cursor-pointer accent-[color:var(--color-amber)]"
+              />
+            </div>
+            <span className="min-w-[90px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]" dir="ltr">{isFinite(totalDuration) && totalDuration > 0 ? formatTime(totalDuration) : formatTime(duration)}</span>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -826,6 +869,48 @@ export function Player({
         </div>
       )}
       </div>
+
+      {showDebug && (
+        <div className="fixed bottom-4 left-4 z-[99999] rounded-xl border border-[color:var(--color-border)] bg-black/85 p-3 font-mono text-[11px] text-[color:var(--color-ink-muted)] backdrop-blur-md" dir="ltr">
+          <div className="mb-1.5 flex items-center justify-between gap-4">
+            <span className="font-bold text-white">Debug</span>
+            <button onClick={() => setShowDebug(false)} className="text-xs text-[color:var(--color-ink-dim)] hover:text-white">✕</button>
+          </div>
+          {(() => {
+            const v = videoRef.current;
+            const h = hlsRef.current;
+            const items: Record<string, string | number | undefined | null> = {
+              "src": item?.src ? item.src.substring(0, 60) + "…" : null,
+              "status": item?.status,
+              "playing": playing ? "✓" : "✗",
+              "curTime": v ? formatTime(v.currentTime) : "—",
+              "total": formatTime(totalDuration),
+              "encoded": formatTime(encodedSeconds),
+              "expected": isFinite(expectedPositionRef.current()) ? formatTime(expectedPositionRef.current() / 1000) : "—",
+              "frontier": isFinite(encodedFrontierRef.current()) ? formatTime(encodedFrontierRef.current()) : "∞",
+              "readyState": v ? v.readyState : "—",
+              "paused": v ? (v.paused ? "✓" : "✗") : "—",
+              "seeking": v ? (v.seeking ? "✓" : "✗") : "—",
+              "buffered": v && v.buffered.length > 0 ? `${formatTime(v.buffered.start(0))} – ${formatTime(v.buffered.end(v.buffered.length - 1))}` : "—",
+              "level": h ? h.currentLevel : "—",
+              "pct": defProgress?.pct ?? "—",
+              "dubTrack": currentAudioTrackId || "—",
+            };
+            return (
+              <table className="border-collapse">
+                <tbody>
+                  {Object.entries(items).map(([k, v]) => (
+                    <tr key={k}>
+                      <td className="pr-3 text-right text-[color:var(--color-ink-dim)]">{k}</td>
+                      <td className="max-w-[220px] truncate text-left text-white">{v ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          })()}
+        </div>
+      )}
     </>
   );
 }
