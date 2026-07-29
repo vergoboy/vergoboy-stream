@@ -307,7 +307,7 @@ export function Player({
             expected = Math.max(0, frontier - MARGIN);
           }
         }
-        if (Math.abs((v.currentTime || 0) - expected) > 1.2) {
+        if (!v.seeking && Math.abs((v.currentTime || 0) - expected) > 1.2) {
           try { v.currentTime = expected; } catch {}
         }
       }
@@ -557,7 +557,7 @@ export function Player({
             ? `fixed inset-0 z-[9999] flex flex-col bg-black ${cursorHidden ? "cursor-none" : ""}`
             : "relative rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md"
         }
-        style={fullscreen ? { width: "100dvw", height: "100dvh" } : undefined}
+        style={fullscreen ? { width: "100vw", height: "100vh" } : undefined}
       >
         <div
           className={`relative flex items-center justify-center overflow-hidden bg-black ${
