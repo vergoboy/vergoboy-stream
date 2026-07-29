@@ -1,0 +1,21 @@
+[package]
+name = "vergoboy-stream"
+version = "0.1.0"
+description = "vergoboy.ir watch-party desktop/mobile shell"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "vergoboy_stream_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "vergoboy-stream"
+path = "src/main.rs"

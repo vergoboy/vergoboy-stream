@@ -33,3 +33,8 @@ dist/
 media/
 
 data/
+
+# Build artifacts
+webapp-out/
+.npm-cache/
+.config/

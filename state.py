@@ -141,8 +141,38 @@ class RoomState:
                 self.current_index = d.get("current_index")
                 self.position = d.get("position", 0.0)
                 self.rate = d.get("rate", 1.0)
+                self._migrate_playlist()
         except Exception as e:
             print("[state] load error:", e)
+
+    def _migrate_playlist(self):
+        """Backfills fields that older app.py versions didn't write yet, so
+        state.json saved by a previous deploy doesn't confuse the current
+        code (or the frontend) into thinking already-finished renditions
+        are still being encoded. Safe to run every startup — a no-op once
+        everything has already been migrated once."""
+        changed = False
+        for item in self.playlist:
+            renditions = item.get("renditions")
+            if not renditions:
+                continue
+            item_done = item.get("status") in ("complete", "ready")
+            has_default = any(r.get("is_default") for r in renditions)
+            for i, r in enumerate(renditions):
+                if "status" not in r:
+                    r["status"] = "complete" if item_done else "pending"
+                    changed = True
+                if "vbr" not in r:
+                    r["vbr"] = r.get("vbr", "")
+                    changed = True
+                if "abr" not in r:
+                    r["abr"] = r.get("abr", "")
+                    changed = True
+                if "is_default" not in r:
+                    r["is_default"] = (not has_default and i == 0)
+                    changed = True
+        if changed:
+            self.save()
 
 
 class ChatState:

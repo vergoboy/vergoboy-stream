@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+/* =====================================================================
+   Design tokens — "movie night at a friend's place"
+   Warm, dim, lived-in — not a corporate dark-SaaS dashboard. The sofa is
+   the signature element; everything else stays quiet so it doesn't compete.
+   ===================================================================== */
+@theme {
+  --color-bg: #131019;
+  --color-bg-soft: #1b1622;
+  --color-bg-elevated: #241d2d;
+  --color-border: #322a3a;
+
+  /* lamp-glow amber — the one bold accent, used sparingly */
+  --color-amber: #e8a15c;
+  --color-amber-soft: #f2c087;
+
+  /* velvet plum — sofa, secondary surfaces, chat bubbles */
+  --color-plum: #6e2c55;
+  --color-plum-soft: #8c3f6e;
+  --color-plum-deep: #3f1a33;
+
+  /* presence / online — deliberately distinct from "live" red */
+  --color-teal: #4fb8ac;
+
+  /* live badges, destructive actions only */
+  --color-coral: #e8636a;
+
+  --color-ink: #f2e9e1;
+  --color-ink-muted: #b8a99c;
+  --color-ink-dim: #6b5c54;
+
+  --font-sans: "Vazirmatn", "Tahoma", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrainsMono", ui-monospace, "SFMono-Regular", monospace;
+
+  --shadow-lamp: 0 20px 60px -20px rgba(232, 161, 92, 0.35);
+  --shadow-soft: 0 10px 30px -12px rgba(0, 0, 0, 0.5);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  min-height: 100dvh;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Ambient room glow — a couple of soft radial lamps, not a flat gradient wash. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 40% at 15% 10%, rgba(232, 161, 92, 0.1) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 45% at 90% 15%, rgba(110, 44, 85, 0.16) 0%, transparent 60%),
+    radial-gradient(ellipse 70% 50% at 50% 100%, rgba(79, 184, 172, 0.06) 0%, transparent 60%);
+}
+
+::selection {
+  background: rgba(232, 161, 92, 0.35);
+  color: #fff;
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-plum-soft);
+  border-radius: 99px;
+}
+
+[dir="ltr"] {
+  unicode-bidi: isolate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
