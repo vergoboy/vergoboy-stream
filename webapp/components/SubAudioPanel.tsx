@@ -58,9 +58,13 @@ export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; 
               onSubmit={async (e) => {
                 e.preventDefault();
                 if (!subFile || !effectiveTarget) return;
-                await api.subtitleUpload(subFile, effectiveTarget, subLabel || "زیرنویس", myName);
-                setSubLabel("");
-                setSubFile(null);
+                try {
+                  await api.subtitleUpload(subFile, effectiveTarget, subLabel || "زیرنویس", myName);
+                  setSubLabel("");
+                  setSubFile(null);
+                } catch (err) {
+                  alert(err instanceof Error ? err.message : "خطا در آپلود زیرنویس");
+                }
               }}
               className="flex flex-col gap-2.5"
             >
@@ -75,9 +79,13 @@ export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; 
               onSubmit={async (e) => {
                 e.preventDefault();
                 if (!subUrl.trim() || !effectiveTarget) return;
-                await api.subtitleUrl(effectiveTarget, subUrl.trim(), subLabel || "زیرنویس", myName);
-                setSubLabel("");
-                setSubUrl("");
+                try {
+                  await api.subtitleUrl(effectiveTarget, subUrl.trim(), subLabel || "زیرنویس", myName);
+                  setSubLabel("");
+                  setSubUrl("");
+                } catch (err) {
+                  alert(err instanceof Error ? err.message : "خطا در افزودن زیرنویس");
+                }
               }}
               className="flex flex-col gap-2.5"
             >

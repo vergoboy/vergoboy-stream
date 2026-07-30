@@ -492,7 +492,9 @@ export function Player({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName?.toLowerCase();
-      if (["input", "textarea", "select"].includes(tag)) return;
+      const type = (e.target as HTMLInputElement).type?.toLowerCase();
+      if (tag === "textarea" || tag === "select") return;
+      if (tag === "input" && type !== "range") return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const v = videoRef.current;
       switch (e.key) {
@@ -605,7 +607,11 @@ export function Player({
             preload="metadata"
             onClick={togglePlay}
             className={`h-full w-full ${fullscreen ? "object-cover" : "object-contain"}`}
-          />
+        >
+          {item?.subtitles?.map((s) => (
+            <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={s.url} default={false} />
+          ))}
+        </video>
           <audio ref={dubAudioRef} preload="auto" />
 
         {!processing && activeCueText.length > 0 && (
@@ -695,9 +701,6 @@ export function Player({
           </div>
         )}
 
-        {item?.subtitles?.map((s) => (
-          <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={s.url} default={false} />
-        ))}
       </div>
 
       {!processing && (

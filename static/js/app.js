@@ -566,7 +566,7 @@
       dbg("PLAYER", `subtitle track added: ${s.label}`, s.url);
     });
     setTimeout(() => {
-      for (const t of video.textTracks) t.mode = "hidden";
+      for (const t of video.textTracks) t.mode = "showing";
     }, 100);
 
     liveBadge.hidden = item.type !== "live";
