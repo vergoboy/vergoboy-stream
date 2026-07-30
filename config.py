@@ -53,7 +53,7 @@ class Config:
     # to status "ready" and playback can start, even though encoding of the
     # rest of the file continues in the background. Kept low so first
     # playback is available well inside the ~2 minute target.
-    HLS_READY_AFTER_SECONDS = int(os.environ.get("STREAM_HLS_READY_AFTER_SECONDS", "8"))
+    HLS_READY_AFTER_SECONDS = int(os.environ.get("STREAM_HLS_READY_AFTER_SECONDS", "12"))
 
     # ---------------------------------------------------------------
     # Chat (in-memory only, never written to state.json / disk)

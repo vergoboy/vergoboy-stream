@@ -172,7 +172,25 @@ export function Player({
         const HlsMod = (await import("hls.js")).default;
         if (cancelled) return;
         if (HlsMod.isSupported()) {
-          const hls = new HlsMod({ startLevel: 0, liveSyncDurationCount: Number.MAX_SAFE_INTEGER });
+          const hls = new HlsMod({
+          enableWorker: true,
+          startLevel: 0,
+          lowLatencyMode: false,
+          backBufferLength: 90,
+          maxBufferLength: 60,
+          maxMaxBufferLength: 120,
+          maxBufferSize: 60 * 1024 * 1024,
+          maxBufferHole: 0.5,
+          highBufferWatchdogPeriod: 2,
+          nudgeOffset: 0.1,
+          nudgeMaxRetry: 10,
+          manifestLoadingMaxRetry: 15,
+          manifestLoadingRetryDelay: 1000,
+          levelLoadingMaxRetry: 15,
+          levelLoadingRetryDelay: 1000,
+          fragLoadingMaxRetry: 15,
+          fragLoadingRetryDelay: 1000,
+        });
           hlsRef.current = hls;
           hls.on(HlsMod.Events.MANIFEST_PARSED, () => {
             setLevels(hls.levels.map((l) => ({ height: l.height, label: levelLabelFromUrl(l.url) || `${l.height}p` })));
@@ -184,7 +202,28 @@ export function Player({
             setCurrentLevel(data.level);
           });
           hls.on(HlsMod.Events.ERROR, (_e, data) => {
-            if (data.fatal) console.error("[hls.js fatal]", data);
+            if (data.fatal) {
+              switch (data.type) {
+                case HlsMod.ErrorTypes.NETWORK_ERROR:
+                  console.warn("[hls.js] Network error, recovering...", data);
+                  hls.startLoad();
+                  break;
+                case HlsMod.ErrorTypes.MEDIA_ERROR:
+                  console.warn("[hls.js] Media error, recovering...", data);
+                  hls.recoverMediaError();
+                  break;
+                default:
+                  console.error("[hls.js] Unrecoverable error:", data);
+                  hls.destroy();
+                  hlsRef.current = null;
+                  break;
+              }
+            } else if (data.details === HlsMod.ErrorDetails.BUFFER_STALLED_ERROR) {
+              hls.startLoad();
+              if (v && !v.paused && v.readyState >= 2) {
+                v.play().catch(() => {});
+              }
+            }
           });
           hls.loadSource(item!.src!);
           hls.attachMedia(v);
@@ -600,22 +639,24 @@ export function Player({
         onTouchStart={fullscreen ? () => { resetCursorTimer(); } : undefined}
         className={
           fullscreen
-            ? `fixed inset-0 z-[9999] flex flex-col bg-black ${cursorHidden ? "cursor-none" : ""}`
+            ? `fixed inset-0 z-[9999] bg-black overflow-hidden select-none ${cursorHidden ? "cursor-none" : ""}`
             : "relative rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md"
         }
         style={fullscreen ? { width: "100vw", height: "100vh" } : undefined}
       >
         <div
-          className={`relative flex items-center justify-center overflow-hidden bg-black ${
-            fullscreen ? "flex-1" : "aspect-video rounded-t-3xl"
-          }`}
+          className={
+            fullscreen
+              ? "absolute inset-0 z-[1] flex items-center justify-center bg-black overflow-hidden"
+              : "relative flex items-center justify-center overflow-hidden bg-black aspect-video rounded-t-3xl"
+          }
         >
           <video
             ref={videoRef}
             playsInline
             preload="metadata"
             onClick={togglePlay}
-            className={`h-full w-full ${fullscreen ? "object-cover" : "object-contain"}`}
+            className="h-full w-full object-contain"
         >
           {item?.subtitles?.map((s) => (
             <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={s.url} default={false} />
@@ -710,17 +751,15 @@ export function Player({
           </div>
         )}
 
-      </div>
-
       {!processing && (
         <div
           dir="ltr"
-          className={`relative z-10 p-3.5 pb-4 transition-opacity duration-300 ${
+          className={`transition-opacity duration-300 ${
             fullscreen
-              ? `absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent pt-9 ${
+              ? `absolute bottom-0 left-0 right-0 z-[20] p-4 sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent ${
                   cursorHidden ? "pointer-events-none opacity-0" : "opacity-100"
                 }`
-              : ""
+              : "relative z-10 p-3.5 pb-4 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/90 rounded-b-3xl"
           }`}
         >
           <div className="mb-2 flex items-center gap-2.5">
@@ -880,6 +919,8 @@ export function Player({
           </div>
         </div>
       )}
+      </div>
+
       </div>
 
       {showDebug && (
