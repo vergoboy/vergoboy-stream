@@ -42,7 +42,7 @@ class Config:
     ]
     HLS_MAX_RENDITIONS = 3
     HLS_SEGMENT_SECONDS = 4
-    HLS_PRESET = os.environ.get("STREAM_HLS_PRESET", "veryfast")  # was "ultrafast"
+    HLS_PRESET = os.environ.get("STREAM_HLS_PRESET", "ultrafast")  # was "ultrafast"
 
     # Max number of ffmpeg transcode jobs allowed to run at the same time.
     # Extra items go to status "queued" until a slot frees up. Protects the
@@ -53,7 +53,7 @@ class Config:
     # to status "ready" and playback can start, even though encoding of the
     # rest of the file continues in the background. Kept low so first
     # playback is available well inside the ~2 minute target.
-    HLS_READY_AFTER_SECONDS = int(os.environ.get("STREAM_HLS_READY_AFTER_SECONDS", "12"))
+    HLS_READY_AFTER_SECONDS = int(os.environ.get("STREAM_HLS_READY_AFTER_SECONDS", "20"))
 
     # ---------------------------------------------------------------
     # Chat (in-memory only, never written to state.json / disk)

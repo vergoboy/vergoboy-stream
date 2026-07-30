@@ -1,10 +1,13 @@
 "use client";
 
+import { Play, Trash2, Clock, CheckCircle2, AlertTriangle, Loader2, Radio, Video, Link, FileVideo } from "lucide-react";
+
+
 import { AnimatePresence, motion } from "framer-motion";
 import { api } from "@/lib/api";
 import type { PlaylistItem, TranscodeProgress } from "@/lib/types";
 
-const ICONS: Record<string, string> = { live: "🔴", youtube: "▶️", url: "🔗", file: "🎬" };
+const ICONS: Record<string, React.ReactNode> = { live: <Radio className="w-3.5 h-3.5 text-rose-500 animate-pulse inline" />, youtube: <Video className="w-3.5 h-3.5 text-red-500 inline" />, url: <Link className="w-3.5 h-3.5 text-blue-400 inline" />, file: <FileVideo className="w-3.5 h-3.5 text-amber-400 inline" /> };
 
 function defaultRendition(item: PlaylistItem) {
   return item.renditions?.find((r) => r.is_default) ?? item.renditions?.[0];
@@ -36,7 +39,7 @@ export function Playlist({
             const prog = def ? transcodeProgress[`${item.id}:${def.label}`] : undefined;
             const pct = prog?.pct ?? 0;
             const processing = item.status === "queued" || item.status === "encoding";
-            const icon = processing ? "⏳" : item.status === "error" ? "⚠️" : item.status === "ready" ? "▶️" : ICONS[item.type] || "🎬";
+            const icon = processing ? <Loader2 className="w-4 h-4 animate-spin text-amber-400" /> : item.status === "error" ? <AlertTriangle className="w-4 h-4 text-rose-400" /> : item.status === "ready" ? <Play className="w-3.5 h-3.5 fill-current text-emerald-400" /> : (ICONS[item.type] ?? <FileVideo className="w-3.5 h-3.5 text-amber-400" />);
 
             return (
               <motion.li
@@ -89,7 +92,7 @@ export function Playlist({
                   }}
                   className="shrink-0 rounded-lg px-1.5 py-1 text-[color:var(--color-ink-dim)] hover:bg-[color:var(--color-coral)]/10 hover:text-[color:var(--color-coral)]"
                 >
-                  ✕
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </motion.li>
             );
@@ -112,9 +115,9 @@ function CleanupButton() {
         btn.disabled = true;
         try {
           const data = await api.cleanup();
-          btn.textContent = data.total > 0 ? `✅ ${data.total} فایل یتیم حذف شد` : "✅ هیچ فایل یتیمی پیدا نشد";
+          btn.textContent = data.total > 0 ? `✓ ${data.total} فایل یتیم حذف شد` : "✓ هیچ فایل یتیمی پیدا نشد";
         } catch {
-          btn.textContent = "❌ خطا در پاکسازی";
+          btn.textContent = "⚠ خطا در پاکسازی";
         }
         setTimeout(() => {
           btn.textContent = original;
@@ -124,7 +127,7 @@ function CleanupButton() {
       className="rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3.5 py-2 text-xs text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-60"
       title="حذف فایل‌هایی که در پلی‌لیست نیستند از سرور"
     >
-      🗑 پاکسازی فایل‌های یتیم
+      <Trash2 className="w-4 h-4" /> پاکسازی فایل‌های یتیم
     </button>
   );
 }

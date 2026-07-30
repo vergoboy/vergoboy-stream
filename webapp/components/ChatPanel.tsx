@@ -1,5 +1,8 @@
 "use client";
 
+import { Send, Image, Trash2, X } from "lucide-react";
+
+
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Avatar } from "./Avatar";
@@ -54,7 +57,7 @@ export function ChatPanel({
           onClick={clearChat}
           className="shrink-0 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-xs text-[color:var(--color-ink)] hover:border-[color:var(--color-coral)]/50"
         >
-          🗑 پاک‌کردن چت
+          <Trash2 className="w-4 h-4" /> پاک‌کردن چت
         </button>
       </div>
 
@@ -103,7 +106,7 @@ export function ChatPanel({
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={pendingImage} alt="" className="h-11 w-11 rounded-lg object-cover" />
           <button onClick={() => setPendingImage(null)} className="mr-auto text-[color:var(--color-ink-dim)] hover:text-[color:var(--color-coral)]">
-            ✕
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}

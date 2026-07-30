@@ -1,5 +1,8 @@
 "use client";
 
+import { MessageSquare, ListVideo, Users, Armchair } from "lucide-react";
+
+
 export interface TabDef {
   id: string;
   label: string;

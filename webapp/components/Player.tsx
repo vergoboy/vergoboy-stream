@@ -1,5 +1,29 @@
-/* eslint-disable react-hooks/refs */
 "use client";
+
+import {
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  RotateCw,
+  RotateCcw,
+  Film,
+  Mic,
+  MessageSquare,
+  Palette,
+  Keyboard,
+  Maximize,
+  Minimize,
+  PictureInPicture2,
+  Radio,
+  Loader2,
+  Slash,
+  Check,
+  HelpCircle,
+  Settings,
+} from "lucide-react";
+/* eslint-disable react-hooks/refs */
+
 
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import type Hls from "hls.js";
@@ -123,7 +147,15 @@ export function Player({
   );
 
   const seek = useCallback(
-    (to: number) => requestControl("seek", { to: clampToFrontier(to) }),
+    (to: number) => {
+      const target = clampToFrontier(to);
+      const v = videoRef.current;
+      if (v) {
+        try { v.currentTime = target; } catch {}
+        setCurTime(target);
+      }
+      requestControl("seek", { to: target });
+    },
     [requestControl, clampToFrontier]
   );
 
@@ -691,7 +723,7 @@ export function Player({
 
         {item?.type === "live" && (
           <div className="absolute top-3.5 right-3.5 z-[5] flex items-center gap-1.5 rounded-full bg-[color:var(--color-coral)]/90 px-3 py-1 text-xs font-bold text-white" style={{ animation: "pulse-live 1.8s infinite" }}>
-            🔴 پخش زنده
+            <Radio className="w-3.5 h-3.5 text-white animate-pulse" /> پخش زنده
           </div>
         )}
 
@@ -709,7 +741,7 @@ export function Player({
             }}
             className="absolute inset-0 z-[6] m-auto flex h-20 w-20 items-center justify-center rounded-full border border-white/10 bg-black/55 text-2xl text-white backdrop-blur-sm transition-transform hover:scale-105"
           >
-            ▶
+            <Play className="w-8 h-8 fill-white text-white ml-1" />
           </button>
         )}
 
@@ -804,7 +836,7 @@ export function Player({
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-1">
               <CtrlBtn title="پخش / مکث" main onClick={togglePlay}>
-                {playing ? "⏸" : "▶"}
+                {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
               </CtrlBtn>
               <CtrlBtn title="آیتم قبلی (P)" onClick={onPrev} disabled={!canPrev}>
                 ⏮
@@ -812,14 +844,14 @@ export function Player({
               <CtrlBtn title="آیتم بعدی (N)" onClick={onNext} disabled={!canNext}>
                 ⏭
               </CtrlBtn>
-              <CtrlBtn title="۱۰ ثانیه عقب" onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
+              <CtrlBtn title="۵ ثانیه عقب (کلید ◄)" onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
                 ⏪
               </CtrlBtn>
-              <CtrlBtn title="۱۰ ثانیه جلو" onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
+              <CtrlBtn title="۵ ثانیه جلو (کلید ►)" onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
                 ⏩
               </CtrlBtn>
               <CtrlBtn title="بی‌صدا" onClick={() => setMuted((m) => !m)}>
-                {muted || volume === 0 ? "🔇" : "🔊"}
+                {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </CtrlBtn>
               <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
             </div>
@@ -891,9 +923,9 @@ export function Player({
                 ))}
               </MenuBtn>
 
-              <MenuBtn icon="💬" open={openMenu === "subtitle"} onToggle={() => setOpenMenu(openMenu === "subtitle" ? null : "subtitle")}>
+              <MenuBtn icon={<MessageSquare className="w-4 h-4" />} open={openMenu === "subtitle"} onToggle={() => setOpenMenu(openMenu === "subtitle" ? null : "subtitle")}>
                 <MenuItem active={currentSubIndex === -1} onClick={() => setCurrentSubIndex(-1)}>
-                  🚫 خاموش
+                  <Slash className="w-4 h-4 text-rose-400 inline ml-1.5" /> خاموش
                 </MenuItem>
                 {(item?.subtitles?.length ?? 0) > 0 && <MenuDivider />}
                 {item?.subtitles?.map((s, i) => (
@@ -1008,7 +1040,7 @@ function MenuBtn({
 }: {
   children: React.ReactNode;
   label?: string;
-  icon?: string;
+  icon?: React.ReactNode;
   open: boolean;
   onToggle: () => void;
   disabled?: boolean;

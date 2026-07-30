@@ -1,5 +1,8 @@
 "use client";
 
+import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
+
+
 import { useState } from "react";
 import { api, uploadVideo } from "@/lib/api";
 
@@ -36,7 +39,7 @@ export function AddVideoPanel({ myName }: { myName: string }) {
 
       {mode === "file" && <FileForm myName={myName} />}
       {mode === "url" && <UrlForm myName={myName} />}
-      {mode === "youtube" && <YoutubeForm myName={myName} />}
+      {mode === "youtube" && <VideoForm myName={myName} />}
     </div>
   );
 }
@@ -129,7 +132,7 @@ function UrlForm({ myName }: { myName: string }) {
   );
 }
 
-function YoutubeForm({ myName }: { myName: string }) {
+function VideoForm({ myName }: { myName: string }) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<{ title: string; thumbnail: string; formats: { format_id: string; label: string }[] } | null>(null);
@@ -148,7 +151,7 @@ function YoutubeForm({ myName }: { myName: string }) {
       setFormatId(data.formats[0]?.format_id ?? "__best__");
       setStatus(null);
     } catch (err) {
-      setStatus({ msg: `❌ ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
+      setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
     }
     setLoading(false);
   }
@@ -159,13 +162,13 @@ function YoutubeForm({ myName }: { myName: string }) {
     setStatus({ msg: "⏳ در حال دریافت لینک مستقیم با کیفیت انتخابی… (۱۵–۳۰ ثانیه)" });
     try {
       const data = await api.addYoutube(url.trim(), formatId, customTitle || preview?.title || "", myName);
-      setStatus({ msg: `✅ «${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });
+      setStatus({ msg: `<CheckCircle className="w-4 h-4 text-emerald-400" /> «${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });
       setPreview(null);
       setUrl("");
       setCustomTitle("");
       setTimeout(() => setStatus(null), 4000);
     } catch (err) {
-      setStatus({ msg: `❌ ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
+      setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
     }
   }
 
@@ -213,7 +216,7 @@ function YoutubeForm({ myName }: { myName: string }) {
           className={primaryBtn}
           style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
         >
-          ➕ افزودن به پلی‌لیست
+          <Plus className="w-4 h-4" /> افزودن به پلی‌لیست
         </button>
       )}
 

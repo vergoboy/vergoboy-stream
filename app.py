@@ -256,6 +256,7 @@ def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vb
         "-c:a", "aac", "-b:a", abr,
         "-f", "hls",
         "-hls_time", str(Config.HLS_SEGMENT_SECONDS),
+        "-hls_list_size", "0",
         "-hls_playlist_type", "event",
         "-hls_flags", "independent_segments+temp_file",
         "-hls_segment_filename", os.path.join(rendition_dir, "seg_%03d.ts"),

@@ -1,5 +1,8 @@
 "use client";
 
+import { Keyboard, X } from "lucide-react";
+
+
 import { AnimatePresence, motion } from "framer-motion";
 
 const ROWS: [string[], string][] = [
@@ -37,9 +40,9 @@ export function ShortcutsModal({ open, onClose }: { open: boolean; onClose: () =
             className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)] p-6 text-right"
           >
             <div className="mb-4 flex items-center justify-between border-b border-[color:var(--color-border)] pb-3.5">
-              <h3 className="m-0 text-base font-bold text-[color:var(--color-ink)]">⌨ کلیدهای میانبر</h3>
+              <h3 className="m-0 text-base font-bold text-[color:var(--color-ink)]"><Keyboard className="w-5 h-5 text-[color:var(--color-amber)]" /> کلیدهای میانبر</h3>
               <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[color:var(--color-border)] bg-white/5 text-[color:var(--color-ink-muted)] hover:text-white">
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
             <div className="flex flex-col gap-2">
