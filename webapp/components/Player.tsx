@@ -404,6 +404,15 @@ export function Player({
     return () => clearInterval(t);
   }, [playing, item?.type, item?.src]);
 
+  // ---- sync track.mode with currentSubIndex so the VTT file actually loads ----
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    for (let i = 0; i < v.textTracks.length; i++) {
+      v.textTracks[i].mode = i === currentSubIndex ? "showing" : "disabled";
+    }
+  }, [currentSubIndex, item?.subtitles]);
+
   // ---- dub audio track sync ----
   useEffect(() => {
     const v = videoRef.current;
