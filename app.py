@@ -247,10 +247,10 @@ def _bandwidth_estimate(vbr: str, abr: str) -> int:
 
 def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vbr: str, abr: str) -> list:
     return [
-        "ffmpeg", "-y", "-i", source,
+        "ffmpeg", "-y", "-threads", "0", "-i", source,
         "-vf", f"scale=-2:{height}",
         "-c:v", "libx264", "-b:v", vbr,
-        "-preset", Config.HLS_PRESET, "-pix_fmt", "yuv420p",
+        "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
         "-g", "60", "-sc_threshold", "0",
         "-force_key_frames", "expr:gte(t,n_forced*4)",
         "-c:a", "aac", "-b:a", abr,

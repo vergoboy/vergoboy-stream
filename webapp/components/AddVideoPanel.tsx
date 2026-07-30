@@ -1,6 +1,7 @@
+import { useRef } from "react";
 "use client";
 
-import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
+import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2, UploadCloud } from "lucide-react";
 
 
 import { useState } from "react";
@@ -48,6 +49,27 @@ function FileForm({ myName }: { myName: string }) {
   const [title, setTitle] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      setFile(e.dataTransfer.files[0]);
+    }
+  };
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -68,12 +90,47 @@ function FileForm({ myName }: { myName: string }) {
       <label className={labelClass}>عنوان (اختیاری)</label>
       <input className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="مثلا: قسمت ۱ — فصل دوم" />
       <label className={labelClass}>فایل ویدیو</label>
-      <input
-        type="file"
-        accept="video/mp4,video/webm,video/ogg,.mp4,.webm,.ogv,.mov,.m4v,.mkv"
-        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        className="text-xs text-[color:var(--color-ink-muted)]"
-      />
+      <div
+        onDragEnter={handleDrag}
+        onDragOver={handleDrag}
+        onDragLeave={handleDrag}
+        onDrop={handleDrop}
+        onClick={() => fileInputRef.current?.click()}
+        className={`relative flex flex-col items-center justify-center p-8 rounded-2xl border-2 border-dashed transition-all cursor-pointer ${
+          dragActive
+            ? "border-[color:var(--color-amber)] bg-[color:var(--color-amber)]/10 scale-[1.01]"
+            : file
+            ? "border-emerald-500/50 bg-emerald-500/5"
+            : "border-[color:var(--color-border)] bg-white/5 hover:border-[color:var(--color-amber)]/60 hover:bg-white/10"
+        }`}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="video/mp4,video/webm,video/ogg,.mp4,.webm,.ogv,.mov,.m4v,.mkv"
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          hidden
+        />
+        {file ? (
+          <div className="flex items-center gap-3 text-emerald-400">
+            <CheckCircle className="w-8 h-8 shrink-0" />
+            <div className="text-right">
+              <p className="font-bold text-sm text-white truncate max-w-[260px]">{file.name}</p>
+              <p className="text-xs text-[color:var(--color-ink-muted)]">{(file.size / (1024 * 1024)).toFixed(1)} MB</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <UploadCloud className="w-10 h-10 text-[color:var(--color-amber)] mb-2 animate-bounce" />
+            <p className="font-semibold text-sm text-[color:var(--color-ink)] mb-1">
+              فایل ویدیو را بکشید و اینجا رها کنید
+            </p>
+            <p className="text-xs text-[color:var(--color-ink-muted)]">
+              یا برای انتخاب فایل کلیک کنید (MP4, WEBM, MKV, MOV)
+            </p>
+          </>
+        )}
+      </div>
       {progress !== null && (
         <div className="h-2 overflow-hidden rounded-full bg-white/10">
           <div className="h-full rounded-full transition-all" style={{ width: `${progress}%`, background: "linear-gradient(90deg, var(--color-amber), var(--color-plum-soft))" }} />

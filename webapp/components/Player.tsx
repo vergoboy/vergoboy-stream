@@ -531,10 +531,16 @@ export function Player({
     if (fullscreen) {
       setFullscreen(false);
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      if (typeof window !== "undefined" && window.screen?.orientation && "unlock" in window.screen.orientation) {
+        try { (window.screen.orientation as any).unlock(); } catch {}
+      }
     } else {
       setFullscreen(true);
       setTimeout(() => {
         wrapRef.current?.requestFullscreen().catch(() => {});
+        if (typeof window !== "undefined" && window.screen?.orientation && "lock" in window.screen.orientation) {
+          try { (window.screen.orientation as any).lock("landscape").catch(() => {}); } catch {}
+        }
       }, 30);
     }
   }, [fullscreen]);
@@ -672,7 +678,7 @@ export function Player({
         className={
           fullscreen
             ? `fixed inset-0 z-[9999] bg-black overflow-hidden select-none ${cursorHidden ? "cursor-none" : ""}`
-            : "relative rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md"
+            : "relative w-full rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md flex flex-col overflow-hidden"
         }
         style={fullscreen ? { width: "100vw", height: "100vh" } : undefined}
       >
@@ -935,7 +941,15 @@ export function Player({
                 ))}
               </MenuBtn>
 
-              <CtrlBtn title="تصویر در تصویر" onClick={() => videoRef.current?.requestPictureInPicture?.().catch(() => {})}>
+              <CtrlBtn title="تصویر در تصویر" onClick={() => {
+                const v = videoRef.current;
+                if (!v) return;
+                if (document.pictureInPictureElement) {
+                  document.exitPictureInPicture().catch(() => {});
+                } else if ("requestPictureInPicture" in v) {
+                  (v as any).requestPictureInPicture().catch(() => {});
+                }
+              }}>
                 ⧉
               </CtrlBtn>
               <CtrlBtn title="استایل زیرنویس" onClick={onGoToSubStyle}>
