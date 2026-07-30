@@ -116,6 +116,3 @@ body::before {
   }
 }
 
-/* Hide native video subtitle rendering to prevent double subtitles with overlay */
-video::-webkit-media-text-track-container { display: none !important; }
-video::cue { display: none !important; }

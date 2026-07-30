@@ -409,7 +409,7 @@ export function Player({
     const v = videoRef.current;
     if (!v) return;
     for (let i = 0; i < v.textTracks.length; i++) {
-      v.textTracks[i].mode = i === currentSubIndex ? "showing" : "disabled";
+      v.textTracks[i].mode = i === currentSubIndex ? "hidden" : "disabled";
     }
   }, [currentSubIndex, item?.subtitles]);
 
