@@ -12,47 +12,47 @@ export function notifyText(n: NotifyEvent, playlist: PlaylistItem[]): string {
 
   switch (n.type) {
     case "join":
-      return `👋 <b>${name}</b> به اتاق پیوست`;
+      return `<b>${name}</b> به اتاق پیوست`;
     case "leave":
-      return `🚪 <b>${name}</b> از اتاق خارج شد`;
+      return `<b>${name}</b> از اتاق خارج شد`;
     case "playlist_add":
-      return `➕ <b>${name}</b> «${title}» را اضافه کرد`;
+      return `<b>${name}</b> «${title}» را اضافه کرد`;
     case "playlist_add_processing":
-      return `⏳ <b>${name}</b> «${title}» را اضافه کرد (در حال آماده‌سازی روی سرور…)`;
+      return `<b>${name}</b> «${title}» را اضافه کرد (در حال آماده‌سازی روی سرور…)`;
     case "media_partial_ready":
-      return `▶️ «${title}» قابل پخش شد (کیفیت پیش‌فرض — بقیه‌ی کیفیت‌ها on-demand هستن)`;
+      return `«${title}» قابل پخش شد (کیفیت پیش‌فرض — بقیه‌ی کیفیت‌ها on-demand هستن)`;
     case "media_ready":
-      return `✅ ویدیوی «${title}» کامل آماده‌ی پخش شد`;
+      return `ویدیوی «${title}» کامل آماده‌ی پخش شد`;
     case "media_error":
-      return `⚠️ تبدیل «${title}» با خطا مواجه شد`;
+      return `تبدیل «${title}» با خطا مواجه شد`;
     case "quality_partial_ready":
-      return `🖼 کیفیت ${label} برای «${title}» قابل پخش شد`;
+      return `کیفیت ${label} برای «${title}» قابل پخش شد`;
     case "quality_ready":
-      return `🖼 کیفیت ${label} برای «${title}» کامل آماده شد`;
+      return `کیفیت ${label} برای «${title}» کامل آماده شد`;
     case "quality_error":
-      return `⚠️ آماده‌سازی کیفیت ${label} برای «${title}» با خطا مواجه شد`;
+      return `آماده‌سازی کیفیت ${label} برای «${title}» با خطا مواجه شد`;
     case "subtitle_auto_extracted":
-      return `💬 ${n.count ?? ""} زیرنویس از داخل «${title}» به‌صورت خودکار استخراج شد`;
+      return `${n.count ?? ""} زیرنویس از داخل «${title}» به‌صورت خودکار استخراج شد`;
     case "playlist_add_live":
-      return `📡 <b>${name}</b> پخش زنده «${title}» را اضافه کرد`;
+      return `<b>${name}</b> پخش زنده «${title}» را اضافه کرد`;
     case "playlist_remove":
-      return `🗑 <b>${name}</b> «${title}» را حذف کرد`;
+      return `<b>${name}</b> «${title}» را حذف کرد`;
     case "subtitle_add":
-      return `💬 <b>${name}</b> زیرنویس «${label}» را اضافه کرد`;
+      return `<b>${name}</b> زیرنویس «${label}» را اضافه کرد`;
     case "audio_track_add":
-      return `🎧 <b>${name}</b> کانال صدای «${label}» را اضافه کرد`;
+      return `<b>${name}</b> کانال صدای «${label}» را اضافه کرد`;
     case "ctrl_play":
-      return `▶️ <b>${name}</b> پخش را شروع کرد`;
+      return `<b>${name}</b> پخش را شروع کرد`;
     case "ctrl_pause":
-      return `⏸ <b>${name}</b> پخش را مکث کرد`;
+      return `<b>${name}</b> پخش را مکث کرد`;
     case "ctrl_seek":
-      return `⏩ <b>${name}</b> زمان را به ${formatTime(extra.to as number)} برد`;
+      return `<b>${name}</b> زمان را به ${formatTime(extra.to as number)} برد`;
     case "ctrl_rate":
-      return `🚀 <b>${name}</b> سرعت پخش را ${extra.rate}x کرد`;
+      return `<b>${name}</b> سرعت پخش را ${extra.rate}x کرد`;
     case "ctrl_select": {
       const idx = typeof extra.index === "number" ? extra.index : -1;
       const item = idx >= 0 ? playlist[idx] : null;
-      return `🎬 <b>${name}</b> «${escapeHtml(item ? item.title : "یک ویدیو")}» را برای پخش انتخاب کرد`;
+      return `<b>${name}</b> «${escapeHtml(item ? item.title : "یک ویدیو")}» را برای پخش انتخاب کرد`;
     }
     default:
       return `${name} یک تغییر اعمال کرد`;

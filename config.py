@@ -3,6 +3,31 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _livekit_creds():
+    """API key/secret for the LiveKit server. Prefers env vars, otherwise
+    parses /etc/livekit/config.yaml (so the secret never has to be committed
+    to this repo). Returns (api_key, api_secret) or (None, None)."""
+    key = os.environ.get("STREAM_LIVEKIT_API_KEY") or ""
+    secret = os.environ.get("STREAM_LIVEKIT_API_SECRET") or ""
+    if key and secret:
+        return key, secret
+    cfg = os.environ.get("STREAM_LIVEKIT_CONFIG", "/etc/livekit/config.yaml")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            content = f.read()
+        keys_block = content.split("keys:", 1)[1].split("\n", 1)[1]
+        for line in keys_block.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                k, v = line.split(":", 1)
+                return k.strip(), v.strip()
+    except Exception:
+        pass
+    return None, None
+
+
 class Config:
     SECRET_KEY = os.environ.get("STREAM_SECRET_KEY", "change-this-secret-please")
 
@@ -17,6 +42,9 @@ class Config:
     AVATAR_DIR = os.path.join(MEDIA_DIR, "avatars")   # user-uploaded avatars
     DATA_DIR = os.path.join(BASE_DIR, "data")
     DATA_FILE = os.path.join(DATA_DIR, "state.json")
+    # name(lowercased) -> avatar_url map, persisted so uploaded avatars survive
+    # server restarts (chat messages themselves stay in-memory only).
+    AVATAR_MAP_FILE = os.path.join(DATA_DIR, "avatars.json")
 
     # Max upload size (MB) - the real limit is also enforced by Nginx's
     # client_max_body_size, since Flask only checks this after the request
@@ -84,6 +112,17 @@ class Config:
         "STREAM_YTDLP_FORMAT",
         "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     )
+
+    # ---------------------------------------------------------------
+    # LiveKit voice room (audio-only watch-party voice channel)
+    # ---------------------------------------------------------------
+    _LK_KEY, _LK_SECRET = _livekit_creds()
+    LIVEKIT_API_KEY = _LK_KEY or ""
+    LIVEKIT_API_SECRET = _LK_SECRET or ""
+    # Clients connect over TLS through nginx (location /livekit/rtc -> 7880).
+    LIVEKIT_URL = os.environ.get("STREAM_LIVEKIT_URL", "wss://vergoboy.ir/livekit")
+    LIVEKIT_ROOM = os.environ.get("STREAM_LIVEKIT_ROOM", "stream-voice")
+    LIVEKIT_TOKEN_TTL = int(os.environ.get("STREAM_LIVEKIT_TOKEN_TTL", "14400"))
 
 
 os.makedirs(Config.UPLOAD_DIR, exist_ok=True)

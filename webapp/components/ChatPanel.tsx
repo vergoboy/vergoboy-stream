@@ -91,10 +91,10 @@ export function ChatPanel({
               key={m.id}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`flex items-start gap-2.5 ${m.name === myName ? "flex-row-reverse" : ""}`}
+              className={`flex items-start gap-2.5 ${m.name !== myName ? "flex-row-reverse" : ""}`}
             >
               <Avatar name={m.name} url={m.avatar_url} size={32} />
-              <div className={`min-w-0 max-w-[82%] flex flex-col ${m.name === myName ? "items-end" : "items-start"}`}>
+              <div className={`min-w-0 max-w-[82%] flex flex-col ${m.name !== myName ? "items-end" : "items-start"}`}>
                 <div className="flex items-center gap-2 mb-1 px-1">
                   <span className={`text-xs font-bold ${m.name === myName ? "text-[color:var(--color-amber)]" : "text-[color:var(--color-ink)]"}`}>
                     {m.name}
@@ -144,8 +144,8 @@ export function ChatPanel({
         }}
         className="flex items-center gap-2"
       >
-        <label className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-[color:var(--color-border)] bg-white/5 text-[15px] hover:border-[color:var(--color-amber)]/50">
-          🖼
+        <label className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-[color:var(--color-border)] bg-white/5 hover:border-[color:var(--color-amber)]/50">
+          <Image className="h-4 w-4 text-[color:var(--color-ink-muted)]" />
           <input
             type="file"
             accept="image/png,image/jpeg,image/webp,image/gif"

@@ -3,7 +3,7 @@
 import { useRef } from "react";
 
 
-import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2, UploadCloud } from "lucide-react";
+import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2, UploadCloud, FileUp, Link2, CirclePlay } from "lucide-react";
 
 
 import { useState } from "react";
@@ -24,17 +24,18 @@ export function AddVideoPanel({ myName }: { myName: string }) {
     <div>
       <div className="mb-4 flex gap-1.5">
         {([
-          ["file", "📁 آپلود فایل"],
-          ["url", "🔗 لینک مستقیم"],
-          ["youtube", "▶️ یوتیوب"],
-        ] as [Mode, string][]).map(([m, label]) => (
+          ["file", <FileUp key="file" className="h-4 w-4" />, "آپلود فایل"],
+          ["url", <Link2 key="url" className="h-4 w-4" />, "لینک مستقیم"],
+          ["youtube", <CirclePlay key="youtube" className="h-4 w-4" />, "یوتیوب"],
+        ] as [Mode, React.ReactNode, string][]).map(([m, icon, label]) => (
           <button
             key={m}
             onClick={() => setMode(m)}
-            className={`rounded-xl px-4 py-2 text-[13px] font-semibold transition-colors ${
+            className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-[13px] font-semibold transition-colors ${
               mode === m ? "bg-[color:var(--color-plum)]/25 text-white" : "bg-white/5 text-[color:var(--color-ink-muted)] hover:text-white"
             }`}
           >
+            {icon}
             {label}
           </button>
         ))}
@@ -203,7 +204,7 @@ function VideoForm({ myName }: { myName: string }) {
     if (!url.trim()) return;
     setLoading(true);
     setPreview(null);
-    setStatus({ msg: "⏳ در حال دریافت اطلاعات ویدیو… (۱۵–۴۵ ثانیه)" });
+    setStatus({ msg: "در حال دریافت اطلاعات ویدیو… (۱۵–۴۵ ثانیه)" });
     try {
       const data = await api.youtubeFormats(url.trim());
       setPreview(data);
@@ -218,7 +219,7 @@ function VideoForm({ myName }: { myName: string }) {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!url.trim()) return;
-    setStatus({ msg: "⏳ در حال دریافت لینک مستقیم با کیفیت انتخابی… (۱۵–۳۰ ثانیه)" });
+    setStatus({ msg: "در حال دریافت لینک مستقیم با کیفیت انتخابی… (۱۵–۳۰ ثانیه)" });
     try {
       const data = await api.addYoutube(url.trim(), formatId, customTitle || preview?.title || "", myName);
       setStatus({ msg: `<CheckCircle className="w-4 h-4 text-emerald-400" /> «${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });

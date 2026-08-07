@@ -122,4 +122,10 @@ export const api = {
     fd.append("name", name);
     return postForm<{ url: string }>("/stream/api/avatar", fd);
   },
+
+  voiceToken: (name: string, avatarUrl: string | null) =>
+    postJson<{ url: string; token: string; room: string; identity: string }>(
+      "/stream/api/voice/token",
+      { name, avatar_url: avatarUrl }
+    ),
 };

@@ -100,6 +100,102 @@ body::before {
   }
 }
 
+/* =====================================================================
+   Themes — the app is colored exclusively through the --color-* tokens
+   above, so swapping a whole look is just re-mapping those variables.
+   `data-theme` is set on <html> by lib/settings.tsx.
+   ===================================================================== */
+
+/* Dracula */
+html[data-theme="dracula"] {
+  color-scheme: dark;
+  --color-bg: #1e1f29;
+  --color-bg-soft: #282a36;
+  --color-bg-elevated: #343746;
+  --color-border: #44475a;
+  --color-amber: #f1fa8c;
+  --color-amber-soft: #f5ffc4;
+  --color-plum: #bd93f9;
+  --color-plum-soft: #c9a8fb;
+  --color-plum-deep: #4b4284;
+  --color-teal: #50fa7b;
+  --color-coral: #ff5555;
+  --color-ink: #f8f8f2;
+  --color-ink-muted: #cfc9d8;
+  --color-ink-dim: #7d7f96;
+}
+
+/* Nord */
+html[data-theme="nord"] {
+  color-scheme: dark;
+  --color-bg: #2e3440;
+  --color-bg-soft: #3b4252;
+  --color-bg-elevated: #434c5e;
+  --color-border: #4c566a;
+  --color-amber: #d08770;
+  --color-amber-soft: #e5b89c;
+  --color-plum: #5e81ac;
+  --color-plum-soft: #81a1c1;
+  --color-plum-deep: #3b5a7a;
+  --color-teal: #88c0d0;
+  --color-coral: #bf616a;
+  --color-ink: #eceff4;
+  --color-ink-muted: #d8dee9;
+  --color-ink-dim: #7d879c;
+}
+
+/* Tokyo Night */
+html[data-theme="tokyo"] {
+  color-scheme: dark;
+  --color-bg: #1a1b26;
+  --color-bg-soft: #24283b;
+  --color-bg-elevated: #2f334d;
+  --color-border: #565f89;
+  --color-amber: #e0af68;
+  --color-amber-soft: #eac488;
+  --color-plum: #bb9af7;
+  --color-plum-soft: #c4a9f8;
+  --color-plum-deep: #4a3d6e;
+  --color-teal: #7aa2f7;
+  --color-coral: #f7768e;
+  --color-ink: #c0caf5;
+  --color-ink-muted: #9aa5ce;
+  --color-ink-dim: #565f89;
+}
+
+/* Light ("white"). Most surfaces use bg-white/x and text-white utilities;
+   swapping --color-white/--color-black inverts those too so cards, control
+   bars and modals render correctly on a light background. */
+html[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #f4f0e9;
+  --color-bg-soft: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-border: #e6ddd0;
+  --color-amber: #c07f3c;
+  --color-amber-soft: #d69a58;
+  --color-plum: #a24f86;
+  --color-plum-soft: #b967a0;
+  --color-plum-deep: #6d2f57;
+  --color-teal: #2f8f85;
+  --color-coral: #cf4258;
+  --color-ink: #2a2119;
+  --color-ink-muted: #6d5c4b;
+  --color-ink-dim: #a29480;
+  --color-white: #2a2119;
+  --color-black: #ffffff;
+}
+
+/* Native <select> dropdown panels render with the OS's default palette
+   (white options) — pin them to the active theme instead. */
+select option {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-ink);
+}
+select option:disabled {
+  color: var(--color-ink-dim);
+}
+
 @keyframes pulse-live {
   0%,
   100% {

@@ -55,6 +55,7 @@ export interface RoomStateSync {
 export interface PresenceUser {
   name: string;
   avatar_url: string | null;
+  in_voice?: boolean;
 }
 
 export interface NotifyEvent {
@@ -109,3 +110,36 @@ export const DEFAULT_SUB_STYLE: SubStyle = {
   bold: false,
   offset: 40,
 };
+
+export type VoiceQuality = "auto" | "high" | "medium" | "low";
+
+export interface VoiceSettings {
+  quality: VoiceQuality;
+  echoCancellation: boolean;
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+  autoQuality: boolean;
+  masterVolume: number;
+  outputDevice: string;
+}
+
+export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
+  quality: "auto",
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  autoQuality: true,
+  masterVolume: 1,
+  outputDevice: "",
+};
+
+export interface VoiceParticipant {
+  identity: string;
+  name: string;
+  avatarUrl: string | null;
+  isSpeaking: boolean;
+  muted: boolean;
+  audioLevel: number;
+  volume: number;
+  isLocal: boolean;
+}

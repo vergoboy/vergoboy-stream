@@ -19,24 +19,41 @@ import { LivePanel } from "@/components/LivePanel";
 import { SubAudioPanel } from "@/components/SubAudioPanel";
 import { SubStylePanel } from "@/components/SubStylePanel";
 import { ChatPanel } from "@/components/ChatPanel";
+import { VoicePanel } from "@/components/VoicePanel";
 import { Sidebar } from "@/components/Sidebar";
 import { Toasts, type Toast } from "@/components/Toasts";
 import { NameGate } from "@/components/NameGate";
 import { ShortcutsModal } from "@/components/ShortcutsModal";
+import { SettingsModal } from "@/components/SettingsModal";
+import { SettingsProvider } from "@/lib/settings";
+import { useVoiceRoom } from "@/lib/useVoiceRoom";
 import { notifyText } from "@/lib/notifyText";
+import { ListVideo, Plus, Radio, Captions, Palette, MessageSquare, Users } from "lucide-react";
 
 let toastSeq = 0;
 
 export default function Page() {
+  return (
+    <SettingsProvider>
+      <PageInner />
+    </SettingsProvider>
+  );
+}
+
+function PageInner() {
   const [myName, setMyName, nameHydrated] = useLocalStorage("stream_user_name", "");
   const [myAvatarUrl, setMyAvatarUrl] = useLocalStorage<string | null>("stream_user_avatar", null);
   const [subStyle, setSubStyle] = useLocalStorage<SubStyle>("stream_sub_style", DEFAULT_SUB_STYLE);
   const [renaming, setRenaming] = useState(false);
   const [activeTab, setActiveTab] = useState("playlist");
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [latestNotify, setLatestNotify] = useState<NotifyEvent | null>(null);
   const [unreadChat, setUnreadChat] = useState(0);
+  const [voiceProfiles, setVoiceProfiles] = useState<{ name: string; avatarUrl: string | null; speaking: boolean }[]>([]);
+
+  const voice = useVoiceRoom(myName, myAvatarUrl);
 
   const handleNotify = (n: NotifyEvent) => {
     setLatestNotify(n);
@@ -45,8 +62,13 @@ export default function Page() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
   };
 
-  const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat } =
+  const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat, setVoiceActive } =
     useRoomState({ myName, onNotify: handleNotify });
+
+  // Only people actually connected to the voice room sit on the sofa — a
+  // regular online visitor must stay invisible to the others until they
+  // join the voice chat.
+  const sofaUsers = presenceUsers.filter((u) => u.in_voice);
 
   const currentItem = useMemo(
     () => (room.current_index !== null ? room.playlist[room.current_index] ?? null : null),
@@ -88,6 +110,7 @@ export default function Page() {
       <Header />
       <Toasts toasts={toasts} />
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} voice={voice} />
 
       <div className="mx-auto max-w-[1120px] px-4 pt-8 md:px-7">
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-5">
@@ -100,13 +123,14 @@ export default function Page() {
           <p className="flex flex-wrap items-center gap-2.5 text-[14.5px] text-[color:var(--color-ink-muted)]">
             فیلم رو هم‌زمان با بقیه تماشا کن — پخش، توقف و زمان برای همه یکی‌ست.
             <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--color-border)] bg-white/5 px-3 py-1 text-xs">
-              👥 <span className="font-mono text-[color:var(--color-amber)]">{room.online}</span> آنلاین
+              <Users className="h-3.5 w-3.5 text-[color:var(--color-amber)]" />
+              <span className="font-mono text-[color:var(--color-amber)]">{room.online}</span> آنلاین
               {!connected && <span className="text-[color:var(--color-coral)]">· در حال اتصال…</span>}
             </span>
           </p>
         </motion.div>
 
-        <Sofa users={presenceUsers} />
+        <Sofa users={sofaUsers} voiceSpeaking={voiceProfiles} />
 
         <Player
             item={currentItem}
@@ -125,6 +149,7 @@ export default function Page() {
             onGoToAdd={() => setActiveTab("add")}
             onGoToSubStyle={() => setActiveTab("substyle")}
             onOpenShortcuts={() => setShortcutsOpen(true)}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
 
         <section className="my-6 grid gap-5 lg:grid-cols-[1fr_300px]">
@@ -133,12 +158,12 @@ export default function Page() {
               active={activeTab}
               onChange={handleTabChange}
               tabs={[
-                { id: "playlist", label: "🎬 پلی‌لیست" },
-                { id: "add", label: "➕ افزودن ویدیو" },
-                { id: "live", label: "📡 استریم خارجی" },
-                { id: "subaudio", label: "🔤 زیرنویس و صدا" },
-                { id: "substyle", label: "🎨 استایل زیرنویس" },
-                { id: "chat", label: "💬 چت", badge: unreadChat },
+                { id: "playlist", label: (<span className="flex items-center gap-1.5"><ListVideo className="h-4 w-4" /> پلی‌لیست</span>) },
+                { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="h-4 w-4" /> افزودن ویدیو</span>) },
+                { id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="h-4 w-4" /> استریم خارجی</span>) },
+                { id: "subaudio", label: (<span className="flex items-center gap-1.5"><Captions className="h-4 w-4" /> زیرنویس و صدا</span>) },
+                { id: "substyle", label: (<span className="flex items-center gap-1.5"><Palette className="h-4 w-4" /> استایل زیرنویس</span>) },
+                { id: "chat", label: (<span className="flex items-center gap-1.5"><MessageSquare className="h-4 w-4" /> چت</span>), badge: unreadChat },
               ]}
             />
 
@@ -160,22 +185,33 @@ export default function Page() {
             </motion.div>
           </div>
 
-          <Sidebar
-            myName={myName}
-            myAvatarUrl={myAvatarUrl}
-            onChangeName={() => setRenaming(true)}
-            onChangeAvatar={async (file) => {
-              try {
-                const { url } = await api.avatarUpload(file, myName);
-                setMyAvatarUrl(url);
-              } catch (e) {
-                alert(e instanceof Error ? e.message : "خطا در آپلود عکس");
-              }
-            }}
-            onlineUsers={presenceUsers}
-            notifications={notifications}
-            playlist={room.playlist}
-          />
+          <div className="flex flex-col gap-5">
+            <VoicePanel
+              myName={myName}
+              myAvatarUrl={myAvatarUrl}
+              v={voice}
+              onSpeakingChange={setVoiceProfiles}
+              onVoiceJoin={() => setVoiceActive(true)}
+              onVoiceLeave={() => setVoiceActive(false)}
+              onOpenSettings={() => setSettingsOpen(true)}
+            />
+            <Sidebar
+              myName={myName}
+              myAvatarUrl={myAvatarUrl}
+              onChangeName={() => setRenaming(true)}
+              onChangeAvatar={async (file) => {
+                try {
+                  const { url } = await api.avatarUpload(file, myName);
+                  setMyAvatarUrl(url);
+                } catch (e) {
+                  alert(e instanceof Error ? e.message : "خطا در آپلود عکس");
+                }
+              }}
+              onlineUsers={presenceUsers}
+              notifications={notifications}
+              playlist={room.playlist}
+            />
+          </div>
         </section>
       </div>
 

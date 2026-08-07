@@ -16,6 +16,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 
 from config import Config
+from livekit_auth import generate_livekit_token
 from srt_to_vtt import convert_srt_to_vtt
 
 
@@ -202,15 +203,12 @@ def _pick_ladder(source_height: int):
 
 
 def _pick_default_rendition(ladder: list):
-    """720p is the sane default — good balance of quality vs. how fast it
-    encodes. Everything else in the ladder is only encoded on-demand, the
-    moment a viewer actually asks for it (see _encode_rendition / the
-    /api/request-quality endpoint), which is what makes first playback so
-    much faster than encoding every rendition upfront."""
-    for t in ladder:
-        if t[1] == 720:
-            return t
-    return ladder[0]
+    """Pick the highest available rendition as the default so playback starts
+    at max quality (the ladder is already capped at the source height by
+    _build_ladder, so this never upscales). The rest of the ladder is still
+    only encoded on-demand, the moment a viewer asks for it (see
+    _encode_rendition / the /api/request-quality endpoint)."""
+    return ladder[0] if ladder else None
 
 
 def _bandwidth_estimate(vbr: str, abr: str) -> int:
@@ -1005,6 +1003,37 @@ def api_new_key():
     })
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# LiveKit voice room
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.route("/stream/api/voice/token", methods=["POST"])
+def api_voice_token():
+    """Issues a short-lived LiveKit access token for the shared voice room.
+
+    identity is always unique per connection (same person may join from two
+    tabs/devices); display name and avatar are carried in `name` / `metadata`
+    so other clients can render them without extra lookups."""
+    if not Config.LIVEKIT_API_KEY or not Config.LIVEKIT_API_SECRET:
+        return jsonify({"error": "LiveKit روی سرور تنظیم نشده است"}), 500
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "ناشناس").strip()[:24] or "ناشناس"
+    avatar = (data.get("avatar_url") or "").strip()
+    identity = f"{name}-{uuid.uuid4().hex[:6]}"
+    metadata = json.dumps({"name": name, "avatar_url": avatar}, ensure_ascii=False)
+    token = generate_livekit_token(
+        Config.LIVEKIT_API_KEY, Config.LIVEKIT_API_SECRET,
+        Config.LIVEKIT_ROOM, identity, name, metadata=metadata,
+        ttl=Config.LIVEKIT_TOKEN_TTL,
+    )
+    return jsonify({
+        "url": Config.LIVEKIT_URL,
+        "token": token,
+        "room": Config.LIVEKIT_ROOM,
+        "identity": identity,
+    })
+
+
 @app.route("/stream/api/add-live", methods=["POST"])
 def api_add_live():
     data = request.get_json(force=True, silent=True) or {}
@@ -1264,10 +1293,42 @@ def on_join(data):
             avatar_url = chat.get_avatar(name)
     with LOCK:
         if room:
-            room.users[request.sid] = {"name": name, "avatar_url": avatar_url}
+            room.users[request.sid] = {"name": name, "avatar_url": avatar_url, "in_voice": False}
     if room:
         emit("state_sync", room.to_public_dict())
     broadcast_notify("join", name)
+    broadcast_presence()
+
+
+@socketio.on("voice_joined")
+def on_voice_joined(data):
+    data = data or {}
+    name = (data.get("name") or "").strip()
+    with LOCK:
+        if not room:
+            return
+        user = room.users.get(request.sid)
+        if user is None:
+            return
+        if name and name != user.get("name"):
+            return
+        user["in_voice"] = True
+    broadcast_presence()
+
+
+@socketio.on("voice_left")
+def on_voice_left(data):
+    data = data or {}
+    name = (data.get("name") or "").strip()
+    with LOCK:
+        if not room:
+            return
+        user = room.users.get(request.sid)
+        if user is None:
+            return
+        if name and name != user.get("name"):
+            return
+        user["in_voice"] = False
     broadcast_presence()
 
 

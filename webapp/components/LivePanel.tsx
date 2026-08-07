@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Plus } from "lucide-react";
 import { api } from "@/lib/api";
 
 const inputClass =
@@ -60,7 +61,10 @@ export function LivePanel({ myName }: { myName: string }) {
               className="mt-1 rounded-xl px-5 py-2.5 text-[14px] font-bold text-white"
               style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}
             >
-              ➕ افزودن این پخش زنده به پلی‌لیست
+              <span className="flex items-center gap-1.5">
+                <Plus className="h-4 w-4" />
+                افزودن این پخش زنده به پلی‌لیست
+              </span>
             </button>
           </div>
         )}

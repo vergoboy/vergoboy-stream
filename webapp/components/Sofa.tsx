@@ -1,6 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
+import { Users } from "lucide-react";
 import { Avatar } from "./Avatar";
 import type { PresenceUser } from "@/lib/types";
 
@@ -13,8 +14,15 @@ function seatWobble(name: string) {
   return (h - 3) * 0.6; // -1.8deg .. +1.8deg
 }
 
-export function Sofa({ users }: { users: PresenceUser[] }) {
+export function Sofa({
+  users,
+  voiceSpeaking = [],
+}: {
+  users: PresenceUser[];
+  voiceSpeaking?: { name: string; avatarUrl: string | null; speaking: boolean }[];
+}) {
   const width = Math.min(880, Math.max(220, users.length * 96 + 80));
+  const speakingMap = new Map(voiceSpeaking.map((s) => [s.name, s.speaking]));
 
   return (
     <section className="relative mx-auto mt-2 mb-6 flex flex-col items-center">
@@ -72,26 +80,58 @@ export function Sofa({ users }: { users: PresenceUser[] }) {
                 فعلاً کسی روی مبل نیست…
               </motion.p>
             )}
-            {users.map((u) => (
-              <motion.div
-                key={u.name}
-                layout
-                initial={{ opacity: 0, y: 18, scale: 0.85 }}
-                animate={{ opacity: 1, y: 0, scale: 1, rotate: seatWobble(u.name) }}
-                exit={{ opacity: 0, y: 14, scale: 0.85 }}
-                transition={{ type: "spring", stiffness: 340, damping: 22 }}
-                className="flex flex-col items-center gap-1 w-16"
-              >
-                <Avatar name={u.name} url={u.avatar_url} size={40} className="ring-2 ring-[color:var(--color-bg)] shadow-[var(--shadow-soft)]" />
-                <span className="text-[10.5px] text-[color:var(--color-ink-muted)] max-w-16 truncate">{u.name}</span>
-              </motion.div>
-            ))}
+            {users.map((u) => {
+              const speaking = speakingMap.get(u.name);
+              const voiceAvatar = voiceSpeaking.find((s) => s.name === u.name);
+              return (
+                <motion.div
+                  key={u.name}
+                  layout
+                  initial={{ opacity: 0, y: 18, scale: 0.85 }}
+                  animate={{ opacity: 1, y: 0, scale: 1, rotate: seatWobble(u.name) }}
+                  exit={{ opacity: 0, y: 14, scale: 0.85 }}
+                  transition={{ type: "spring", stiffness: 340, damping: 22 }}
+                  className="flex flex-col items-center gap-1 w-16"
+                >
+                  <div className="relative">
+                    <Avatar
+                      name={u.name}
+                      url={voiceAvatar?.avatarUrl ?? u.avatar_url}
+                      size={40}
+                      className={`ring-2 shadow-[var(--shadow-soft)] ${
+                        speaking
+                          ? "ring-[color:var(--color-teal)] shadow-[0_0_16px_-2px_rgba(64,205,160,0.7)]"
+                          : "ring-[color:var(--color-bg)]"
+                      }`}
+                    />
+                    {speaking && (
+                      <span
+                        className="absolute -bottom-1 -left-1 rounded-full bg-[color:var(--color-teal)] p-1"
+                        style={{ animation: "pulse-live 1.4s infinite" }}
+                      >
+                        <MicMini />
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[10.5px] text-[color:var(--color-ink-muted)] max-w-16 truncate">{u.name}</span>
+                </motion.div>
+              );
+            })}
           </AnimatePresence>
         </div>
       </div>
-      <p className="mt-2 text-[11.5px] text-[color:var(--color-ink-dim)]">
-        👥 همه‌ی کسایی که الان توی اتاق‌ان، رو مبل نشستن
+      <p className="mt-2 flex items-center gap-1.5 text-[11.5px] text-[color:var(--color-ink-dim)]">
+        <Users className="h-3.5 w-3.5" />
+        کسایی که توی اتاق صوتی‌ان، روی مبل نشستن
       </p>
     </section>
+  );
+}
+
+function MicMini() {
+  return (
+    <svg viewBox="0 0 24 24" className="block h-3 w-3 text-white" fill="currentColor">
+      <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm5.27-3a.75.75 0 0 1 .73.75 6 6 0 0 1-5.25 5.94v1.56h1.75a.75.75 0 0 1 0 1.5H8.5a.75.75 0 0 1 0-1.5h1.75v-1.56A6 6 0 0 1 5.25 11.75a.75.75 0 1 1 1.5 0 4.5 4.5 0 0 0 9 0 .75.75 0 0 1 .52-.75Z" />
+    </svg>
   );
 }

@@ -8,7 +8,6 @@ import {
   RotateCw,
   RotateCcw,
   Film,
-  Mic,
   MessageSquare,
   Palette,
   Keyboard,
@@ -21,6 +20,14 @@ import {
   Check,
   HelpCircle,
   Settings,
+  SkipBack,
+  SkipForward,
+  GripVertical,
+  X,
+  TriangleAlert,
+  MonitorPlay,
+  Headphones,
+  Plus,
 } from "lucide-react";
 /* eslint-disable react-hooks/refs */
 
@@ -29,6 +36,7 @@ import { useCallback, useEffect, useRef, useState, startTransition } from "react
 import type Hls from "hls.js";
 import { formatTime, isHlsUrl, levelLabelFromUrl } from "@/lib/format";
 import { api } from "@/lib/api";
+import { useAppSettings, type ShortcutAction } from "@/lib/settings";
 import type { NotifyEvent, PlaylistItem, Rendition, SubStyle, TranscodeProgress } from "@/lib/types";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
@@ -55,6 +63,7 @@ export function Player({
   onGoToAdd,
   onGoToSubStyle,
   onOpenShortcuts,
+  onOpenSettings,
 }: {
   item: PlaylistItem | null;
   playing: boolean;
@@ -72,7 +81,10 @@ export function Player({
   onGoToAdd: () => void;
   onGoToSubStyle: () => void;
   onOpenShortcuts: () => void;
+  onOpenSettings?: () => void;
 }) {
+  const { settings } = useAppSettings();
+  const sc = settings.shortcuts;
   const videoRef = useRef<HTMLVideoElement>(null);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -100,6 +112,49 @@ export function Player({
   const [currentAudioTrackId, setCurrentAudioTrackId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
+  const [floating, setFloating] = useState(false);
+  const [floatPos, setFloatPos] = useState({ x: 20, y: 20 });
+
+  const togglePip = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(() => {});
+      return;
+    }
+    if (typeof v.requestPictureInPicture === "function" && document.pictureInPictureEnabled) {
+      v.requestPictureInPicture().catch(() => {});
+      return;
+    }
+    // Firefox / browsers without the PiP API: fall back to a custom floating
+    // mini-player (same <video> element, just re-positioned fixed on screen).
+    setFloating((f) => !f);
+  }, []);
+
+  // Drag the floating window by listening on `window` (not pointer capture)
+  // — capture retargets pointer events and can corrupt their coordinates.
+  const onFloatDragStart = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!floating || e.button !== 0) return;
+      e.preventDefault();
+      const start = { x: e.clientX, y: e.clientY, right: floatPos.x, bottom: floatPos.y };
+      const onMove = (ev: PointerEvent) => {
+        setFloatPos({
+          x: Math.max(8, start.right - (ev.clientX - start.x)),
+          y: Math.max(8, start.bottom - (ev.clientY - start.y)),
+        });
+      };
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [floating, floatPos]
+  );
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -137,7 +192,7 @@ export function Player({
       if (target > frontier - MARGIN) {
         if (Date.now() - lastFrontierWarn.current > 2500) {
           lastFrontierWarn.current = Date.now();
-          showToast(`⏳ این بخش هنوز آماده نشده — انکد تا دقیقه ${formatTime(frontier)} پیش رفته.`);
+          showToast(`این بخش هنوز آماده نشده — انکد تا دقیقه ${formatTime(frontier)} پیش رفته.`);
         }
         return Math.max(0, frontier - MARGIN);
       }
@@ -337,10 +392,10 @@ export function Player({
     api.requestQuality(item.id, label, myName)
       .then(() => {
         myRequestedLabels.current.add(label);
-        showToast(`⏳ آماده‌سازی کیفیت ${label} شروع شد…`);
+        showToast(`آماده‌سازی کیفیت ${label} شروع شد…`);
       })
       .catch((e: unknown) => {
-        showToast(`❌ ${e instanceof Error ? e.message : "شروع آماده‌سازی این کیفیت ناموفق بود"}`);
+        showToast(`${e instanceof Error ? e.message : "شروع آماده‌سازی این کیفیت ناموفق بود"}`);
       });
   }, [pendingQualityLabel, item, myName, showToast]);
 
@@ -374,7 +429,7 @@ export function Player({
           if (expected > frontier - MARGIN) {
             if (Date.now() - lastFrontierWarn.current > 2500) {
               lastFrontierWarn.current = Date.now();
-              showToast(`⏳ این بخش هنوز آماده نشده — انکد تا دقیقه ${formatTime(frontier)} پیش رفته.`);
+          showToast(`این بخش هنوز آماده نشده — انکد تا دقیقه ${formatTime(frontier)} پیش رفته.`);
             }
             expected = Math.max(0, frontier - MARGIN);
           }
@@ -528,19 +583,21 @@ export function Player({
   // hides the browser chrome on desktop. On mobile, the portal covers the
   // whole screen via dvh/dvw without needing the Fullscreen API at all.
   const toggleFullscreen = useCallback(() => {
+    type ScreenOrientExt = ScreenOrientation & { lock?: (o: "landscape") => Promise<void>; unlock?: () => void };
+    const orient = window.screen?.orientation as ScreenOrientExt | undefined;
     if (fullscreen) {
       setFullscreen(false);
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-      if (typeof window !== "undefined" && window.screen?.orientation && "unlock" in window.screen.orientation) {
-        try { (window.screen.orientation as any).unlock(); } catch {}
-      }
+      try {
+        if (orient?.unlock) orient.unlock();
+      } catch {}
     } else {
       setFullscreen(true);
       setTimeout(() => {
         wrapRef.current?.requestFullscreen().catch(() => {});
-        if (typeof window !== "undefined" && window.screen?.orientation && "lock" in window.screen.orientation) {
-          try { (window.screen.orientation as any).lock("landscape").catch(() => {}); } catch {}
-        }
+        try {
+          if (orient?.lock) orient.lock("landscape").catch(() => {});
+        } catch {}
       }, 30);
     }
   }, [fullscreen]);
@@ -568,6 +625,7 @@ export function Player({
   // Auto-hide: hide immediately on fullscreen entry, show on interaction
   useEffect(() => {
     if (fullscreen) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reacting to an external fullscreen change is intentional (sync with the browser UI)
       setCursorHidden(true);
     } else {
       setCursorHidden(false);
@@ -576,6 +634,10 @@ export function Player({
   }, [fullscreen]);
 
   useEffect(() => {
+    // Map each configured key to its action (rebindable in Settings).
+    const keyToAction: Record<string, ShortcutAction> = {};
+    for (const [action, key] of Object.entries(sc)) keyToAction[key] = action as ShortcutAction;
+
     function onKey(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName?.toLowerCase();
       const type = (e.target as HTMLInputElement).type?.toLowerCase();
@@ -583,47 +645,81 @@ export function Player({
       if (tag === "input" && type !== "range") return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const v = videoRef.current;
+      const action = keyToAction[e.key];
+
+      switch (action) {
+        case "playPause":
+          e.preventDefault();
+          if (item) togglePlay();
+          return;
+        case "seekBack":
+          e.preventDefault();
+          if (item && item.type !== "live" && v) seek(Math.max(0, v.currentTime - 10));
+          return;
+        case "seekForward":
+          e.preventDefault();
+          if (item && item.type !== "live" && v) seek(Math.min(v.duration || 1e9, v.currentTime + 10));
+          return;
+        case "volumeUp":
+          e.preventDefault();
+          setVolume((x) => Math.min(1, x + 0.05));
+          return;
+        case "volumeDown":
+          e.preventDefault();
+          setVolume((x) => Math.max(0, x - 0.05));
+          return;
+        case "mute":
+          setMuted((m) => !m);
+          return;
+        case "fullscreen":
+          toggleFullscreen();
+          return;
+        case "prev":
+          if (canPrev) onPrev();
+          return;
+        case "next":
+          if (canNext) onNext();
+          return;
+        case "pip":
+          togglePip();
+          return;
+        case "shortcuts":
+          onOpenShortcuts();
+          return;
+        case "settings":
+          onOpenSettings?.();
+          return;
+        default:
+          break;
+      }
+
+      // Legacy aliases kept for muscle memory (not rebindable).
       switch (e.key) {
-        case " ":
         case "k":
           e.preventDefault();
           if (item) togglePlay();
           break;
-        case "ArrowLeft":
         case "j":
           e.preventDefault();
           if (item && item.type !== "live" && v) seek(Math.max(0, v.currentTime - 10));
           break;
-        case "ArrowRight":
         case "l":
           e.preventDefault();
           if (item && item.type !== "live" && v) seek(Math.min(v.duration || 1e9, v.currentTime + 10));
-          break;
-        case "ArrowUp":
-          e.preventDefault();
-          setVolume((x) => Math.min(1, x + 0.05));
-          break;
-        case "ArrowDown":
-          e.preventDefault();
-          setVolume((x) => Math.max(0, x - 0.05));
-          break;
-        case "m":
-        case "M":
-          setMuted((m) => !m);
           break;
         case "d":
         case "D":
           setShowDebug((s) => !s);
           break;
-        case "f":
+        case "M":
+          setMuted((m) => !m);
+          break;
         case "F":
           toggleFullscreen();
           break;
-        case "p":
         case "P":
           if (canPrev) onPrev();
           break;
-        case "n":
         case "N":
           if (canNext) onNext();
           break;
@@ -650,7 +746,7 @@ export function Player({
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [item, togglePlay, seek, onOpenShortcuts, canPrev, canNext, onPrev, onNext, fullscreen, resetCursorTimer, toggleFullscreen]);
+  }, [item, togglePlay, seek, onOpenShortcuts, onOpenSettings, canPrev, canNext, onPrev, onNext, fullscreen, resetCursorTimer, toggleFullscreen, togglePip, sc]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -678,10 +774,38 @@ export function Player({
         className={
           fullscreen
             ? `fixed inset-0 z-[9999] bg-black overflow-hidden select-none ${cursorHidden ? "cursor-none" : ""}`
-            : "relative w-full rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md flex flex-col overflow-hidden"
+            : floating
+              ? "fixed z-[9997] rounded-3xl border border-[color:var(--color-border)] bg-black/60 backdrop-blur-md flex flex-col overflow-hidden shadow-2xl"
+              : "relative w-full rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md flex flex-col overflow-hidden"
         }
-        style={fullscreen ? { width: "100vw", height: "100vh" } : undefined}
+        style={fullscreen ? { width: "100vw", height: "100vh" } : floating ? { width: 380, maxWidth: "86vw", right: floatPos.x, bottom: floatPos.y } : undefined}
       >
+        {floating && (
+          <div className="absolute top-0 left-0 right-0 z-[30] flex items-center gap-1.5 rounded-t-3xl bg-black/70 px-2 py-1.5 select-none">
+            <div
+              className="flex h-6 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg hover:bg-white/10 active:cursor-grabbing"
+              title="جابه‌جایی پنجره"
+              onPointerDown={onFloatDragStart}
+            >
+              <GripVertical className="h-3.5 w-3.5 text-white/50" />
+            </div>
+            <span className="min-w-0 flex-1 truncate text-[11px] text-white/80">{item?.title || "پخش زنده"}</span>
+            <button
+              title={playing ? "توقف" : "پخش"}
+              onClick={togglePlay}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white"
+            >
+              {playing ? <Pause className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5 fill-current" />}
+            </button>
+            <button
+              title="بستن پنجره‌ی شناور"
+              onClick={() => setFloating(false)}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         <div
           className={
             fullscreen
@@ -753,7 +877,9 @@ export function Player({
 
         {processing && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5 bg-[color:var(--color-bg)] px-6 text-center text-[color:var(--color-ink-muted)]">
-            <div className="text-5xl opacity-80">{item?.status === "error" ? "⚠️" : !item ? "🎬" : "⏳"}</div>
+            <div className="flex items-center justify-center text-5xl opacity-80">
+              {item?.status === "error" ? <TriangleAlert className="h-12 w-12 text-[color:var(--color-coral)]" /> : !item ? <Film className="h-12 w-12" /> : <Loader2 className="h-12 w-12 animate-spin" />}
+            </div>
             <p className="m-0 text-[14.5px]">
               {!item
                 ? "هنوز ویدیویی برای پخش انتخاب نشده"
@@ -777,7 +903,10 @@ export function Player({
                 onClick={onGoToAdd}
                 className="rounded-xl border border-[color:var(--color-border)] bg-white/5 px-5 py-2.5 text-[13.5px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50"
               >
-                ➕ افزودن ویدیو
+                <span className="flex items-center gap-1.5">
+                  <Plus className="h-4 w-4" />
+                  افزودن ویدیو
+                </span>
               </button>
             )}
           </div>
@@ -788,8 +917,9 @@ export function Player({
             {toast}
           </div>
         )}
+        </div>
 
-      {!processing && (
+        {!processing && !floating && (
         <div
           dir="ltr"
           className={`transition-opacity duration-300 ${
@@ -845,16 +975,16 @@ export function Player({
                 {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
               </CtrlBtn>
               <CtrlBtn title="آیتم قبلی (P)" onClick={onPrev} disabled={!canPrev}>
-                ⏮
+                <SkipBack className="w-4 h-4" />
               </CtrlBtn>
               <CtrlBtn title="آیتم بعدی (N)" onClick={onNext} disabled={!canNext}>
-                ⏭
+                <SkipForward className="w-4 h-4" />
               </CtrlBtn>
-              <CtrlBtn title="۵ ثانیه عقب (کلید ◄)" onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
-                ⏪
+              <CtrlBtn title="۱۰ ثانیه عقب (کلید ◄)" onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
+                <RotateCcw className="w-4 h-4" />
               </CtrlBtn>
-              <CtrlBtn title="۵ ثانیه جلو (کلید ►)" onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
-                ⏩
+              <CtrlBtn title="۱۰ ثانیه جلو (کلید ►)" onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
+                <RotateCw className="w-4 h-4" />
               </CtrlBtn>
               <CtrlBtn title="بی‌صدا" onClick={() => setMuted((m) => !m)}>
                 {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
@@ -874,7 +1004,7 @@ export function Player({
               </MenuBtn>
 
               <MenuBtn
-                icon="🖼"
+                icon={<MonitorPlay className="w-4 h-4" />}
                 disabled={!item?.renditions?.length && levels.length === 0}
                 open={openMenu === "quality"}
                 onToggle={() => {
@@ -883,7 +1013,7 @@ export function Player({
                 }}
               >
                 <MenuItem active={currentLevel === -1} onClick={() => hlsRef.current && (hlsRef.current.currentLevel = -1)}>
-                  🔀 خودکار
+                  خودکار
                 </MenuItem>
                 <MenuDivider />
                 {(item?.renditions?.length ? [...item.renditions].sort((a, b) => b.height - a.height) : levels.map((l) => ({ ...l, status: "ready" as const, vbr: "", abr: "" }))).map((r) => {
@@ -904,15 +1034,15 @@ export function Player({
                   }
                   return (
                     <MenuItem key={r.label} disabled>
-                      {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">⏳ در حال آماده‌سازی…</span>
+                      {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">در حال آماده‌سازی…</span>
                     </MenuItem>
                   );
                 })}
               </MenuBtn>
 
-              <MenuBtn icon="🎧" open={openMenu === "audio"} onToggle={() => setOpenMenu(openMenu === "audio" ? null : "audio")}>
+              <MenuBtn icon={<Headphones className="w-4 h-4" />} open={openMenu === "audio"} onToggle={() => setOpenMenu(openMenu === "audio" ? null : "audio")}>
                 <MenuItem active={!currentAudioTrackId} onClick={() => setCurrentAudioTrackId(null)}>
-                  🎙 صدای اصلی
+                  صدای اصلی
                 </MenuItem>
                 {(item?.audio_tracks?.length ?? 0) > 0 && <MenuDivider />}
                 {item?.audio_tracks?.map((t) => (
@@ -941,31 +1071,25 @@ export function Player({
                 ))}
               </MenuBtn>
 
-              <CtrlBtn title="تصویر در تصویر" onClick={() => {
-                const v = videoRef.current;
-                if (!v) return;
-                if (document.pictureInPictureElement) {
-                  document.exitPictureInPicture().catch(() => {});
-                } else if ("requestPictureInPicture" in v) {
-                  (v as any).requestPictureInPicture().catch(() => {});
-                }
-              }}>
-                ⧉
+              <CtrlBtn title="تصویر در تصویر" onClick={togglePip}>
+                <PictureInPicture2 className="w-4 h-4" />
               </CtrlBtn>
               <CtrlBtn title="استایل زیرنویس" onClick={onGoToSubStyle}>
-                🎨
+                <Palette className="w-4 h-4" />
               </CtrlBtn>
               <CtrlBtn title="راهنمای کلیدهای میانبر (؟)" onClick={onOpenShortcuts}>
-                ⌨
+                <Keyboard className="w-4 h-4" />
+              </CtrlBtn>
+              <CtrlBtn title="تنظیمات (S)" onClick={() => onOpenSettings?.()}>
+                <Settings className="w-4 h-4" />
               </CtrlBtn>
               <CtrlBtn title="تمام‌صفحه (F)" onClick={toggleFullscreen}>
-                ⛶
+                <Maximize className="w-4 h-4" />
               </CtrlBtn>
             </div>
           </div>
         </div>
       )}
-      </div>
 
       </div>
 

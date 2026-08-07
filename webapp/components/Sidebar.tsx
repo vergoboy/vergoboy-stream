@@ -1,6 +1,7 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
+import { Users, Bell } from "lucide-react";
 import { Avatar } from "./Avatar";
 import type { NotifyEvent, PlaylistItem, PresenceUser } from "@/lib/types";
 import { notifyText } from "@/lib/notifyText";
@@ -52,8 +53,9 @@ export function Sidebar({
           </div>
         </div>
 
-        <h4 className="mb-2.5 text-[13px] font-bold text-[color:var(--color-ink)]">
-          👥 آنلاین ({onlineUsers.length})
+        <h4 className="mb-2.5 flex items-center gap-1.5 text-[13px] font-bold text-[color:var(--color-ink)]">
+          <Users className="h-3.5 w-3.5 text-[color:var(--color-teal)]" />
+          آنلاین ({onlineUsers.length})
         </h4>
         <ul className="flex flex-wrap gap-1.5">
           {onlineUsers.map((u) => (
@@ -70,7 +72,10 @@ export function Sidebar({
       </div>
 
       <div>
-        <h4 className="mb-2.5 text-[13px] font-bold text-[color:var(--color-ink)]">🔔 رویدادهای اخیر</h4>
+        <h4 className="mb-2.5 flex items-center gap-1.5 text-[13px] font-bold text-[color:var(--color-ink)]">
+          <Bell className="h-3.5 w-3.5 text-[color:var(--color-amber)]" />
+          رویدادهای اخیر
+        </h4>
         <ul className="flex max-h-80 flex-col gap-2 overflow-y-auto">
           <AnimatePresence initial={false}>
             {notifications.map((n, i) => (

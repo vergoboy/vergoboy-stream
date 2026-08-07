@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Captions, Headphones, FileUp, Link2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { PlaylistItem } from "@/lib/types";
 
@@ -37,7 +38,7 @@ export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; 
 
       <div className="grid gap-6 md:grid-cols-2">
         <div>
-          <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">💬 افزودن زیرنویس</h4>
+          <h4 className="mb-1.5 flex items-center gap-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]"><Captions className="h-4 w-4 text-[color:var(--color-teal)]" /> افزودن زیرنویس</h4>
           <p className="mb-3 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">
             برای فایل‌های MKV با زیرنویس داخلی، مرورگر نمی‌تواند زیرنویس داخل فایل را بخواند — فایل جدا (vtt/srt) آپلود یا لینکش را وارد کن.
           </p>
@@ -48,7 +49,11 @@ export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; 
                 onClick={() => setSubMode(m)}
                 className={`rounded-xl px-3.5 py-1.5 text-xs font-semibold ${subMode === m ? "bg-[color:var(--color-plum)]/25 text-white" : "bg-white/5 text-[color:var(--color-ink-muted)]"}`}
               >
-                {m === "file" ? "📁 آپلود فایل" : "🔗 لینک خارجی"}
+                {m === "file" ? (
+                  <span className="flex items-center gap-1"><FileUp className="h-3.5 w-3.5" /> آپلود فایل</span>
+                ) : (
+                  <span className="flex items-center gap-1"><Link2 className="h-3.5 w-3.5" /> لینک خارجی</span>
+                )}
               </button>
             ))}
           </div>
@@ -99,7 +104,7 @@ export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; 
         </div>
 
         <div>
-          <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">🎧 افزودن کانال صدا (دوبله)</h4>
+          <h4 className="mb-1.5 flex items-center gap-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]"><Headphones className="h-4 w-4 text-[color:var(--color-teal)]" /> افزودن کانال صدا (دوبله)</h4>
           <p className="mb-3 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">یک فایل صوتی جدا که به‌صورت خودکار با تصویر سینک می‌شود.</p>
           <form
             onSubmit={async (e) => {

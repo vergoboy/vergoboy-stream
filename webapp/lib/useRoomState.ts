@@ -160,6 +160,13 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
     [myName]
   );
 
+  const setVoiceActive = useCallback(
+    (active: boolean) => {
+      socketRef.current?.emit(active ? "voice_joined" : "voice_left", { name: myName });
+    },
+    [myName]
+  );
+
   return {
     connected,
     room,
@@ -170,5 +177,6 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
     expectedPosition,
     requestControl,
     sendChat,
+    setVoiceActive,
   };
 }

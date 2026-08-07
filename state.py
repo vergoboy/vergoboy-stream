@@ -55,10 +55,15 @@ class RoomState:
         return {k: v for k, v in item.items() if not k.startswith("_")}
 
     def users_public_list(self):
-        """List of {name, avatar_url} for every currently-connected socket,
-        used to render the online users on the sofa."""
+        """List of {name, avatar_url, in_voice} for every currently-connected
+        socket. `in_voice` is True only while that user is connected to the
+        voice room; the frontend renders the sofa from voice members."""
         return [
-            {"name": u.get("name", "ناشناس"), "avatar_url": u.get("avatar_url")}
+            {
+                "name": u.get("name", "ناشناس"),
+                "avatar_url": u.get("avatar_url"),
+                "in_voice": bool(u.get("in_voice")),
+            }
             for u in self.users.values()
         ]
 
@@ -187,6 +192,7 @@ class ChatState:
     def __init__(self):
         self.messages = []          # list of {id, name, text, image_url, ts}
         self.avatars_by_name = {}   # lowercased name -> avatar_url
+        self._load_avatars()
 
     def add_message(self, msg):
         self.messages.append(msg)
@@ -214,9 +220,31 @@ class ChatState:
 
     def set_avatar(self, name, url):
         self.avatars_by_name[(name or "").strip().lower()] = url
+        self._save_avatars()
 
     def get_avatar(self, name):
         return self.avatars_by_name.get((name or "").strip().lower())
+
+    def _save_avatars(self):
+        try:
+            tmp = f"{Config.AVATAR_MAP_FILE}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.avatars_by_name, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, Config.AVATAR_MAP_FILE)
+        except Exception as e:
+            print("[state] avatars save error:", e)
+
+    def _load_avatars(self):
+        try:
+            if os.path.exists(Config.AVATAR_MAP_FILE):
+                with open(Config.AVATAR_MAP_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self.avatars_by_name = {
+                        str(k).strip().lower(): v for k, v in data.items() if v
+                    }
+        except Exception as e:
+            print("[state] avatars load error:", e)
 
 
 room = RoomState()
