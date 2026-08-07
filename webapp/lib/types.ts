@@ -143,3 +143,52 @@ export interface VoiceParticipant {
   volume: number;
   isLocal: boolean;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Search archive (DonyayeSerial / Animex)
+// ────────────────────────────────────────────────────────────────────────────
+
+export type ArchiveSource = "donyayeserial" | "animex";
+
+export interface ArchiveResult {
+  source: ArchiveSource;
+  kind: string;
+  title: string;
+  url: string;
+  poster: string | null;
+  rating: string | null;
+  year: string | null;
+}
+
+export interface ArchiveEpisode {
+  num: number | null;
+  url: string;
+}
+
+export interface ArchiveQualityItem {
+  quality: string;
+  dir_url: string;
+}
+
+export interface ArchiveGroup {
+  label: string;
+  season: string | number | null;
+  quality: string | null;
+  version: string | null;
+  episodes: ArchiveEpisode[];
+  items?: ArchiveQualityItem[];
+  size?: string | null;
+}
+
+export interface ArchiveTitle {
+  source: ArchiveSource;
+  title: string;
+  poster: string | null;
+  kind: string;
+  groups: ArchiveGroup[];
+}
+
+export interface ArchiveFile {
+  name: string;
+  url: string;
+}

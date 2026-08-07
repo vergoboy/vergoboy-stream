@@ -16,6 +16,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 
 from config import Config
+import archive_scraper
 from livekit_auth import generate_livekit_token
 from srt_to_vtt import convert_srt_to_vtt
 
@@ -797,6 +798,130 @@ def api_upload():
     return jsonify(item)
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Search archive (DonyayeSerial / Animex) + bulk "add all episodes"
+# ────────────────────────────────────────────────────────────────────────────
+
+ARCHIVE_MAX_ADD = 60
+
+
+def _archive_err(e):
+    msg = getattr(e, "reason", None) or str(e)
+    if "timed out" in str(e).lower() or "timeout" in str(e).lower():
+        return jsonify({"error": "سایت مبدأ پاسخ نداد؛ دوباره تلاش کن"}), 504
+    return jsonify({"error": "خطا در دریافت اطلاعات از سایت مبدأ"}), 502
+
+
+@app.route("/stream/api/archive/search", methods=["POST"])
+def api_archive_search():
+    data = request.get_json(force=True, silent=True) or {}
+    q = (data.get("q") or "").strip()
+    sources = data.get("sources") or list(archive_scraper.SOURCES)
+    if not q:
+        return jsonify({"error": "عبارت جستجو خالی است"}), 400
+    if len(q) > 80:
+        return jsonify({"error": "عبارت جستجو خیلی طولانی است"}), 400
+    try:
+        results = archive_scraper.search(q, sources)
+    except Exception as e:
+        return _archive_err(e)
+    return jsonify({"results": results})
+
+
+@app.route("/stream/api/archive/title", methods=["POST"])
+def api_archive_title():
+    data = request.get_json(force=True, silent=True) or {}
+    source = (data.get("source") or "").strip()
+    url = (data.get("url") or "").strip()
+    if source not in archive_scraper.SOURCES:
+        return jsonify({"error": "منبع ناشناخته است"}), 400
+    if not url.startswith((archive_scraper.DS_BASE, archive_scraper.AX_BASE)):
+        return jsonify({"error": "آدرس صفحه معتبر نیست"}), 400
+    try:
+        info = archive_scraper.title(source, url)
+    except Exception as e:
+        return _archive_err(e)
+    return jsonify(info)
+
+
+@app.route("/stream/api/archive/files", methods=["POST"])
+def api_archive_files():
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url or "hollowofthealley" not in url:
+        return jsonify({"error": "آدرس پوشه دانلود معتبر نیست"}), 400
+    try:
+        files = archive_scraper.list_dir(url)
+    except Exception as e:
+        return _archive_err(e)
+    return jsonify({"files": files})
+
+
+def _add_url_item(url: str, title: str, name: str):
+    """Shared logic for the single add-url endpoint and the bulk archive add."""
+    item_id = new_id()
+    is_hls = _is_hls(url)
+    needs_encode = not is_hls
+    item = {
+        "id": item_id, "type": "url",
+        "title": title or url.rsplit("/", 1)[-1].split("?")[0] or "ویدیو",
+        "src": None if needs_encode else url,
+        "subtitles": [], "audio_tracks": [], "added_by": name,
+        "added_at": time.time(),
+        "status": "queued" if needs_encode else "ready",
+    }
+    with LOCK:
+        if room:
+            room.add_item(item)
+            safe_save(room)
+    broadcast_state()
+    if needs_encode:
+        broadcast_notify("playlist_add_processing", name, title=item["title"])
+        gevent.spawn(start_item_encoding, item_id, url, name)
+    else:
+        broadcast_notify("playlist_add", name, title=item["title"])
+    return item
+
+
+@app.route("/stream/api/add-many", methods=["POST"])
+def api_add_many():
+    """Bulk-adds episodes/qualities scraped from the archive to the playlist."""
+    data = request.get_json(force=True, silent=True) or {}
+    items = data.get("items") or []
+    name = (data.get("name") or "ناشناس").strip()
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "هیچ قسمتی برای افزودن نیست"}), 400
+    if len(items) > ARCHIVE_MAX_ADD:
+        return jsonify({"error": f"بیش از حد مجاز است — حداکثر {ARCHIVE_MAX_ADD} قسمت در هر بار"}), 400
+
+    added = 0
+    skipped = 0
+    first_title = ""
+    for it in items[:ARCHIVE_MAX_ADD]:
+        url = (it.get("url") or "").strip() if isinstance(it, dict) else ""
+        title = (it.get("title") or "").strip() if isinstance(it, dict) else ""
+        if not url or not url.startswith(("https://", "http://")):
+            continue
+        with LOCK:
+            if room:
+                dup = any(
+                    itm.get("src") == url or itm.get("_source") == url
+                    for itm in room.playlist
+                )
+            else:
+                dup = False
+        if dup:
+            skipped += 1
+            continue
+        item = _add_url_item(url, title, name)
+        added += 1
+        first_title = item["title"]
+    if added == 0:
+        return jsonify({"added": 0, "skipped": skipped, "error": None})
+    broadcast_notify("playlist_add_many", name, title=first_title, count=added, skipped=skipped)
+    return jsonify({"added": added, "skipped": skipped})
+
+
 @app.route("/stream/api/youtube-formats", methods=["POST"])
 def api_youtube_formats():
     data = request.get_json(force=True, silent=True) or {}
@@ -954,29 +1079,7 @@ def api_add_url():
     if not url:
         return jsonify({"error": "لینک خالی است"}), 400
 
-    item_id = new_id()
-    is_hls = _is_hls(url)
-    needs_encode = not is_hls
-
-    item = {
-        "id": item_id, "type": "url",
-        "title": title or url.rsplit("/", 1)[-1].split("?")[0] or "ویدیو",
-        "src": None if needs_encode else url,
-        "subtitles": [], "audio_tracks": [], "added_by": name,
-        "added_at": time.time(),
-        "status": "queued" if needs_encode else "ready",
-    }
-    with LOCK:
-        if room:
-            room.add_item(item)
-            safe_save(room)
-    broadcast_state()
-    if needs_encode:
-        broadcast_notify("playlist_add_processing", name, title=item["title"])
-        gevent.spawn(start_item_encoding, item_id, url, name)
-    else:
-        broadcast_notify("playlist_add", name, title=item["title"])
-    return jsonify(item)
+    return jsonify(_add_url_item(url, title, name))
 
 
 @app.route("/stream/api/request-quality", methods=["POST"])

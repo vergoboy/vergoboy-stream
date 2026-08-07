@@ -15,6 +15,7 @@ import { Player } from "@/components/Player";
 import { Tabs } from "@/components/Tabs";
 import { Playlist } from "@/components/Playlist";
 import { AddVideoPanel } from "@/components/AddVideoPanel";
+import { ArchivePanel } from "@/components/ArchivePanel";
 import { LivePanel } from "@/components/LivePanel";
 import { SubAudioPanel } from "@/components/SubAudioPanel";
 import { SubStylePanel } from "@/components/SubStylePanel";
@@ -28,7 +29,7 @@ import { SettingsModal } from "@/components/SettingsModal";
 import { SettingsProvider } from "@/lib/settings";
 import { useVoiceRoom } from "@/lib/useVoiceRoom";
 import { notifyText } from "@/lib/notifyText";
-import { ListVideo, Plus, Radio, Captions, Palette, MessageSquare, Users } from "lucide-react";
+import { ListVideo, Plus, Radio, Captions, Palette, MessageSquare, Users, Archive } from "lucide-react";
 
 let toastSeq = 0;
 
@@ -160,6 +161,7 @@ function PageInner() {
               tabs={[
                 { id: "playlist", label: (<span className="flex items-center gap-1.5"><ListVideo className="h-4 w-4" /> پلی‌لیست</span>) },
                 { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="h-4 w-4" /> افزودن ویدیو</span>) },
+                { id: "archive", label: (<span className="flex items-center gap-1.5"><Archive className="h-4 w-4" /> آرشیو جستجو</span>) },
                 { id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="h-4 w-4" /> استریم خارجی</span>) },
                 { id: "subaudio", label: (<span className="flex items-center gap-1.5"><Captions className="h-4 w-4" /> زیرنویس و صدا</span>) },
                 { id: "substyle", label: (<span className="flex items-center gap-1.5"><Palette className="h-4 w-4" /> استایل زیرنویس</span>) },
@@ -178,6 +180,7 @@ function PageInner() {
                 />
               )}
               {activeTab === "add" && <AddVideoPanel myName={myName} />}
+              {activeTab === "archive" && <ArchivePanel myName={myName} />}
               {activeTab === "live" && <LivePanel myName={myName} />}
               {activeTab === "subaudio" && <SubAudioPanel playlist={room.playlist} myName={myName} />}
               {activeTab === "substyle" && <SubStylePanel value={subStyle} onChange={setSubStyle} />}

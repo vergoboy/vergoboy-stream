@@ -35,6 +35,8 @@ export function notifyText(n: NotifyEvent, playlist: PlaylistItem[]): string {
       return `${n.count ?? ""} زیرنویس از داخل «${title}» به‌صورت خودکار استخراج شد`;
     case "playlist_add_live":
       return `<b>${name}</b> پخش زنده «${title}» را اضافه کرد`;
+    case "playlist_add_many":
+      return `<b>${name}</b> ${n.count ?? ""} قسمت از «${title}» را به پلی‌لیست اضافه کرد`;
     case "playlist_remove":
       return `<b>${name}</b> «${title}» را حذف کرد`;
     case "subtitle_add":

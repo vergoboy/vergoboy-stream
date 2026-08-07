@@ -128,4 +128,16 @@ export const api = {
       "/stream/api/voice/token",
       { name, avatar_url: avatarUrl }
     ),
+
+  archiveSearch: (q: string, sources: string[]) =>
+    postJson<{ results: import("./types").ArchiveResult[] }>("/stream/api/archive/search", { q, sources }),
+
+  archiveTitle: (source: string, url: string) =>
+    postJson<import("./types").ArchiveTitle>("/stream/api/archive/title", { source, url }),
+
+  archiveFiles: (url: string) =>
+    postJson<{ files: import("./types").ArchiveFile[] }>("/stream/api/archive/files", { url }),
+
+  addMany: (items: { title: string; url: string }[], name: string) =>
+    postJson<{ added: number; skipped: number }>("/stream/api/add-many", { items, name }),
 };
