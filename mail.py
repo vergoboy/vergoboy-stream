@@ -68,3 +68,30 @@ def send_verification_email(to: str, verify_url: str) -> bool:
   </div>
 </body></html>"""
     return send_email(to, subject, html)
+
+
+def send_password_reset_email(to: str, reset_url: str) -> bool:
+    subject = "بازنشانی رمز عبور — vergoboy"
+    html = f"""\
+<html dir="rtl" lang="fa"><body style="margin:0;padding:0;background:#f2f0ea;font-family:Tahoma,Arial,sans-serif">
+  <div style="max-width:520px;margin:24px auto;background:#fff;border-radius:18px;overflow:hidden;border:1px solid #e6e2d8">
+    <div style="background:linear-gradient(135deg,#d4a017,#6b4e93);padding:22px 28px">
+      <div style="font-size:22px;font-weight:bold;color:#fff">تماشای مشترک · vergoboy</div>
+    </div>
+    <div style="padding:28px">
+      <p style="margin:0 0 14px;font-size:15px;color:#2b2b2b;line-height:1.9">سلام،</p>
+      <p style="margin:0 0 22px;font-size:14px;color:#444;line-height:1.9">
+        برای تعیین رمز عبور جدید روی دکمه زیر بزن. این لینک تا ۳۰ دقیقه معتبر است
+        و فقط یک بار قابل استفاده است.
+      </p>
+      <a href="{reset_url}" style="display:inline-block;background:linear-gradient(135deg,#d4a017,#6b4e93);color:#fff;text-decoration:none;font-size:15px;font-weight:bold;padding:13px 34px;border-radius:12px">
+        بازنشانی رمز عبور
+      </a>
+      <p style="margin:24px 0 0;font-size:12px;color:#8a8578;line-height:1.8">
+        اگر این ایمیل را تو نفرستاده‌ای، آن را نادیده بگیر؛ رمز فعلی تو تغییر نمی‌کند.<br>
+        لینک مستقیم: <a href="{reset_url}" style="color:#6b4e93">{reset_url}</a>
+      </p>
+    </div>
+  </div>
+</body></html>"""
+    return send_email(to, subject, html)

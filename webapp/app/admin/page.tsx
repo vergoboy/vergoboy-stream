@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { LayoutDashboard, Users, DoorOpen, Radio, Film, RotateCw, Save, ArrowRight } from "lucide-react";
+import { LayoutDashboard, Users, DoorOpen, Radio, Film, RotateCw, Save, Trash2, ArrowRight } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import type { AdminUser, UserRole } from "@/lib/types";
@@ -42,6 +42,7 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null);
   const [edits, setEdits] = useState<Record<string, { role: UserRole; can_control: boolean; youtube_allowed: boolean; upload_quota: number }>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -135,6 +136,25 @@ export default function AdminPage() {
 
   function setEdit(u: AdminUser, patch: Partial<{ role: UserRole; can_control: boolean; youtube_allowed: boolean; upload_quota: number }>) {
     setEdits((prev) => ({ ...prev, [u.id]: { ...rowEdit(u), ...patch } }));
+  }
+
+  async function del(u: AdminUser) {
+    const ok = window.confirm(
+      `حساب «${u.username}» به‌همراه اتاق و مدیاهایش برای همیشه حذف شود؟\n\nاین کار قابل بازگشت نیست.`
+    );
+    if (!ok) return;
+    setDeletingId(u.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.adminDeleteUser(u.id);
+      setUsers((prev) => (prev ? prev.filter((x) => x.id !== u.id) : prev));
+      setNotice(`حساب «${u.username}» حذف شد`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطا در حذف کاربر");
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   return (
@@ -256,15 +276,26 @@ export default function AdminPage() {
                     </td>
                     <td className="px-3 py-3 text-[12px] text-[color:var(--color-ink-dim)]">{fmtDate(u.created_at)}</td>
                     <td className="px-3 py-3">
-                      <button
-                        onClick={() => save(u)}
-                        disabled={!dirty || savingId === u.id || isSelf}
-                        title={isSelf ? "نمی‌توانی دسترسی خودت را تغییر دهی" : undefined}
-                        className="flex items-center gap-1.5 rounded-lg border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-[12px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <Save className="h-3.5 w-3.5" />
-                        {savingId === u.id ? "در حال ذخیره…" : "ذخیره"}
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => save(u)}
+                          disabled={!dirty || savingId === u.id || isSelf}
+                          title={isSelf ? "نمی‌توانی دسترسی خودت را تغییر دهی" : undefined}
+                          className="flex items-center gap-1.5 rounded-lg border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-[12px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Save className="h-3.5 w-3.5" />
+                          {savingId === u.id ? "در حال ذخیره…" : "ذخیره"}
+                        </button>
+                        <button
+                          onClick={() => del(u)}
+                          disabled={deletingId === u.id || isSelf}
+                          title={isSelf ? "نمی‌توانی حساب خودت را حذف کنی" : "حذف حساب و اتاق"}
+                          className="flex items-center gap-1.5 rounded-lg border border-[color:var(--color-coral)]/25 bg-[color:var(--color-coral)]/5 px-2.5 py-1.5 text-[12px] text-[color:var(--color-coral)] hover:border-[color:var(--color-coral)]/50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          {deletingId === u.id ? "در حال حذف…" : "حذف"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );

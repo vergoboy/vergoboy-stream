@@ -38,3 +38,4 @@ data/
 webapp-out/
 .npm-cache/
 .config/
+.stream_db.env

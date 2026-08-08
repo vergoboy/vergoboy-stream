@@ -1861,6 +1861,123 @@ def api_auth_resend_verification():
         session.close()
 
 
+@app.route("/stream/api/auth/forgot-password", methods=["POST"])
+def api_auth_forgot_password():
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "ایمیل را وارد کن"}), 400
+    session = dbmod.SessionLocal()
+    try:
+        user = dbmod.get_user_by_email(session, email)
+        if user:
+            user.reset_token = dbmod.new_verification_token()
+            user.reset_expires = datetime.now(timezone.utc) + timedelta(
+                minutes=Config.RESET_TOKEN_TTL_MINUTES
+            )
+            session.commit()
+            reset_url = f"{Config.SITE_BASE_URL}/api/auth/reset?token={user.reset_token}"
+            mailmod.send_password_reset_email(user.email, reset_url)
+        return jsonify({"ok": True})  # don't leak which emails exist
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/auth/reset")
+def api_auth_reset_page():
+    token = (request.args.get("token") or "").strip()
+    session = dbmod.SessionLocal()
+    try:
+        user = session.execute(
+            dbmod.select(DBUser).where(DBUser.reset_token == token)
+        ).scalar_one_or_none()
+        if not user:
+            return _reset_page(None, "این لینک بازنشانی معتبر نیست یا قبلاً استفاده شده است.")
+        exp = user.reset_expires
+        if exp and exp.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            return _reset_page(None, "این لینک بازنشانی منقضی شده است؛ دوباره از صفحه ورود درخواست بده.")
+        return _reset_page(token, None)
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/auth/reset-password", methods=["POST"])
+def api_auth_reset_password():
+    data = request.get_json(force=True, silent=True) or {}
+    if not data:
+        data = dict(request.form)
+    token = (data.get("token") or "").strip()
+    password = data.get("password") or ""
+    if not token:
+        return jsonify({"error": "توکن نامعتبر است"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "رمز عبور باید حداقل ۶ کاراکتر باشد"}), 400
+    session = dbmod.SessionLocal()
+    try:
+        user = session.execute(
+            dbmod.select(DBUser).where(DBUser.reset_token == token)
+        ).scalar_one_or_none()
+        if not user:
+            msg = "این لینک بازنشانی معتبر نیست یا قبلاً استفاده شده است."
+            return jsonify({"error": msg}), 400
+        exp = user.reset_expires
+        if exp and exp.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            msg = "این لینک بازنشانی منقضی شده است؛ دوباره از صفحه ورود درخواست بده."
+            return jsonify({"error": msg}), 400
+        user.password_hash = dbmod.hash_password(password)
+        user.reset_token = None
+        user.reset_expires = None
+        # Revoke every refresh token so the old password's sessions are signed out.
+        session.execute(
+            dbmod.delete(dbmod.RefreshToken).where(dbmod.RefreshToken.user_id == user.id)
+        )
+        session.commit()
+        return jsonify({"ok": True})
+    finally:
+        session.close()
+
+
+def _reset_page(token, error=None, success=False):
+    form = f"""\
+<form method="post" action="{Config.SITE_BASE_URL}/api/auth/reset-password" style="text-align:right">
+  <input type="hidden" name="token" value="{token}">
+  <label style="display:block;margin:0 0 6px;font-size:13px;color:#444">رمز عبور جدید</label>
+  <input type="password" name="password" required minlength="6" placeholder="حداقل ۶ کاراکتر" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #ddd;border-radius:10px;font-size:14px;margin-bottom:14px">
+  <label style="display:block;margin:0 0 6px;font-size:13px;color:#444">تکرار رمز عبور</label>
+  <input type="password" id="pw2" required minlength="6" placeholder="دوباره بنویس" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #ddd;border-radius:10px;font-size:14px;margin-bottom:18px">
+  <button type="submit" style="width:100%;background:linear-gradient(135deg,#d4a017,#6b4e93);color:#fff;border:0;font-weight:bold;font-size:15px;padding:13px;border-radius:12px;cursor:pointer">بازنشانی رمز عبور</button>
+</form>"""
+    if success:
+        body = f"""<div class="icon" style="color:#2c8f6b">✓</div>
+<h2>رمز عبورت تغییر کرد</h2>
+<p>حالا می‌توانی با رمز جدید وارد حساب‌ات شوی.</p>
+<a class="btn" href="{Config.SITE_BASE_URL}/">ورود به تماشای مشترک</a>"""
+    elif error:
+        body = f"""<div class="icon" style="color:#c0392b">✗</div>
+<h2>بازنشانی ناموفق</h2>
+<p>{error}</p>
+<a class="btn" href="{Config.SITE_BASE_URL}/">بازگشت به صفحه ورود</a>"""
+    else:
+        body = f"""<h2>تعیین رمز عبور جدید</h2>
+<p style="margin:0 0 22px;color:#555;font-size:14px;line-height:1.9">رمز جدیدی برای حساب‌ات انتخاب کن.</p>
+{form}"""
+    return f"""<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
+<title>بازنشانی رمز عبور</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{{margin:0;font-family:Tahoma,Arial,sans-serif;background:#f2f0ea;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.box{{max-width:440px;background:#fff;border-radius:18px;padding:36px;text-align:center;border:1px solid #e6e2d8;margin:20px;width:100%;box-sizing:border-box}}
+.icon{{font-size:46px;font-weight:bold}}
+h2{{margin:14px 0 10px;font-size:18px;color:#2b2b2b}}
+p{{margin:0 0 22px;color:#555;font-size:14px;line-height:1.9}}
+a.btn{{display:inline-block;background:linear-gradient(135deg,#d4a017,#6b4e93);color:#fff;text-decoration:none;font-weight:bold;padding:13px 34px;border-radius:12px;font-size:14px}}</style>
+</head><body><div class="box">{body}
+<script>document.querySelector('form')?.addEventListener('submit',function(e){{
+  var a=e.target.password.value,b=document.getElementById('pw2').value;
+  if(a!==b){{e.preventDefault();alert('رمزها یکی نیستند');}}
+}});</script>
+</div></body></html>"""
+
+
 @app.route("/stream/api/auth/login", methods=["POST"])
 def api_auth_login():
     data = request.get_json(force=True, silent=True) or {}
@@ -2331,6 +2448,57 @@ def api_admin_update_user(user_id):
 
         session.commit()
         return jsonify({"user": target.public_dict()})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/admin/users/<user_id>", methods=["DELETE"])
+def api_admin_delete_user(user_id):
+    admin = _require_user()
+    if not _is_admin(admin):
+        return jsonify({"error": "دسترسی ادمین لازم است"}), 403
+    session = dbmod.SessionLocal()
+    try:
+        target = session.get(DBUser, user_id)
+        if not target:
+            return jsonify({"error": "کاربر پیدا نشد"}), 404
+        if target.id == admin.id:
+            return jsonify({"error": "نمی‌توانی حساب خودت را حذف کنی"}), 400
+
+        # Revoke every refresh token the user holds.
+        session.execute(
+            dbmod.delete(dbmod.RefreshToken).where(dbmod.RefreshToken.user_id == target.id)
+        )
+
+        # Remove rooms owned by the user (normally just their own room) after
+        # pointing any visitor's current_room_id away from them.
+        rooms_owned = session.execute(
+            dbmod.select(dbmod.Room).where(dbmod.Room.owner_id == target.id)
+        ).scalars().all()
+        for room in rooms_owned:
+            code = room.id
+            session.execute(
+                dbmod.update(DBUser)
+                .where(DBUser.current_room_id == code)
+                .values(current_room_id=None)
+            )
+            rooms.drop(code)
+            session.delete(room)
+
+        # Drop any live socket connections the user holds.
+        for sid, (_code, u) in list(SOCKET_SESSIONS.items()):
+            if u.id == target.id:
+                SOCKET_SESSIONS.pop(sid, None)
+                try:
+                    socketio.server.disconnect(sid, namespace="/")
+                except Exception:
+                    pass
+
+        username = target.username
+        session.delete(target)
+        session.commit()
+        log_debug(f"Admin '{admin.username}' deleted user '{username}'")
+        return jsonify({"ok": True})
     finally:
         session.close()
 

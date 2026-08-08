@@ -262,6 +262,21 @@ export async function resendVerification(email: string): Promise<void> {
   if (!res.ok) throw new Error(data.error || "ارسال دوباره ناموفق بود");
 }
 
+export async function forgotPassword(email: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(apiUrl("/stream/api/auth/forgot-password"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+  } catch (e) {
+    throw friendlyError(e);
+  }
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) throw new Error(data.error || "درخواست بازنشانی ناموفق بود");
+}
+
 export async function logout(): Promise<void> {
   const refresh = state.refresh;
   try {

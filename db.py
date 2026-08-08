@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from jose import JWTError, jwt
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, func, select,
+    Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, text,
+    update,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -60,6 +61,10 @@ class User(Base):
     # in via OAuth, whose emails are verified by the provider).
     verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     verification_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Password reset (one-time tokens, cleared after use).
+    reset_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reset_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # OAuth identity (provider + provider-side user id), used to find/link
     # accounts when the same person signs in again via Google/GitHub.
@@ -250,6 +255,33 @@ def init_db():
     """Creates tables if missing. Called once at startup."""
     with _ddl_lock:
         Base.metadata.create_all(engine)
+        _migrate_columns()
+
+
+def _migrate_columns():
+    """Adds columns introduced after the original schema was deployed.
+    create_all() only creates missing tables, so new columns on existing
+    tables must be added explicitly (idempotent, safe to re-run)."""
+    with engine.begin() as conn:
+        existing = {
+            (r.table_name, r.column_name)
+            for r in conn.execute(
+                text(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema()"
+                )
+            )
+        }
+    adds = [
+        ("users", "reset_token", "VARCHAR(128)"),
+        ("users", "reset_expires", "TIMESTAMPTZ"),
+    ]
+    missing = [(t, c, d) for (t, c, d) in adds if (t, c) not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for table, col, dtype in missing:
+            conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {dtype}'))
 
 
 def first_user_count(session) -> int:

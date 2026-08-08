@@ -211,4 +211,10 @@ export const api = {
 
   adminUpdateUser: (userId: string, patch: { role?: string; can_control?: boolean; youtube_allowed?: boolean; upload_quota?: number; is_active?: boolean }) =>
     postJson<{ user: AdminUser }>(`/stream/api/admin/users/${userId}`, patch),
+
+  adminDeleteUser: async (userId: string): Promise<void> => {
+    const res = await authFetch(`/stream/api/admin/users/${userId}`, { method: "DELETE" });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) throw new Error(data.error || "حذف کاربر ناموفق بود");
+  },
 };

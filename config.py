@@ -73,6 +73,7 @@ class Config:
         if e.strip()
     }
     VERIFY_TOKEN_TTL_HOURS = int(os.environ.get("STREAM_VERIFY_TTL_HOURS", "72"))
+    RESET_TOKEN_TTL_MINUTES = int(os.environ.get("STREAM_RESET_TTL_MINUTES", "30"))
 
     # OAuth2 providers (reuses the same Google/GitHub apps as arman-music).
     GOOGLE_OAUTH_CLIENT_ID = os.environ.get("STREAM_GOOGLE_OAUTH_CLIENT_ID", "")

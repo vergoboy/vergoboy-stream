@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Eye, EyeOff, Mail, RefreshCw, ArrowRight } from "lucide-react";
-import { login, register, resendVerification, oauthLoginUrl, VerifyRequiredError } from "@/lib/auth";
+import { login, register, resendVerification, forgotPassword, oauthLoginUrl, VerifyRequiredError } from "@/lib/auth";
 
 type Mode = "login" | "register";
 
@@ -27,6 +27,8 @@ export function AuthGate() {
   const [showPw, setShowPw] = useState(false);
   const [verifyEmail, setVerifyEmail] = useState<string | null>(null);
   const [verifySent, setVerifySent] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
   const [error, setError] = useState<string | null>(readOAuthError());
   const [busy, setBusy] = useState(false);
 
@@ -78,10 +80,32 @@ export function AuthGate() {
     }
   }
 
+  async function sendForgot() {
+    if (busy) return;
+    const e = email.trim().toLowerCase();
+    if (!e) {
+      setError("ایمیل را وارد کن");
+      return;
+    }
+    setError(null);
+    setForgotSent(false);
+    setBusy(true);
+    try {
+      await forgotPassword(e);
+      setForgotSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "درخواست بازنشانی ناموفق بود");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function switchMode(m: Mode) {
     setMode(m);
     setError(null);
     setVerifySent(false);
+    setShowForgot(false);
+    setForgotSent(false);
   }
 
   return (
@@ -142,6 +166,58 @@ export function AuthGate() {
                   switchMode("login");
                 }}
                 className="flex w-full items-center justify-center gap-2 rounded-2xl px-6 py-3 text-[13.5px] font-bold text-[color:var(--color-ink-muted)] transition-colors hover:text-[color:var(--color-ink)]"
+              >
+                <ArrowRight className="h-4 w-4 rotate-180" />
+                بازگشت به ورود
+              </button>
+            </>
+          ) : showForgot ? (
+            <>
+              <h3 className="mb-2 text-lg font-bold text-[color:var(--color-ink)]">
+                فراموشی رمز عبور
+              </h3>
+              <p className="mb-5 text-[13px] leading-relaxed text-[color:var(--color-ink-muted)]">
+                ایمیل حساب‌ات را بنویس؛ یک لینک برای تعیین رمز جدید برایت می‌فرستیم.
+              </p>
+
+              {forgotSent && (
+                <p className="mb-4 rounded-xl border border-[color:var(--color-teal)]/30 bg-[color:var(--color-teal)]/10 px-3 py-2 text-[12.5px] text-[color:var(--color-teal)]">
+                  لینک بازنشانی فرستاده شد؛ اگر حسابی با این ایمیل باشد، صندوق ورودی را چک کن.
+                </p>
+              )}
+              {error && !forgotSent && (
+                <p className="mb-4 rounded-xl border border-[color:var(--color-coral)]/30 bg-[color:var(--color-coral)]/10 px-3 py-2 text-[12.5px] text-[color:var(--color-coral)]">
+                  {error}
+                </p>
+              )}
+
+              <input
+                type="email"
+                autoFocus
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendForgot()}
+                maxLength={255}
+                placeholder="ایمیل حساب‌ات"
+                autoComplete="email"
+                className="mb-4 w-full rounded-2xl border border-[color:var(--color-border)] bg-white/5 px-4 py-3 text-center text-[14.5px] text-[color:var(--color-ink)] outline-none focus:border-[color:var(--color-amber)]"
+              />
+
+              <button
+                onClick={sendForgot}
+                disabled={busy || forgotSent}
+                className="w-full rounded-2xl px-6 py-3 text-[14.5px] font-bold text-white transition-transform active:scale-[0.98] disabled:opacity-60"
+                style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+              >
+                {busy ? "لطفاً صبر کن…" : "ارسال لینک بازنشانی"}
+              </button>
+              <button
+                onClick={() => {
+                  setShowForgot(false);
+                  setForgotSent(false);
+                  setError(null);
+                }}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl px-6 py-3 text-[13.5px] font-bold text-[color:var(--color-ink-muted)] transition-colors hover:text-[color:var(--color-ink)]"
               >
                 <ArrowRight className="h-4 w-4 rotate-180" />
                 بازگشت به ورود
@@ -216,6 +292,20 @@ export function AuthGate() {
                   {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
+
+              {mode === "login" && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowForgot(true);
+                    setForgotSent(false);
+                    setError(null);
+                  }}
+                  className="mb-4 -mt-1 text-[12px] font-bold text-[color:var(--color-ink-muted)] transition-colors hover:text-[color:var(--color-amber)]"
+                >
+                  رمز عبور را فراموش کرده‌ای؟
+                </button>
+              )}
 
               {error && (
                 <p className="mb-4 rounded-xl border border-[color:var(--color-coral)]/30 bg-[color:var(--color-coral)]/10 px-3 py-2 text-[12.5px] text-[color:var(--color-coral)]">
