@@ -1,21 +1,55 @@
 import { apiUrl } from "./config";
 
+const FETCH_TIMEOUT_MS = 45000;
+
+function friendlyError(e: unknown): Error {
+  const msg = e instanceof Error ? e.message : String(e);
+  const name = e instanceof Error ? e.name : "";
+  if (name === "AbortError" || (typeof DOMException !== "undefined" && e instanceof DOMException && e.name === "AbortError")) {
+    return new Error("سرور پاسخ نداد؛ اتصال را بررسی کن و دوباره تلاش کن");
+  }
+  if (
+    name === "TypeError" ||
+    /failed to fetch|networkerror|load failed|network request failed/i.test(msg)
+  ) {
+    return new Error("ارتباط با سرور برقرار نشد؛ اتصال اینترنت را بررسی کن");
+  }
+  return e instanceof Error ? e : new Error(msg);
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(apiUrl(path), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(data.error || `${path} failed (${res.status})`);
-  return data;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(apiUrl(path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+    if (!res.ok) throw new Error(data.error || `${path} failed (${res.status})`);
+    return data;
+  } catch (e) {
+    throw friendlyError(e);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function postForm<T>(path: string, form: FormData): Promise<T> {
-  const res = await fetch(apiUrl(path), { method: "POST", body: form });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(data.error || `${path} failed (${res.status})`);
-  return data;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(apiUrl(path), { method: "POST", body: form, signal: controller.signal });
+    const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+    if (!res.ok) throw new Error(data.error || `${path} failed (${res.status})`);
+    return data;
+  } catch (e) {
+    throw friendlyError(e);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface UploadResult {
@@ -139,5 +173,5 @@ export const api = {
     postJson<{ files: import("./types").ArchiveFile[] }>("/stream/api/archive/files", { url }),
 
   addMany: (items: { title: string; url: string }[], name: string) =>
-    postJson<{ added: number; skipped: number }>("/stream/api/add-many", { items, name }),
+    postJson<{ added: number; skipped: number; dead: string[] }>("/stream/api/add-many", { items, name }),
 };

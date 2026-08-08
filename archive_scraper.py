@@ -13,6 +13,7 @@ import base64
 import html
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -20,7 +21,8 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
-TIMEOUT = 20
+TIMEOUT = 12
+RETRIES = 1
 
 DS_BASE = "https://donyayeserial.com"
 AX_BASE = "https://animex.click"
@@ -38,14 +40,22 @@ def _clean(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _fetch(url, timeout=TIMEOUT):
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA,
-        "Accept-Language": "fa,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
+def _fetch(url, timeout=TIMEOUT, _retries=RETRIES):
+    last = None
+    for attempt in range(_retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": UA,
+                "Accept-Language": "fa,en;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception as e:  # HTTPError / URLError / socket timeout / ...
+            last = e
+            if attempt < _retries:
+                time.sleep(0.8)
+    raise last
 
 
 def _is_media_url(u):
@@ -69,40 +79,52 @@ def _media_links(blk):
 # DonyayeSerial
 # ────────────────────────────────────────────────────────────────────────────
 
-def search_donyayeserial(q):
-    """Searches both movies (post) and series archives."""
+def _ds_search_one(q, post_type):
+    """Searches a single donyayeserial archive (movies=post, series=series)."""
+    url = DS_BASE + "/?" + urllib.parse.urlencode({
+        "s": q, "search_type": "advanced", "post_type": post_type,
+    })
+    try:
+        page = _fetch(url)
+    except Exception:
+        return []
     results = []
-    for post_type in ("post", "series"):
-        url = DS_BASE + "/?" + urllib.parse.urlencode({
-            "s": q, "search_type": "advanced", "post_type": post_type,
-        })
-        try:
-            page = _fetch(url)
-        except Exception:
+    for m in re.finditer(r'<article class="[^"]*postItems', page):
+        block = page[m.end():]
+        t = re.search(r'<h2>\s*<a href="([^"]+)"[^>]*title="([^"]*)"', block)
+        if not t:
             continue
-        for m in re.finditer(r'<article class="[^"]*postItems', page):
-            block = page[m.end():]
-            t = re.search(r'<h2>\s*<a href="([^"]+)"[^>]*title="([^"]*)"', block)
-            if not t:
-                continue
-            href, title = t.group(1), _clean(t.group(2))
-            if not title or not href:
-                continue
-            img = re.search(r'<img[^>]+src="([^"]+)"', block)
-            rat = re.search(
-                r'<div class="imdb-rating[^>]*>.*?<span class="text-warning">([\d.]+)</span>',
-                block, re.S)
-            kind = "series" if "/series/" in href else "movie"
-            results.append({
-                "source": "donyayeserial",
-                "kind": kind,
-                "title": title,
-                "url": href,
-                "poster": img.group(1) if img else None,
-                "rating": rat.group(1) if rat else None,
-                "year": None,
-            })
+        href, title = t.group(1), _clean(t.group(2))
+        if not title or not href:
+            continue
+        img = re.search(r'<img[^>]+src="([^"]+)"', block)
+        rat = re.search(
+            r'<div class="imdb-rating[^>]*>.*?<span class="text-warning">([\d.]+)</span>',
+            block, re.S)
+        kind = "series" if "/series/" in href else "movie"
+        results.append({
+            "source": "donyayeserial",
+            "kind": kind,
+            "title": title,
+            "url": href,
+            "poster": img.group(1) if img else None,
+            "rating": rat.group(1) if rat else None,
+            "year": None,
+        })
     return results
+
+
+def search_donyayeserial(q):
+    """Searches both movies (post) and series archives in parallel."""
+    try:
+        from gevent.pool import Group
+        pages = Group().map(lambda pt: _ds_search_one(q, pt), ("post", "series"))
+    except Exception:
+        pages = [_ds_search_one(q, pt) for pt in ("post", "series")]
+    out = []
+    for r in pages:
+        out.extend(r)
+    return out
 
 
 def _ds_title_meta(page, url):

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { api } from "@/lib/api";
-import type { ArchiveResult, ArchiveTitle, ArchiveGroup } from "@/lib/types";
+import type { ArchiveResult, ArchiveTitle, ArchiveGroup, ArchiveEpisode } from "@/lib/types";
 import {
   Search,
   ArrowRight,
@@ -18,6 +18,7 @@ import {
   DownloadCloud,
   Link2,
   FolderOpen,
+  ChevronDown,
 } from "lucide-react";
 
 const inputClass =
@@ -130,8 +131,11 @@ export function ArchivePanel({ myName }: { myName: string }) {
     }
     try {
       const data = await api.addMany(items, myName);
+      const deadNote = data.dead?.length ? `؛ ${data.dead.length} لینک خراب بود` : "";
       if (data.added > 0) {
-        setMsg({ text: `✓ ${data.added} قسمت به پلی‌لیست اضافه شد${data.skipped ? ` (${data.skipped} تکراری بود)` : ""}` });
+        setMsg({ text: `✓ ${data.added} قسمت به پلی‌لیست اضافه شد${deadNote}${data.skipped ? ` (${data.skipped} تکراری بود)` : ""}` });
+      } else if (data.dead?.length) {
+        setMsg({ text: "هیچ قسمتی اضافه نشد — لینک در سایت منبع خراب است", error: true });
       } else {
         setMsg({ text: "این قسمت‌ها از قبل در پلی‌لیست هستند", error: true });
       }
@@ -149,6 +153,23 @@ export function ArchivePanel({ myName }: { myName: string }) {
     }));
     setMsg(null);
     runAdd(items);
+  }
+
+  async function addDonyayeSerialEpisode(group: ArchiveGroup, ep: ArchiveEpisode, i: number) {
+    if (!detail) return;
+    const base = detail.title;
+    setAddBusy("ds-one");
+    setMsg(null);
+    try {
+      await runAdd([
+        {
+          title: `${base} — ${group.label} — ${ep.num ? `قسمت ${ep.num}` : `قسمت ${i + 1}`}`,
+          url: ep.url,
+        },
+      ]);
+    } finally {
+      setAddBusy(null);
+    }
   }
 
   async function addAnimexQuality(group: ArchiveGroup, dirUrl: string, quality: string) {
@@ -199,6 +220,7 @@ export function ArchivePanel({ myName }: { myName: string }) {
             setErr(null);
           }}
           onAddDs={addDonyayeSerialGroup}
+          onAddDsOne={addDonyayeSerialEpisode}
           onAddAnimex={addAnimexQuality}
         />
       )}
@@ -352,6 +374,7 @@ function DetailView({
   groupCount,
   onBack,
   onAddDs,
+  onAddDsOne,
   onAddAnimex,
 }: {
   detail: ArchiveTitle;
@@ -361,8 +384,10 @@ function DetailView({
   groupCount: number;
   onBack: () => void;
   onAddDs: (g: ArchiveGroup) => void;
+  onAddDsOne: (g: ArchiveGroup, ep: ArchiveEpisode, i: number) => void;
   onAddAnimex: (g: ArchiveGroup, dirUrl: string, quality: string) => void;
 }) {
+  const [openEps, setOpenEps] = useState<Record<string, boolean>>({});
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-2">
@@ -480,6 +505,52 @@ function DetailView({
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {eps.length > 0 && (
+                  <div className="mt-2.5 border-t border-[color:var(--color-border)]/60 pt-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setOpenEps((s) => ({ ...s, [String(gi)]: !s[String(gi)] }))}
+                      className="flex items-center gap-1 text-[12px] font-semibold text-[color:var(--color-amber)]"
+                    >
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 transition-transform ${openEps[String(gi)] ? "rotate-180" : ""}`}
+                      />
+                      {openEps[String(gi)] ? "بستن لیست قسمت‌ها" : `نمایش ${eps.length} قسمت`}
+                    </button>
+                    <AnimatePresence initial={false}>
+                      {openEps[String(gi)] && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="mt-2 flex max-h-52 flex-col gap-1.5 overflow-y-auto pl-1">
+                            {eps.map((ep, i) => (
+                              <div key={`${ep.url}-${i}`} className="flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] px-3 py-2">
+                                <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-[color:var(--color-ink)]">
+                                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-plum)]/20 text-[10.5px] font-bold text-[color:var(--color-plum-soft)]">
+                                    {ep.num ?? i + 1}
+                                  </span>
+                                  <span className="truncate">{ep.num ? `قسمت ${ep.num}` : `قسمت ${i + 1}`}</span>
+                                </span>
+                                <button
+                                  onClick={() => onAddDsOne(g, ep, i)}
+                                  disabled={!!addBusy}
+                                  className="flex shrink-0 items-center gap-1 rounded-lg border border-[color:var(--color-border)] bg-white/5 px-2.5 py-1.5 text-[11.5px] font-bold text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-50"
+                                >
+                                  {addBusy === "ds-one" ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" /> : <Plus className="h-3.5 w-3.5" />}
+                                  افزودن
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 )}
               </motion.div>

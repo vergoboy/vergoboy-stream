@@ -5,6 +5,7 @@ import { Play, Trash2, Clock, CheckCircle2, AlertTriangle, Loader2, Radio, Video
 
 import { AnimatePresence, motion } from "framer-motion";
 import { api } from "@/lib/api";
+import { prettyTitle } from "@/lib/format";
 import type { PlaylistItem, TranscodeProgress } from "@/lib/types";
 
 const ICONS: Record<string, React.ReactNode> = { live: <Radio className="w-3.5 h-3.5 text-rose-500 animate-pulse inline" />, youtube: <Video className="w-3.5 h-3.5 text-red-500 inline" />, url: <Link className="w-3.5 h-3.5 text-blue-400 inline" />, file: <FileVideo className="w-3.5 h-3.5 text-amber-400 inline" /> };
@@ -57,7 +58,7 @@ export function Playlist({
               >
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/5 text-[15px]">{icon}</div>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13.5px] text-[color:var(--color-ink)]">{item.title}</div>
+                  <div className="truncate text-[13px] text-[color:var(--color-ink)] sm:text-[13.5px]" title={item.title}>{prettyTitle(item.title)}</div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11.5px] text-[color:var(--color-ink-dim)]">
                     افزوده‌شده توسط {item.added_by || "ناشناس"}
                     {processing && (

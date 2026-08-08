@@ -34,7 +34,7 @@ import {
 
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import type Hls from "hls.js";
-import { formatTime, isHlsUrl, levelLabelFromUrl } from "@/lib/format";
+import { formatTime, isHlsUrl, levelLabelFromUrl, prettyTitle } from "@/lib/format";
 import { api } from "@/lib/api";
 import { useAppSettings, type ShortcutAction } from "@/lib/settings";
 import type { NotifyEvent, PlaylistItem, Rendition, SubStyle, TranscodeProgress } from "@/lib/types";
@@ -885,7 +885,7 @@ export function Player({
                 ? "هنوز ویدیویی برای پخش انتخاب نشده"
                 : item.status === "error"
                   ? `تبدیل این ویدیو ناموفق بود: ${item.error || "خطای نامشخص"}`
-                  : `در حال آماده‌سازی «${item.title}» — پخش معمولاً ظرف حدود ۲ دقیقه شروع می‌شه`}
+                  : `در حال آماده‌سازی «${prettyTitle(item.title)}» — پخش معمولاً ظرف حدود ۲ دقیقه شروع می‌شه`}
             </p>
             {item && item.status !== "error" && (
               <div className="flex w-[70%] max-w-[340px] items-center gap-2.5">
@@ -992,7 +992,7 @@ export function Player({
               <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
             </div>
 
-            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item?.title}</div>
+            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item ? prettyTitle(item.title) : ""}</div>
 
             <div className="flex flex-wrap items-center gap-1">
               <MenuBtn label={`${rate}x`} open={openMenu === "speed"} onToggle={() => setOpenMenu(openMenu === "speed" ? null : "speed")}>

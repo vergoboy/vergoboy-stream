@@ -54,3 +54,26 @@ export function levelLabelFromUrl(url: string | string[] | null | undefined): st
   const m = /\/([^/]+)\/index\.m3u8/.exec(u || "");
   return m ? m[1] : null;
 }
+
+// Turns raw media filenames into short, readable display titles. Strips URL
+// encoding (%20 → space), file extensions, and release-group noise such as
+// [1080], [x265], [SS], [MixFlixTop] — the stuff that makes CDN names way too
+// long to fit on a phone screen.
+export function prettyTitle(title: string | null | undefined): string {
+  let s = String(title ?? "").trim();
+  if (!s) return "بدون عنوان";
+  try {
+    s = decodeURIComponent(s);
+  } catch {
+    /* leave as-is when it's not valid URL encoding */
+  }
+  const stripped = s
+    .replace(/\.(mkv|mp4|m4v|webm|avi|mov|mp3|mka|aac)$/i, "")
+    .replace(/\s*\[[^\]]*\]\s*/g, " ")
+    .replace(/\s*[_.-]\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s_.\-:]+|[\s_.\-:]+$/g, "")
+    .trim();
+  if (stripped.length >= 3) return stripped;
+  return s.replace(/\.(mkv|mp4|m4v|webm|avi|mov)$/i, "").trim() || "بدون عنوان";
+}

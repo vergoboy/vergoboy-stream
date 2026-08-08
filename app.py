@@ -102,6 +102,30 @@ def _download_to_file(url: str, dest_path: str, timeout: int = 25) -> None:
         shutil.copyfileobj(resp, out, length=1024 * 1024)
 
 
+def _check_link_ok(url: str, timeout: int = 15) -> bool:
+    """Cheap reachability check for a direct media URL, mirroring what ffmpeg
+    will do at encode time: browser User-Agent, follow redirects, TLS
+    verification, plain GET. Reads a single byte then drops the connection, so
+    even a server that ignores Range/HEAD never transfers the whole file.
+
+    Returns False for HTTP >= 400, TLS/certificate failures, DNS/connection
+    errors and timeouts — i.e. any URL that could never be encoded."""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "video/*,*/*;q=0.8",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ok = 200 <= resp.status < 400
+            resp.read(1)
+            return ok
+    except Exception:
+        return False
+
+
 MIN_FREE_MB_FOR_TRANSCODE = 500
 TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
 LANG_LABELS = {
@@ -121,16 +145,18 @@ def _ffprobe_source(source: str, timeout: int = 20) -> dict:
     log_debug(f"Starting ffprobe on: {source}")
     start_time = time.time()
     try:
-        proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-print_format", "json",
-                "-show_streams", "-show_format",
-                "-rw_timeout", str(timeout * 1_000_000),
-                source,
-            ],
-            capture_output=True, timeout=timeout + 10,
-        )
+        args = [
+            "ffprobe", "-v", "error",
+            "-print_format", "json",
+            "-show_streams", "-show_format",
+            "-rw_timeout", str(timeout * 1_000_000),
+        ]
+        if isinstance(source, str) and source.startswith(("http://", "https://")):
+            args += ["-headers",
+                     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
+        args += [source]
+        proc = subprocess.run(args, capture_output=True, timeout=timeout + 10)
         log_debug(f"ffprobe done in {time.time() - start_time:.2f}s, returncode={proc.returncode}")
         if proc.returncode != 0:
             log_debug(f"ffprobe stderr: {proc.stderr.decode(errors='ignore')[:300]}")
@@ -245,8 +271,16 @@ def _bandwidth_estimate(vbr: str, abr: str) -> int:
 # ────────────────────────────────────────────────────────────────────────────
 
 def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vbr: str, abr: str) -> list:
-    return [
-        "ffmpeg", "-y", "-threads", "0", "-i", source,
+    cmd = ["ffmpeg", "-y", "-threads", "0"]
+    if isinstance(source, str) and source.startswith(("http://", "https://")):
+        # Some download mirrors (aparatchi-dlcenter, hollowofthealley, ...) 404
+        # or 403 plain ffmpeg/Lavf requests. Send a browser User-Agent so the
+        # direct-link encodes behave like the browser's own download does.
+        cmd += ["-headers",
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
+    cmd += [
+        "-i", source,
         "-vf", f"scale=-2:{height}",
         "-c:v", "libx264", "-b:v", vbr,
         "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
@@ -261,6 +295,7 @@ def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vb
         "-hls_segment_filename", os.path.join(rendition_dir, "seg_%03d.ts"),
         os.path.join(rendition_dir, "index.m3u8"),
     ]
+    return cmd
 
 
 def _rewrite_master_playlist(out_dir: str, ready_renditions: list, aspect: float):
@@ -896,11 +931,21 @@ def api_add_many():
 
     added = 0
     skipped = 0
+    dead = []
     first_title = ""
-    for it in items[:ARCHIVE_MAX_ADD]:
-        url = (it.get("url") or "").strip() if isinstance(it, dict) else ""
-        title = (it.get("title") or "").strip() if isinstance(it, dict) else ""
-        if not url or not url.startswith(("https://", "http://")):
+    items = [it for it in items[:ARCHIVE_MAX_ADD] if isinstance(it, dict) and
+             (it.get("url") or "").strip().startswith(("https://", "http://"))]
+    if not items:
+        return jsonify({"error": "هیچ لینک معتبری برای افزودن نیست"}), 400
+
+    from gevent.pool import Group
+    verdicts = Group().map(lambda it: _check_link_ok(it.get("url", "").strip()), items)
+
+    for it, ok in zip(items, verdicts):
+        url = (it.get("url") or "").strip()
+        title = (it.get("title") or "").strip()
+        if not ok:
+            dead.append(title or url)
             continue
         with LOCK:
             if room:
@@ -917,9 +962,9 @@ def api_add_many():
         added += 1
         first_title = item["title"]
     if added == 0:
-        return jsonify({"added": 0, "skipped": skipped, "error": None})
-    broadcast_notify("playlist_add_many", name, title=first_title, count=added, skipped=skipped)
-    return jsonify({"added": added, "skipped": skipped})
+        return jsonify({"added": 0, "skipped": skipped, "dead": dead})
+    broadcast_notify("playlist_add_many", name, title=first_title, count=added, skipped=skipped, dead=len(dead))
+    return jsonify({"added": added, "skipped": skipped, "dead": dead})
 
 
 @app.route("/stream/api/youtube-formats", methods=["POST"])
@@ -1078,6 +1123,9 @@ def api_add_url():
 
     if not url:
         return jsonify({"error": "لینک خالی است"}), 400
+
+    if url.startswith(("https://", "http://")) and not _check_link_ok(url):
+        return jsonify({"error": "این لینک روی سرور منبع پاسخ نمی‌دهد (خراب است)"}), 422
 
     return jsonify(_add_url_item(url, title, name))
 
