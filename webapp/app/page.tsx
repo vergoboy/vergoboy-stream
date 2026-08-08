@@ -7,6 +7,7 @@ import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
 import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
+import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl } from "@/lib/auth";
 
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -23,15 +24,19 @@ import { ChatPanel } from "@/components/ChatPanel";
 import { VoicePanel } from "@/components/VoicePanel";
 import { Sidebar } from "@/components/Sidebar";
 import { Toasts, type Toast } from "@/components/Toasts";
-import { NameGate } from "@/components/NameGate";
+import { AuthGate } from "@/components/AuthGate";
+import { RoomBar } from "@/components/RoomBar";
+import { OnboardingModal } from "@/components/OnboardingModal";
 import { ShortcutsModal } from "@/components/ShortcutsModal";
 import { SettingsModal } from "@/components/SettingsModal";
 import { SettingsProvider } from "@/lib/settings";
 import { useVoiceRoom } from "@/lib/useVoiceRoom";
 import { notifyText } from "@/lib/notifyText";
-import { ListVideo, Plus, Radio, Captions, Palette, MessageSquare, Users, Archive } from "lucide-react";
+import { ListVideo, Plus, Archive, Radio, Captions, Palette, MessageSquare, Users } from "lucide-react";
 
 let toastSeq = 0;
+
+const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
 
 export default function Page() {
   return (
@@ -42,10 +47,10 @@ export default function Page() {
 }
 
 function PageInner() {
-  const [myName, setMyName, nameHydrated] = useLocalStorage("stream_user_name", "");
+  const { user, access, hydrated } = useAuth();
   const [myAvatarUrl, setMyAvatarUrl] = useLocalStorage<string | null>("stream_user_avatar", null);
   const [subStyle, setSubStyle] = useLocalStorage<SubStyle>("stream_sub_style", DEFAULT_SUB_STYLE);
-  const [renaming, setRenaming] = useState(false);
+  const [roomCode, setRoomCode] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("playlist");
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -53,6 +58,53 @@ function PageInner() {
   const [latestNotify, setLatestNotify] = useState<NotifyEvent | null>(null);
   const [unreadChat, setUnreadChat] = useState(0);
   const [voiceProfiles, setVoiceProfiles] = useState<{ name: string; avatarUrl: string | null; speaking: boolean }[]>([]);
+  const [joinCode, setJoinCode] = useState<string | null>(null);
+
+  const myName = user?.username ?? "";
+  const canControl = mayControl(user);
+  const canAdd = mayAdd(user);
+  const isAdm = isAdmin(user);
+
+  // Grab ?join=CODE once on load, then strip it from the URL so a refresh
+  // doesn't re-trigger the join.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const p = new URLSearchParams(window.location.search);
+    const c = p.get("join");
+    if (c) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time read of the invite code from the URL, then it's removed from the address bar
+      setJoinCode(c.trim().toUpperCase());
+      p.delete("join");
+      const q = p.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${q ? `?${q}` : ""}`);
+    }
+  }, []);
+
+  // One active room per user — always follow user.current_room_id.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- keep the live room in sync with the account's current_room_id (external DB state)
+    if (user?.current_room_id) setRoomCode(user.current_room_id);
+  }, [user?.current_room_id]);
+
+  // Auto-join once logged in, if the invite code came from the URL.
+  const joinedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user || !joinCode || joinedRef.current === joinCode) return;
+    joinedRef.current = joinCode;
+    api
+      .roomJoin(joinCode)
+      .then((res) => {
+        updateUser(res.user);
+        setRoomCode(res.room.id);
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : "اتاق پیدا نشد";
+        const id = `t${toastSeq++}`;
+        setToasts((prev) => [...prev, { id, text: `ورود به اتاق ${joinCode} ناموفق بود: ${msg}` }]);
+        setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+      })
+      .finally(() => setJoinCode(null));
+  }, [user, joinCode]);
 
   const voice = useVoiceRoom(myName, myAvatarUrl);
 
@@ -64,7 +116,7 @@ function PageInner() {
   };
 
   const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat, setVoiceActive } =
-    useRoomState({ myName, onNotify: handleNotify });
+    useRoomState({ token: access, roomCode: roomCode ?? "", myName, canControl, onNotify: handleNotify });
 
   // Only people actually connected to the voice room sit on the sofa — a
   // regular online visitor must stay invisible to the others until they
@@ -92,24 +144,17 @@ function PageInner() {
     if (id === "chat") setUnreadChat(0);
   }
 
-  if (!nameHydrated) return null;
+  if (!hydrated) return null;
 
-  if (!myName || renaming) {
-    return (
-      <NameGate
-        initialName={myName}
-        onJoin={(n) => {
-          setMyName(n.trim().slice(0, 24) || "ناشناس");
-          setRenaming(false);
-        }}
-      />
-    );
+  if (!user) {
+    return <AuthGate />;
   }
 
   return (
     <main className="page relative z-[1]">
-      <Header />
+      <Header user={user} onLogout={() => logout()} />
       <Toasts toasts={toasts} />
+      <OnboardingModal />
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} voice={voice} />
 
@@ -131,6 +176,8 @@ function PageInner() {
           </p>
         </motion.div>
 
+        {roomCode && <RoomBar roomCode={roomCode} online={room.online} onRoomChange={setRoomCode} />}
+
         <Sofa users={sofaUsers} voiceSpeaking={voiceProfiles} />
 
         <Player
@@ -143,10 +190,11 @@ function PageInner() {
             latestNotify={latestNotify}
             myName={myName}
             subStyle={subStyle}
-            canPrev={room.current_index !== null && room.current_index > 0}
-            canNext={room.current_index !== null && room.current_index < room.playlist.length - 1}
-            onPrev={() => room.current_index !== null && requestControl("select", { index: room.current_index - 1 })}
-            onNext={() => room.current_index !== null && requestControl("select", { index: room.current_index + 1 })}
+            canControl={canControl}
+            canPrev={canControl && room.current_index !== null && room.current_index > 0}
+            canNext={canControl && room.current_index !== null && room.current_index < room.playlist.length - 1}
+            onPrev={() => canControl && room.current_index !== null && requestControl("select", { index: room.current_index - 1 })}
+            onNext={() => canControl && room.current_index !== null && requestControl("select", { index: room.current_index + 1 })}
             onGoToAdd={() => setActiveTab("add")}
             onGoToSubStyle={() => setActiveTab("substyle")}
             onOpenShortcuts={() => setShortcutsOpen(true)}
@@ -160,9 +208,13 @@ function PageInner() {
               onChange={handleTabChange}
               tabs={[
                 { id: "playlist", label: (<span className="flex items-center gap-1.5"><ListVideo className="h-4 w-4" /> پلی‌لیست</span>) },
-                { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="h-4 w-4" /> افزودن ویدیو</span>) },
-                { id: "archive", label: (<span className="flex items-center gap-1.5"><Archive className="h-4 w-4" /> آرشیو جستجو</span>) },
-                { id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="h-4 w-4" /> استریم خارجی</span>) },
+                ...(canAdd
+                  ? [
+                      { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="h-4 w-4" /> افزودن ویدیو</span>) } as const,
+                      { id: "archive", label: (<span className="flex items-center gap-1.5"><Archive className="h-4 w-4" /> آرشیو جستجو</span>) } as const,
+                    ]
+                  : []),
+                ...(canAdd ? [{ id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="h-4 w-4" /> استریم خارجی</span>) } as const] : []),
                 { id: "subaudio", label: (<span className="flex items-center gap-1.5"><Captions className="h-4 w-4" /> زیرنویس و صدا</span>) },
                 { id: "substyle", label: (<span className="flex items-center gap-1.5"><Palette className="h-4 w-4" /> استایل زیرنویس</span>) },
                 { id: "chat", label: (<span className="flex items-center gap-1.5"><MessageSquare className="h-4 w-4" /> چت</span>), badge: unreadChat },
@@ -176,7 +228,7 @@ function PageInner() {
                   currentIndex={room.current_index}
                   transcodeProgress={transcodeProgress}
                   myName={myName}
-                  onSelect={(index) => requestControl("select", { index })}
+                  onSelect={(index) => canControl && requestControl("select", { index })}
                 />
               )}
               {activeTab === "add" && <AddVideoPanel myName={myName} />}
@@ -201,7 +253,7 @@ function PageInner() {
             <Sidebar
               myName={myName}
               myAvatarUrl={myAvatarUrl}
-              onChangeName={() => setRenaming(true)}
+              role={user.role}
               onChangeAvatar={async (file) => {
                 try {
                   const { url } = await api.avatarUpload(file, myName);
@@ -210,10 +262,19 @@ function PageInner() {
                   alert(e instanceof Error ? e.message : "خطا در آپلود عکس");
                 }
               }}
+              onLogout={() => logout()}
               onlineUsers={presenceUsers}
               notifications={notifications}
               playlist={room.playlist}
             />
+            {isAdm && (
+              <a
+                href={`${basePath}/admin/`}
+                className="rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 p-5 text-center text-[14px] font-bold text-[color:var(--color-amber)] backdrop-blur-md hover:border-[color:var(--color-amber)]/50"
+              >
+                پنل مدیریت کاربران
+              </a>
+            )}
           </div>
         </section>
       </div>

@@ -9,14 +9,17 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 import urllib.request
 import uuid
 
-from flask import Flask, jsonify, render_template, request, send_from_directory
-from flask_socketio import SocketIO, emit
+from flask import Flask, g, jsonify, render_template, request, send_from_directory
+from flask_socketio import SocketIO, emit, join_room
 
 from config import Config
 import archive_scraper
+import db as dbmod
+from db import User as DBUser
 from livekit_auth import generate_livekit_token
 from srt_to_vtt import convert_srt_to_vtt
 
@@ -33,14 +36,15 @@ def safe_save(room_obj):
 
 
 try:
-    from state import LOCK, CHAT_LOCK, room, chat
-    log_debug("Successfully imported state module (room + chat).")
+    from state import LOCK, CHAT_LOCK, room, chat, rooms
+    log_debug("Successfully imported state module (room + chat + rooms).")
 except ImportError as e:
     log_debug(f"Failed to import state elements: {e}")
     LOCK = gevent.lock.Semaphore()
     CHAT_LOCK = gevent.lock.Semaphore()
     room = None
     chat = None
+    from state import rooms
 
 
 app = Flask(__name__, static_url_path="/stream/static", template_folder="templates")
@@ -68,23 +72,149 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def broadcast_state():
-    if room:
-        socketio.emit("state_sync", room.to_public_dict())
+# ────────────────────────────────────────────────────────────────────────────
+# Auth / room resolution helpers
+# ────────────────────────────────────────────────────────────────────────────
+
+def _bearer_token() -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    t = request.args.get("token") or (request.form.get("token") or "").strip()
+    if t:
+        return t
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        return str(body.get("token") or "").strip()
+    except Exception:
+        return ""
 
 
-def broadcast_notify(ntype: str, name: str, **extra):
+def _current_user() -> DBUser | None:
+    if getattr(g, "user", None) is not None:
+        return g.user
+    token = _bearer_token()
+    if not token:
+        return None
+    payload = dbmod.decode_token(token)
+    if not payload or payload.get("type") != "access":
+        return None
+    session = dbmod.SessionLocal()
+    try:
+        user = session.get(DBUser, payload.get("sub"))
+        g.user = user if (user and user.is_active) else None
+        return g.user
+    finally:
+        session.close()
+
+
+def _require_user() -> DBUser:
+    u = _current_user()
+    if not u:
+        raise _AuthError()
+    return u
+
+
+class _AuthError(Exception):
+    pass
+
+
+@app.errorhandler(_AuthError)
+def _handle_auth_error(e):
+    return jsonify({"error": "ابتدا وارد حساب شو (دوباره لاگین کن)"}), 401
+
+
+def _current_room():
+    """RoomState for the authenticated request's current room (or None)."""
+    user = _current_user()
+    if not user or not user.current_room_id:
+        return None
+    return rooms.get(user.current_room_id)
+
+
+def _current_room_code() -> str | None:
+    user = _current_user()
+    return (user.current_room_id if user else None)
+
+
+def _may_control(user: DBUser) -> bool:
+    return bool(user and user.is_active and (user.can_control or user.role == "admin"))
+
+
+def _may_youtube(user: DBUser) -> bool:
+    return bool(user and user.is_active and (user.youtube_allowed or user.role == "admin"))
+
+
+def _may_add(user: DBUser) -> bool:
+    if not user or not user.is_active:
+        return False
+    if user.role == "admin":
+        return True
+    return user.upload_quota == -1 or user.uploads_used < user.upload_quota
+
+
+def _is_admin(user: DBUser) -> bool:
+    return bool(user and user.is_active and user.role == "admin")
+
+
+def _bump_upload_used(session, user: DBUser, n: int = 1):
+    if user.role == "admin":
+        return
+    user.uploads_used = max(0, (user.uploads_used or 0) + n)
+
+
+def _remaining_add_slots(user: DBUser) -> int | None:
+    """None = unlimited (admin or quota -1). Otherwise the number of media
+    this user can still add."""
+    if user.role == "admin" or user.upload_quota == -1:
+        return None
+    return max(0, user.upload_quota - (user.uploads_used or 0))
+
+
+def _room_channel(code: str) -> str:
+    return f"room:{code}"
+
+
+def broadcast_state(room_obj=None):
+    room_obj = room_obj or room
+    if room_obj is None:
+        return
+    if room_obj.room_id:
+        socketio.emit("state_sync", room_obj.to_public_dict(), to=_room_channel(room_obj.room_id))
+    else:
+        socketio.emit("state_sync", room_obj.to_public_dict())
+
+
+def broadcast_notify(ntype: str, name: str, room_code: str = None, **extra):
     payload = {"type": ntype, "name": name, "ts": time.time()}
     payload.update(extra)
-    socketio.emit("notify", payload)
+    if room_code:
+        socketio.emit("notify", payload, to=_room_channel(room_code))
+    else:
+        socketio.emit("notify", payload)
 
 
-def broadcast_presence():
-    if room:
-        socketio.emit("presence", {
-            "online": len(room.users),
-            "users": room.users_public_list(),
-        })
+def broadcast_presence(room_obj=None):
+    room_obj = room_obj or room
+    if room_obj is None:
+        return
+    payload = {
+        "online": len(room_obj.users),
+        "users": room_obj.users_public_list(),
+    }
+    if room_obj.room_id:
+        socketio.emit("presence", payload, to=_room_channel(room_obj.room_id))
+    else:
+        socketio.emit("presence", payload)
+
+
+def _room_for_item(item_id: str):
+    """Finds the RoomState that currently contains the given playlist item
+    (used by background encode greenlets, which outlive the request)."""
+    for code, rs in rooms._rooms.items():
+        if any(it.get("id") == item_id for it in rs.playlist):
+            return rs
+    return None
 
 
 def url_ext(url: str) -> str:
@@ -426,16 +556,20 @@ def _extract_subtitles_async(item_id: str, source: str, sub_streams: list, reque
 
     if not new_subs:
         return
+    rs = _room_for_item(item_id)
+    if rs is None:
+        return
     with LOCK:
-        item = room.find_item(item_id) if room else None
+        item = rs.find_item(item_id)
         if item:
             item.setdefault("subtitles", []).extend(new_subs)
-            safe_save(room)
+            safe_save(rs)
             title = item["title"]
         else:
             title = ""
-    broadcast_state()
-    broadcast_notify("subtitle_auto_extracted", requester_name, title=title, count=len(new_subs))
+    broadcast_state(rs)
+    broadcast_notify("subtitle_auto_extracted", requester_name, room_code=rs.room_id,
+                     title=title, count=len(new_subs))
 
 
 def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: str, abr: str,
@@ -448,7 +582,8 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
 
     def set_rendition_status(status, error=None):
         with LOCK:
-            item = room.find_item(item_id) if room else None
+            rs = _room_for_item(item_id)
+            item = rs.find_item(item_id) if rs else None
             if not item:
                 return None
             for r in item.get("renditions", []):
@@ -458,7 +593,8 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
                         r["error"] = error[:200]
                     else:
                         r.pop("error", None)
-            safe_save(room)
+            if rs:
+                safe_save(rs)
             return item
 
     def collect_ready(item):
@@ -468,17 +604,21 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
         log_debug(f"Rendition encode failed [{item_id}/{label}]: {msg}")
         shutil.rmtree(rendition_dir, ignore_errors=True)
         item = set_rendition_status("error", msg)
-        if item and is_default:
+        rs = _room_for_item(item_id)
+        if item and is_default and rs is not None:
             with LOCK:
                 item["status"] = "error"
                 item["error"] = msg[:300]
-                safe_save(room)
-        broadcast_state()
+                safe_save(rs)
+        if rs is None:
+            return
+        broadcast_state(rs)
         title = item["title"] if item else ""
         if is_default:
-            broadcast_notify("media_error", requester_name, id=item_id, title=title)
+            broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
         else:
-            broadcast_notify("quality_error", requester_name, id=item_id, title=title, label=label)
+            broadcast_notify("quality_error", requester_name, room_code=rs.room_id,
+                             id=item_id, title=title, label=label)
 
     free_mb = free_space_mb(Config.MEDIA_DIR)
     if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
@@ -486,28 +626,32 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
         return
 
     set_rendition_status("queued")
-    if is_default:
+    rs = _room_for_item(item_id)
+    if is_default and rs is not None:
         with LOCK:
-            item = room.find_item(item_id) if room else None
+            item = rs.find_item(item_id)
             if item:
                 item["status"] = "queued"
-                safe_save(room)
-    broadcast_state()
+                safe_save(rs)
+    if rs is None:
+        return
+    broadcast_state(rs)
 
     acquired = ENCODE_SEMAPHORE.acquire()  # blocks this greenlet only
     try:
-        with LOCK:
-            item = room.find_item(item_id) if room else None
-        if not item:
+        rs = _room_for_item(item_id)
+        if rs is None:
             log_debug(f"Item {item_id} removed while queued — aborting rendition encode.")
             return
 
         set_rendition_status("encoding")
         if is_default:
             with LOCK:
-                item["status"] = "encoding"
-                safe_save(room)
-        broadcast_state()
+                item = rs.find_item(item_id)
+                if item:
+                    item["status"] = "encoding"
+                    safe_save(rs)
+        broadcast_state(rs)
 
         dur = duration_s
         if dur is None:
@@ -519,19 +663,24 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
             item = set_rendition_status("ready")
             if not item:
                 return
+            rrs = _room_for_item(item_id)
+            if rrs is None:
+                return
             with LOCK:
                 aspect = item.get("_aspect") or 16 / 9
                 _rewrite_master_playlist(out_dir, collect_ready(item), aspect)
                 if is_default:
                     item["status"] = "ready"
                     item["src"] = f"/stream/media/hls/{item_id}/master.m3u8"
-                    safe_save(room)
+                    safe_save(rrs)
                 title = item["title"]
-            broadcast_state()
+            broadcast_state(rrs)
             if is_default:
-                broadcast_notify("media_partial_ready", requester_name, id=item_id, title=title)
+                broadcast_notify("media_partial_ready", requester_name, room_code=rrs.room_id,
+                                 id=item_id, title=title)
             else:
-                broadcast_notify("quality_partial_ready", requester_name, id=item_id, title=title, label=label)
+                broadcast_notify("quality_partial_ready", requester_name, room_code=rrs.room_id,
+                                 id=item_id, title=title, label=label)
 
         cmd = _build_single_rendition_cmd(source, rendition_dir, height, vbr, abr)
         returncode, stderr_bytes = _run_progressive_ffmpeg(cmd, item_id, dur, label, on_ready=on_ready)
@@ -549,6 +698,9 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
         item = set_rendition_status("complete")
         if not item:
             return
+        rrs = _room_for_item(item_id)
+        if rrs is None:
+            return
         with LOCK:
             aspect = item.get("_aspect") or 16 / 9
             _rewrite_master_playlist(out_dir, collect_ready(item), aspect)
@@ -556,13 +708,15 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
                 item["status"] = "complete"
                 item["src"] = f"/stream/media/hls/{item_id}/master.m3u8"
                 item.pop("error", None)
-            safe_save(room)
+            safe_save(rrs)
             title = item["title"]
-        broadcast_state()
+        broadcast_state(rrs)
         if is_default:
-            broadcast_notify("media_ready", requester_name, id=item_id, title=title)
+            broadcast_notify("media_ready", requester_name, room_code=rrs.room_id,
+                             id=item_id, title=title)
         else:
-            broadcast_notify("quality_ready", requester_name, id=item_id, title=title, label=label)
+            broadcast_notify("quality_ready", requester_name, room_code=rrs.room_id,
+                             id=item_id, title=title, label=label)
 
     except subprocess.TimeoutExpired:
         fail("زمان تبدیل ویدیو بیش از حد طول کشید (timeout)")
@@ -585,17 +739,20 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
     log_debug(f"start_item_encoding: {item_id} <- {source}")
 
     def fail_all(msg: str):
+        rs = _room_for_item(item_id)
+        if rs is None:
+            return
         with LOCK:
-            item = room.find_item(item_id) if room else None
+            item = rs.find_item(item_id)
             if item:
                 item["status"] = "error"
                 item["error"] = msg[:300]
-                safe_save(room)
+                safe_save(rs)
                 title = item["title"]
             else:
                 title = ""
-        broadcast_state()
-        broadcast_notify("media_error", requester_name, id=item_id, title=title)
+        broadcast_state(rs)
+        broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
 
     free_mb = free_space_mb(Config.MEDIA_DIR)
     if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
@@ -619,8 +776,12 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
         for (l, h, v, a) in ladder
     ]
 
+    rs = _room_for_item(item_id)
+    if rs is None:
+        log_debug(f"Item {item_id} vanished before encoding could start.")
+        return
     with LOCK:
-        item = room.find_item(item_id) if room else None
+        item = rs.find_item(item_id)
         if not item:
             log_debug(f"Item {item_id} vanished before encoding could start.")
             return
@@ -630,8 +791,8 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
         item["_aspect"] = aspect
         if local_raw_path:
             item["_raw_path"] = local_raw_path
-        safe_save(room)
-    broadcast_state()
+        safe_save(rs)
+    broadcast_state(rs)
 
     os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
     gevent.spawn(_extract_subtitles_async, item_id, source, sub_streams, requester_name)
@@ -643,8 +804,11 @@ def request_quality(item_id: str, label: str, requester_name: str):
     """Kicks off an on-demand rendition encode when a viewer picks a
     not-yet-ready quality from the menu. Idempotent: a second request for a
     rendition that's already queued/encoding/ready is a no-op."""
+    rs = _room_for_item(item_id)
+    if rs is None:
+        return False, "آیتم پیدا نشد"
     with LOCK:
-        item = room.find_item(item_id) if room else None
+        item = rs.find_item(item_id)
         if not item:
             return False, "آیتم پیدا نشد"
         source = item.get("_source")
@@ -657,8 +821,8 @@ def request_quality(item_id: str, label: str, requester_name: str):
             return True, "already in progress"
         target["status"] = "queued"
         height, vbr, abr = target["height"], target["vbr"], target["abr"]
-        safe_save(room)
-    broadcast_state()
+        safe_save(rs)
+    broadcast_state(rs)
     gevent.spawn(_encode_rendition, item_id, source, label, height, vbr, abr, requester_name, False)
     return True, "started"
 
@@ -669,16 +833,21 @@ def request_quality(item_id: str, label: str, requester_name: str):
 
 def _collect_referenced_files() -> tuple:
     upload_refs, sub_refs, hls_ids = set(), set(), set()
-    for item in (room.playlist if room else []):
-        raw_path = item.get("_raw_path")
-        if raw_path:
-            upload_refs.add(os.path.basename(raw_path))
-        if item.get("renditions") or "/media/hls/" in (item.get("src") or ""):
-            hls_ids.add(item["id"])
-        for s in item.get("subtitles") or []:
-            url = s.get("url") or ""
-            if "/media/subs/" in url:
-                sub_refs.add(url.rsplit("/", 1)[-1])
+    seen = set()
+    for rs in list(rooms._rooms.values()) + ([room] if room is not None else []):
+        for item in rs.playlist:
+            if item.get("id") in seen:
+                continue
+            seen.add(item["id"])
+            raw_path = item.get("_raw_path")
+            if raw_path:
+                upload_refs.add(os.path.basename(raw_path))
+            if item.get("renditions") or "/media/hls/" in (item.get("src") or ""):
+                hls_ids.add(item["id"])
+            for s in item.get("subtitles") or []:
+                url = s.get("url") or ""
+                if "/media/subs/" in url:
+                    sub_refs.add(url.rsplit("/", 1)[-1])
     return upload_refs, sub_refs, hls_ids
 
 
@@ -726,14 +895,19 @@ def _cleanup_orphans() -> dict:
 def _chat_purge_loop():
     while True:
         gevent.sleep(Config.CHAT_PURGE_INTERVAL_SECONDS)
-        if not chat:
-            continue
-        with CHAT_LOCK:
-            removed = chat.purge_older_than(Config.CHAT_RETENTION_SECONDS)
-        if removed:
-            _delete_chat_images(removed)
-            socketio.emit("chat_purged", {"removed": len(removed)})
-            log_debug(f"Chat auto-purge removed {len(removed)} message(s).")
+        targets = dict(rooms._chats)
+        if chat is not None:
+            targets.setdefault(None, chat)
+        for code, chat_obj in targets.items():
+            with CHAT_LOCK:
+                removed = chat_obj.purge_older_than(Config.CHAT_RETENTION_SECONDS)
+            if removed:
+                _delete_chat_images(removed)
+                if code:
+                    socketio.emit("chat_purged", {"removed": len(removed)}, to=_room_channel(code))
+                else:
+                    socketio.emit("chat_purged", {"removed": len(removed)})
+                log_debug(f"Chat auto-purge removed {len(removed)} message(s) from room {code}.")
 
 
 def _delete_chat_images(messages: list):
@@ -798,11 +972,19 @@ def serve_avatar(filename):
 
 @app.route("/stream/api/state")
 def api_state():
-    return jsonify(room.to_public_dict() if room else {})
+    _require_user()
+    cur = _current_room()
+    return jsonify(cur.to_public_dict() if cur else {})
 
 
 @app.route("/stream/api/upload", methods=["POST"])
 def api_upload():
+    user = _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_add(user):
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     f = request.files.get("file")
     title = (request.form.get("title") or "").strip()
     name = (request.form.get("name") or "ناشناس").strip()
@@ -821,14 +1003,20 @@ def api_upload():
     item = {
         "id": item_id, "type": "file", "title": title or f.filename, "src": None,
         "subtitles": [], "audio_tracks": [], "added_by": name,
-        "added_at": time.time(), "status": "queued",
+        "added_at": time.time(), "status": "queued", "_room_id": cur.room_id,
+        "added_by_user_id": user.id,
     }
     with LOCK:
-        if room:
-            room.add_item(item)
-            safe_save(room)
-    broadcast_state()
-    broadcast_notify("playlist_add_processing", name, title=item["title"])
+        cur.add_item(item)
+        safe_save(cur)
+    session = dbmod.SessionLocal()
+    try:
+        _bump_upload_used(session, user)
+        session.commit()
+    finally:
+        session.close()
+    broadcast_state(cur)
+    broadcast_notify("playlist_add_processing", name, room_code=cur.room_id, title=item["title"])
     gevent.spawn(start_item_encoding, item_id, raw_path, name, raw_path)
     return jsonify(item)
 
@@ -892,11 +1080,15 @@ def api_archive_files():
     return jsonify({"files": files})
 
 
-def _add_url_item(url: str, title: str, name: str):
+def _add_url_item(url: str, title: str, name: str, room_code: str = None,
+                  added_by_user_id: str = None):
     """Shared logic for the single add-url endpoint and the bulk archive add."""
     item_id = new_id()
     is_hls = _is_hls(url)
     needs_encode = not is_hls
+    rs = rooms.get(room_code) if room_code else room
+    if rs is None:
+        return None
     item = {
         "id": item_id, "type": "url",
         "title": title or url.rsplit("/", 1)[-1].split("?")[0] or "ویدیو",
@@ -904,23 +1096,30 @@ def _add_url_item(url: str, title: str, name: str):
         "subtitles": [], "audio_tracks": [], "added_by": name,
         "added_at": time.time(),
         "status": "queued" if needs_encode else "ready",
+        "_room_id": rs.room_id,
+        "added_by_user_id": added_by_user_id,
     }
     with LOCK:
-        if room:
-            room.add_item(item)
-            safe_save(room)
-    broadcast_state()
+        rs.add_item(item)
+        safe_save(rs)
+    broadcast_state(rs)
     if needs_encode:
-        broadcast_notify("playlist_add_processing", name, title=item["title"])
+        broadcast_notify("playlist_add_processing", name, room_code=rs.room_id, title=item["title"])
         gevent.spawn(start_item_encoding, item_id, url, name)
     else:
-        broadcast_notify("playlist_add", name, title=item["title"])
+        broadcast_notify("playlist_add", name, room_code=rs.room_id, title=item["title"])
     return item
 
 
 @app.route("/stream/api/add-many", methods=["POST"])
 def api_add_many():
     """Bulk-adds episodes/qualities scraped from the archive to the playlist."""
+    user = _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_add(user):
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     data = request.get_json(force=True, silent=True) or {}
     items = data.get("items") or []
     name = (data.get("name") or "ناشناس").strip()
@@ -938,6 +1137,10 @@ def api_add_many():
     if not items:
         return jsonify({"error": "هیچ لینک معتبری برای افزودن نیست"}), 400
 
+    remaining_slots = _remaining_add_slots(user)
+    if remaining_slots is not None and remaining_slots <= 0:
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
+
     from gevent.pool import Group
     verdicts = Group().map(lambda it: _check_link_ok(it.get("url", "").strip()), items)
 
@@ -947,28 +1150,41 @@ def api_add_many():
         if not ok:
             dead.append(title or url)
             continue
+        if remaining_slots is not None and added >= remaining_slots:
+            skipped += 1
+            continue
         with LOCK:
-            if room:
-                dup = any(
-                    itm.get("src") == url or itm.get("_source") == url
-                    for itm in room.playlist
-                )
-            else:
-                dup = False
+            dup = any(
+                itm.get("src") == url or itm.get("_source") == url
+                for itm in cur.playlist
+            )
         if dup:
             skipped += 1
             continue
-        item = _add_url_item(url, title, name)
+        item = _add_url_item(url, title, name, room_code=cur.room_id, added_by_user_id=user.id)
+        if item is None:
+            continue
         added += 1
         first_title = item["title"]
+    if added > 0:
+        session = dbmod.SessionLocal()
+        try:
+            _bump_upload_used(session, user, added)
+            session.commit()
+        finally:
+            session.close()
     if added == 0:
         return jsonify({"added": 0, "skipped": skipped, "dead": dead})
-    broadcast_notify("playlist_add_many", name, title=first_title, count=added, skipped=skipped, dead=len(dead))
+    broadcast_notify("playlist_add_many", name, room_code=cur.room_id,
+                     title=first_title, count=added, skipped=skipped, dead=len(dead))
     return jsonify({"added": added, "skipped": skipped, "dead": dead})
 
 
 @app.route("/stream/api/youtube-formats", methods=["POST"])
 def api_youtube_formats():
+    user = _require_user()
+    if not _may_youtube(user):
+        return jsonify({"error": "مجوز افزودن لینک یوتیوب برای تو فعال نیست؛ با ادمین هماهنگ کن"}), 403
     data = request.get_json(force=True, silent=True) or {}
     yt_url = (data.get("url") or "").strip()
     if not yt_url:
@@ -1048,17 +1264,20 @@ def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requ
     cmd.append(yt_url)
 
     def fail(msg):
+        rs = _room_for_item(item_id)
+        if rs is None:
+            return
         with LOCK:
-            item = room.find_item(item_id) if room else None
+            item = rs.find_item(item_id)
             if item:
                 item["status"] = "error"
                 item["error"] = msg[:300]
-                safe_save(room)
+                safe_save(rs)
                 title = item["title"]
             else:
                 title = ""
-        broadcast_state()
-        broadcast_notify("media_error", requester_name, id=item_id, title=title)
+        broadcast_state(rs)
+        broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
 
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=1800)
@@ -1079,6 +1298,14 @@ def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requ
 
 @app.route("/stream/api/add-youtube", methods=["POST"])
 def api_add_youtube():
+    user = _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_youtube(user):
+        return jsonify({"error": "مجوز افزودن لینک یوتیوب برای تو فعال نیست؛ با ادمین هماهنگ کن"}), 403
+    if not _may_add(user):
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     data = request.get_json(force=True, silent=True) or {}
     yt_url = (data.get("url") or "").strip()
     title = (data.get("title") or "").strip()
@@ -1096,13 +1323,19 @@ def api_add_youtube():
         "id": item_id, "type": "youtube", "title": title, "src": None,
         "subtitles": [], "audio_tracks": [], "added_by": name,
         "added_at": time.time(), "status": "queued", "yt_url": yt_url,
+        "_room_id": cur.room_id, "added_by_user_id": user.id,
     }
     with LOCK:
-        if room:
-            room.add_item(item)
-            safe_save(room)
-    broadcast_state()
-    broadcast_notify("playlist_add_processing", name, title=title)
+        cur.add_item(item)
+        safe_save(cur)
+    session = dbmod.SessionLocal()
+    try:
+        _bump_upload_used(session, user)
+        session.commit()
+    finally:
+        session.close()
+    broadcast_state(cur)
+    broadcast_notify("playlist_add_processing", name, room_code=cur.room_id, title=title)
     gevent.spawn(_fetch_and_encode_youtube, item_id, yt_url, fmt_selector, name)
     return jsonify(item)
 
@@ -1116,6 +1349,12 @@ def _is_hls(url: str) -> bool:
 
 @app.route("/stream/api/add-url", methods=["POST"])
 def api_add_url():
+    user = _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_add(user):
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
     title = (data.get("title") or "").strip()
@@ -1127,11 +1366,23 @@ def api_add_url():
     if url.startswith(("https://", "http://")) and not _check_link_ok(url):
         return jsonify({"error": "این لینک روی سرور منبع پاسخ نمی‌دهد (خراب است)"}), 422
 
-    return jsonify(_add_url_item(url, title, name))
+    item = _add_url_item(url, title, name, room_code=cur.room_id, added_by_user_id=user.id)
+    if item is None:
+        return jsonify({"error": "اتاق فعال نیست"}), 500
+    session = dbmod.SessionLocal()
+    try:
+        _bump_upload_used(session, user)
+        session.commit()
+    finally:
+        session.close()
+    return jsonify(item)
 
 
 @app.route("/stream/api/request-quality", methods=["POST"])
 def api_request_quality():
+    user = _require_user()
+    if not _may_control(user):
+        return jsonify({"error": "فقط کنترل‌کننده یا ادمین می‌تواند کیفیت را تغییر دهد"}), 403
     data = request.get_json(force=True, silent=True) or {}
     item_id = data.get("item_id")
     label = (data.get("label") or "").strip()
@@ -1160,33 +1411,45 @@ def api_new_key():
 
 @app.route("/stream/api/voice/token", methods=["POST"])
 def api_voice_token():
-    """Issues a short-lived LiveKit access token for the shared voice room.
+    """Issues a short-lived LiveKit access token scoped to the user's current
+    stream room, so each room gets its own voice channel.
 
     identity is always unique per connection (same person may join from two
     tabs/devices); display name and avatar are carried in `name` / `metadata`
     so other clients can render them without extra lookups."""
+    user = _require_user()
+    room_code = _current_room_code()
+    if not room_code:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
     if not Config.LIVEKIT_API_KEY or not Config.LIVEKIT_API_SECRET:
         return jsonify({"error": "LiveKit روی سرور تنظیم نشده است"}), 500
     data = request.get_json(force=True, silent=True) or {}
-    name = (data.get("name") or "ناشناس").strip()[:24] or "ناشناس"
+    name = (data.get("name") or user.username or "ناشناس").strip()[:24] or "ناشناس"
     avatar = (data.get("avatar_url") or "").strip()
     identity = f"{name}-{uuid.uuid4().hex[:6]}"
     metadata = json.dumps({"name": name, "avatar_url": avatar}, ensure_ascii=False)
+    voice_room = f"{Config.LIVEKIT_ROOM}-{room_code}"
     token = generate_livekit_token(
         Config.LIVEKIT_API_KEY, Config.LIVEKIT_API_SECRET,
-        Config.LIVEKIT_ROOM, identity, name, metadata=metadata,
+        voice_room, identity, name, metadata=metadata,
         ttl=Config.LIVEKIT_TOKEN_TTL,
     )
     return jsonify({
         "url": Config.LIVEKIT_URL,
         "token": token,
-        "room": Config.LIVEKIT_ROOM,
+        "room": voice_room,
         "identity": identity,
     })
 
 
 @app.route("/stream/api/add-live", methods=["POST"])
 def api_add_live():
+    user = _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_add(user):
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     data = request.get_json(force=True, silent=True) or {}
     playback_url = (data.get("playback_url") or "").strip()
     title = (data.get("title") or "پخش زنده").strip()
@@ -1201,29 +1464,40 @@ def api_add_live():
         "id": item_id, "type": "live", "title": title, "src": playback_url,
         "key": key, "subtitles": [], "audio_tracks": [], "added_by": name,
         "added_at": time.time(), "status": "ready",
+        "_room_id": cur.room_id, "added_by_user_id": user.id,
     }
     with LOCK:
-        if room:
-            room.add_item(item)
-            safe_save(room)
-    broadcast_state()
-    broadcast_notify("playlist_add_live", name, title=title)
+        cur.add_item(item)
+        safe_save(cur)
+    session = dbmod.SessionLocal()
+    try:
+        _bump_upload_used(session, user)
+        session.commit()
+    finally:
+        session.close()
+    broadcast_state(cur)
+    broadcast_notify("playlist_add_live", name, room_code=cur.room_id, title=title)
     return jsonify(item)
 
 
 @app.route("/stream/api/playlist/<item_id>", methods=["DELETE"])
 def api_remove_item(item_id):
-    name = request.args.get("name", "ناشناس")
+    user = _require_user()
+    if not _may_control(user):
+        return jsonify({"error": "فقط کنترل‌کننده یا ادمین می‌تواند آیتم را حذف کند"}), 403
+    cur = _current_room()
+    name = request.args.get("name", user.username or "ناشناس")
     do_cleanup = request.args.get("cleanup", "1") != "0"
+    if cur is None:
+        return jsonify({"error": "اتاق فعال نیست"}), 400
     with LOCK:
-        item = room.find_item(item_id) if room else None
+        item = cur.find_item(item_id)
         title = item["title"] if item else "ویدیو"
         raw_path = item.get("_raw_path") if item else None
-        if room:
-            room.remove_item(item_id)
-            safe_save(room)
-    broadcast_state()
-    broadcast_notify("playlist_remove", name, title=title)
+        cur.remove_item(item_id)
+        safe_save(cur)
+    broadcast_state(cur)
+    broadcast_notify("playlist_remove", name, room_code=cur.room_id, title=title)
     shutil.rmtree(os.path.join(Config.HLS_DIR, item_id), ignore_errors=True)
     if raw_path and os.path.exists(raw_path):
         try:
@@ -1244,6 +1518,10 @@ def api_cleanup():
 
 @app.route("/stream/api/subtitle-upload", methods=["POST"])
 def api_subtitle_upload():
+    _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
     f = request.files.get("file")
     item_id = request.form.get("item_id")
     label = (request.form.get("label") or "زیرنویس").strip()
@@ -1268,20 +1546,23 @@ def api_subtitle_upload():
         url = f"/stream/media/subs/{sub_id}.{ext}"
 
     with LOCK:
-        if not room:
-            return jsonify({"error": "اتاق فعال نیست"}), 500
-        item = room.find_item(item_id)
+        item = cur.find_item(item_id)
         if not item:
             return jsonify({"error": "آیتم پلی‌لیست پیدا نشد"}), 404
         item.setdefault("subtitles", []).append({"id": sub_id, "label": label, "lang": lang, "url": url})
-        safe_save(room)
-    broadcast_state()
-    broadcast_notify("subtitle_add", name, title=item.get("title", ""), label=label)
+        safe_save(cur)
+    broadcast_state(cur)
+    broadcast_notify("subtitle_add", name, room_code=cur.room_id,
+                     title=item.get("title", ""), label=label)
     return jsonify({"id": sub_id, "url": url})
 
 
 @app.route("/stream/api/subtitle-url", methods=["POST"])
 def api_subtitle_url():
+    _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
     data = request.get_json(force=True, silent=True) or {}
     item_id = data.get("item_id")
     url = (data.get("url") or "").strip()
@@ -1311,20 +1592,23 @@ def api_subtitle_url():
         sub_url = f"/stream/media/subs/{sub_id}.{ext}"
 
     with LOCK:
-        if not room:
-            return jsonify({"error": "اتاق فعال نیست"}), 500
-        item = room.find_item(item_id)
+        item = cur.find_item(item_id)
         if not item:
             return jsonify({"error": "آیتم پلی‌لیست پیدا نشد"}), 404
         item.setdefault("subtitles", []).append({"id": sub_id, "label": label, "lang": lang, "url": sub_url})
-        safe_save(room)
-    broadcast_state()
-    broadcast_notify("subtitle_add", name, title=item.get("title", ""), label=label)
+        safe_save(cur)
+    broadcast_state(cur)
+    broadcast_notify("subtitle_add", name, room_code=cur.room_id,
+                     title=item.get("title", ""), label=label)
     return jsonify({"id": sub_id, "url": sub_url})
 
 
 @app.route("/stream/api/audio-track", methods=["POST"])
 def api_add_audio_track():
+    _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
     data = request.get_json(force=True, silent=True) or {}
     item_id = data.get("item_id")
     label = (data.get("label") or "دوبله").strip()
@@ -1335,15 +1619,14 @@ def api_add_audio_track():
         return jsonify({"error": "ورودی ناقص است"}), 400
 
     with LOCK:
-        if not room:
-            return jsonify({"error": "اتاق فعال نیست"}), 500
-        item = room.find_item(item_id)
+        item = cur.find_item(item_id)
         if not item:
             return jsonify({"error": "آیتم پلی‌لیست پیدا نشد"}), 404
         item.setdefault("audio_tracks", []).append({"id": new_id(), "label": label, "url": url})
-        safe_save(room)
-    broadcast_state()
-    broadcast_notify("audio_track_add", name, title=item.get("title", ""), label=label)
+        safe_save(cur)
+    broadcast_state(cur)
+    broadcast_notify("audio_track_add", name, room_code=cur.room_id,
+                     title=item.get("title", ""), label=label)
     return jsonify({"ok": True})
 
 
@@ -1353,22 +1636,32 @@ def api_add_audio_track():
 
 @app.route("/stream/api/chat/history")
 def api_chat_history():
+    user = _require_user()
+    if not user.current_room_id:
+        return jsonify({"messages": []})
+    chat_obj = rooms.chat(user.current_room_id)
     with CHAT_LOCK:
-        return jsonify({"messages": chat.public_history() if chat else []})
+        return jsonify({"messages": chat_obj.public_history()})
 
 
 @app.route("/stream/api/chat/clear", methods=["POST"])
 def api_chat_clear():
+    _require_user()
+    room_code = _current_room_code()
+    if not room_code:
+        return jsonify({"error": "اتاق فعال نیست"}), 400
+    chat_obj = rooms.chat(room_code)
     name = (request.args.get("name") or request.form.get("name") or "ناشناس")
     with CHAT_LOCK:
-        removed = chat.clear() if chat else []
+        removed = chat_obj.clear()
     _delete_chat_images(removed)
-    socketio.emit("chat_cleared", {"by": name})
+    socketio.emit("chat_cleared", {"by": name}, to=_room_channel(room_code))
     return jsonify({"ok": True, "removed": len(removed)})
 
 
 @app.route("/stream/api/chat/image", methods=["POST"])
 def api_chat_image():
+    _require_user()
     f = request.files.get("file")
     if not f or f.filename == "":
         return jsonify({"error": "فایلی انتخاب نشده"}), 400
@@ -1382,8 +1675,10 @@ def api_chat_image():
 
 @app.route("/stream/api/avatar", methods=["POST"])
 def api_avatar_upload():
+    user = _require_user()
+    room_code = _current_room_code()
     f = request.files.get("file")
-    name = (request.form.get("name") or "").strip()
+    name = (request.form.get("name") or user.username or "").strip()
     if not name:
         return jsonify({"error": "نام کاربر مشخص نیست"}), 400
     if not f or f.filename == "":
@@ -1396,131 +1691,512 @@ def api_avatar_upload():
     f.save(os.path.join(Config.AVATAR_DIR, fname))
     url = f"/stream/media/avatars/{fname}"
 
-    with CHAT_LOCK:
-        if chat:
-            chat.set_avatar(name, url)
-    with LOCK:
-        if room:
-            for u in room.users.values():
+    if room_code:
+        chat_obj = rooms.chat(room_code)
+        with CHAT_LOCK:
+            chat_obj.set_avatar(name, url)
+        rs = rooms.get(room_code)
+        with LOCK:
+            for u in rs.users.values():
                 if u.get("name") == name:
                     u["avatar_url"] = url
-    broadcast_presence()
+        broadcast_presence(rs)
     return jsonify({"url": url})
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Auth — accounts & sessions (mirrors the arman-music pattern: bcrypt
+# password hashes + JWT access/refresh tokens, DB-backed)
+# ────────────────────────────────────────────────────────────────────────────
+
+def _issue_tokens(session, user) -> dict:
+    access = dbmod.create_access_token(user.id)
+    refresh = dbmod.create_refresh_token(user.id)
+    session.add(dbmod.RefreshToken(
+        user_id=user.id, token=refresh,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=Config.JWT_REFRESH_TTL_DAYS),
+    ))
+    return {"access_token": access, "refresh_token": refresh}
+
+
+@app.route("/stream/api/auth/register", methods=["POST"])
+def api_auth_register():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    display_name = (data.get("display_name") or "").strip()
+
+    if len(username) < 3 or len(username) > 24:
+        return jsonify({"error": "نام کاربری باید ۳ تا ۲۴ حرف باشد"}), 400
+    if not _re.match(r"^[A-Za-z0-9_.\-]+$", username):
+        return jsonify({"error": "نام کاربری فقط حروف انگلیسی، عدد، _ و - می‌تواند باشد"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "رمز عبور باید حداقل ۶ کاراکتر باشد"}), 400
+
+    session = dbmod.SessionLocal()
+    try:
+        if dbmod.get_user_by_username_or_email(session, username):
+            return jsonify({"error": "این نام کاربری قبلاً ثبت شده است"}), 409
+
+        is_first = dbmod.first_user_count(session)
+        user = DBUser(
+            username=username,
+            display_name=display_name or username,
+            password_hash=dbmod.hash_password(password),
+            role="admin" if is_first else "watcher",
+            can_control=bool(is_first),
+            youtube_allowed=bool(is_first),
+            upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
+        )
+        session.add(user)
+        session.flush()
+        own = dbmod.ensure_own_room(session, user)
+        user.current_room_id = own.id
+        tokens = _issue_tokens(session, user)
+        session.commit()
+        log_debug(f"Registered user '{username}' as {'admin' if is_first else 'watcher'}")
+        return jsonify({**tokens, "user": user.public_dict(), "room": own.public_dict()}), 201
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/auth/login", methods=["POST"])
+def api_auth_login():
+    data = request.get_json(force=True, silent=True) or {}
+    login = (data.get("username") or data.get("login") or "").strip()
+    password = data.get("password") or ""
+    if not login or not password:
+        return jsonify({"error": "نام کاربری و رمز عبور را وارد کن"}), 400
+
+    session = dbmod.SessionLocal()
+    try:
+        user = dbmod.get_user_by_username_or_email(session, login)
+        if not user or not dbmod.verify_password(password, user.password_hash):
+            return jsonify({"error": "نام کاربری یا رمز عبور اشتباه است"}), 401
+        if not user.is_active:
+            return jsonify({"error": "حساب تو غیرفعال شده؛ با ادمین تماس بگیر"}), 403
+        own = dbmod.ensure_own_room(session, user)
+        if not user.current_room_id:
+            user.current_room_id = own.id
+        tokens = _issue_tokens(session, user)
+        session.commit()
+        return jsonify({**tokens, "user": user.public_dict(), "room": own.public_dict()})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/auth/refresh", methods=["POST"])
+def api_auth_refresh():
+    data = request.get_json(force=True, silent=True) or {}
+    token = (data.get("refresh_token") or "").strip()
+    session = dbmod.SessionLocal()
+    try:
+        row = session.execute(
+            dbmod.select(dbmod.RefreshToken).where(dbmod.RefreshToken.token == token)
+        ).scalar_one_or_none()
+        if not row:
+            return jsonify({"error": "نشست نامعتبر است؛ دوباره وارد شو"}), 401
+        if row.expires_at and row.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            session.delete(row)
+            session.commit()
+            return jsonify({"error": "نشست منقضی شده؛ دوباره وارد شو"}), 401
+        user = session.get(DBUser, row.user_id)
+        if not user or not user.is_active:
+            return jsonify({"error": "کاربر غیرفعال است"}), 403
+        new_refresh = dbmod.create_refresh_token(user.id)
+        row.token = new_refresh
+        row.expires_at = datetime.now(timezone.utc) + timedelta(days=Config.JWT_REFRESH_TTL_DAYS)
+        session.commit()
+        return jsonify({
+            "access_token": dbmod.create_access_token(user.id),
+            "refresh_token": new_refresh,
+            "user": user.public_dict(),
+        })
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    data = request.get_json(force=True, silent=True) or {}
+    token = (data.get("refresh_token") or "").strip()
+    if token:
+        session = dbmod.SessionLocal()
+        try:
+            row = session.execute(
+                dbmod.select(dbmod.RefreshToken).where(dbmod.RefreshToken.token == token)
+            ).scalar_one_or_none()
+            if row:
+                session.delete(row)
+                session.commit()
+        finally:
+            session.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/stream/api/auth/me")
+def api_auth_me():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        fresh = session.get(DBUser, user.id)
+        if not fresh or not fresh.is_active:
+            return jsonify({"error": "حساب غیرفعال است"}), 401
+        own = dbmod.ensure_own_room(session, fresh)
+        if not fresh.current_room_id:
+            fresh.current_room_id = own.id
+            session.commit()
+        room_row = session.get(dbmod.Room, fresh.current_room_id) if fresh.current_room_id else None
+        rs = rooms.get(fresh.current_room_id) if fresh.current_room_id else rooms.get(own.id)
+        return jsonify({
+            "user": fresh.public_dict(),
+            "room": room_row.public_dict() if room_row else None,
+            "own_room": own.public_dict(),
+            "online": len(rs.users) if rs else 0,
+        })
+    finally:
+        session.close()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Rooms — invite code, join-by-code search, return to own room
+# ────────────────────────────────────────────────────────────────────────────
+
+def _room_info_json(session, room_row: dbmod.Room) -> dict:
+    rs = rooms.get(room_row.id)
+    return {
+        "id": room_row.id,
+        "name": room_row.name,
+        "owner_id": room_row.owner_id,
+        "online": len(rs.users) if rs else 0,
+        "items": len(rs.playlist) if rs else 0,
+    }
+
+
+@app.route("/stream/api/room/info")
+def api_room_info():
+    _require_user()
+    code = (request.args.get("code") or "").strip().upper()
+    if not code:
+        return jsonify({"error": "کد اتاق را وارد کن"}), 400
+    session = dbmod.SessionLocal()
+    try:
+        room_row = session.get(dbmod.Room, code)
+        if not room_row:
+            return jsonify({"error": f"اتاق با کد {code} پیدا نشد"}), 404
+        return jsonify({"room": _room_info_json(session, room_row)})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/room/join", methods=["POST"])
+def api_room_join():
+    user = _require_user()
+    data = request.get_json(force=True, silent=True) or {}
+    code = (data.get("code") or "").strip().upper()
+    if not code:
+        return jsonify({"error": "کد اتاق را وارد کن"}), 400
+    session = dbmod.SessionLocal()
+    try:
+        room_row = session.get(dbmod.Room, code)
+        if not room_row:
+            return jsonify({"error": f"اتاق با کد {code} پیدا نشد"}), 404
+        fresh = session.get(DBUser, user.id)
+        fresh.current_room_id = room_row.id
+        session.commit()
+        return jsonify({"room": _room_info_json(session, room_row), "user": fresh.public_dict()})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/room/mine", methods=["POST"])
+def api_room_mine():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        fresh = session.get(DBUser, user.id)
+        own = dbmod.ensure_own_room(session, fresh)
+        fresh.current_room_id = own.id
+        session.commit()
+        return jsonify({"room": _room_info_json(session, own), "user": fresh.public_dict()})
+    finally:
+        session.close()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Admin dashboard (role=admin only) — everything DB-synced
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.route("/stream/api/admin/stats")
+def api_admin_stats():
+    admin = _require_user()
+    if not _is_admin(admin):
+        return jsonify({"error": "دسترسی ادمین لازم است"}), 403
+    session = dbmod.SessionLocal()
+    try:
+        users_count = session.execute(dbmod.select(dbmod.func.count()).select_from(DBUser)).scalar()
+        rooms_count = session.execute(dbmod.select(dbmod.func.count()).select_from(dbmod.Room)).scalar()
+        online = sum(len(rs.users) for rs in rooms._rooms.values())
+        media = sum(len(rs.playlist) for rs in rooms._rooms.values())
+        return jsonify({
+            "users": users_count or 0,
+            "rooms": rooms_count or 0,
+            "online": online,
+            "media": media,
+        })
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/admin/users")
+def api_admin_users():
+    admin = _require_user()
+    if not _is_admin(admin):
+        return jsonify({"error": "دسترسی ادمین لازم است"}), 403
+    session = dbmod.SessionLocal()
+    try:
+        users = session.execute(
+            dbmod.select(DBUser).order_by(DBUser.created_at.desc())
+        ).scalars().all()
+        out = []
+        for u in users:
+            rs = rooms.get(u.current_room_id) if u.current_room_id else None
+            out.append({
+                **u.public_dict(),
+                "online": len(rs.users) if rs else 0,
+                "room_items": len(rs.playlist) if rs else 0,
+                "own_room_id": u.own_room.id if u.own_room else None,
+            })
+        return jsonify({"users": out})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/admin/users/<user_id>", methods=["POST"])
+def api_admin_update_user(user_id):
+    admin = _require_user()
+    if not _is_admin(admin):
+        return jsonify({"error": "دسترسی ادمین لازم است"}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    session = dbmod.SessionLocal()
+    try:
+        target = session.get(DBUser, user_id)
+        if not target:
+            return jsonify({"error": "کاربر پیدا نشد"}), 404
+        is_self = (target.id == admin.id)
+
+        if "role" in data:
+            role = str(data["role"] or "").strip().lower()
+            if role not in ("admin", "controller", "watcher"):
+                return jsonify({"error": "نقش نامعتبر است"}), 400
+            if is_self and role != "admin":
+                return jsonify({"error": "نمی‌توانی نقش خودت را از ادمین تغییر دهی"}), 400
+            target.role = role
+        if "can_control" in data:
+            target.can_control = bool(data["can_control"])
+        if "youtube_allowed" in data:
+            target.youtube_allowed = bool(data["youtube_allowed"])
+        if "upload_quota" in data:
+            try:
+                q = int(data["upload_quota"])
+            except (TypeError, ValueError):
+                return jsonify({"error": "سهمیه باید عدد باشد"}), 400
+            if q < -1:
+                return jsonify({"error": "سهمیه نمی‌تواند منفی باشد (برای نامحدود از 1- استفاده کن)"}), 400
+            target.upload_quota = q
+        if "display_name" in data:
+            target.display_name = (str(data["display_name"] or "").strip())[:64]
+        if "is_active" in data:
+            if is_self and not bool(data["is_active"]):
+                return jsonify({"error": "نمی‌توانی حساب خودت را غیرفعال کنی"}), 400
+            target.is_active = bool(data["is_active"])
+
+        session.commit()
+        return jsonify({"user": target.public_dict()})
+    finally:
+        session.close()
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # Socket.IO
 # ────────────────────────────────────────────────────────────────────────────
 
+# sid -> (room_code, DBUser) for every authenticated socket connection.
+SOCKET_SESSIONS: dict = {}
+
+
+def _socket_session():
+    """(code, user) for the current socket's sid, or (None, None)."""
+    sess = SOCKET_SESSIONS.get(request.sid)
+    if not sess:
+        return None, None
+    return sess[0], sess[1]
+
+
 @socketio.on("connect")
-def on_connect():
-    if room:
-        emit("state_sync", room.to_public_dict())
-    if chat:
+def on_connect(auth=None):
+    token = ""
+    if isinstance(auth, dict):
+        token = (auth.get("token") or "").strip()
+    if not token:
+        token = (request.args.get("token") or "").strip()
+    payload = dbmod.decode_token(token) if token else None
+    if not payload or payload.get("type") != "access":
+        log_debug(f"Socket connect rejected (no/invalid token from {request.sid})")
+        return False
+    session = dbmod.SessionLocal()
+    try:
+        user = session.get(DBUser, payload.get("sub"))
+        if not user or not user.is_active or not user.current_room_id:
+            return False
+        code = user.current_room_id
+        SOCKET_SESSIONS[request.sid] = (code, user)
+        join_room(_room_channel(code))
+        rs = rooms.get(code)
+        chat_obj = rooms.chat(code)
+        with LOCK:
+            rs.users[request.sid] = {
+                "name": user.username, "display_name": user.display_name,
+                "avatar_url": None, "in_voice": False,
+            }
+        emit("state_sync", rs.to_public_dict())
         with CHAT_LOCK:
-            emit("chat_history", {"messages": chat.public_history()})
+            emit("chat_history", {"messages": chat_obj.public_history()})
+        broadcast_notify("join", user.username, room_code=code)
+        broadcast_presence(rs)
+        log_debug(f"Socket connected: {user.username} -> room {code} ({request.sid})")
+    finally:
+        session.close()
 
 
 @socketio.on("disconnect")
 def on_disconnect():
     sid = request.sid
+    code, _user = SOCKET_SESSIONS.pop(sid, (None, None))
+    if not code:
+        return
+    rs = rooms.get(code)
     with LOCK:
-        if room:
-            user = room.users.pop(sid, None)
-        else:
-            user = None
+        user = rs.users.pop(sid, None)
     if user:
-        broadcast_notify("leave", user["name"])
-        broadcast_presence()
+        broadcast_notify("leave", user.get("name", "ناشناس"), room_code=code)
+        broadcast_presence(rs)
 
 
 @socketio.on("join")
 def on_join(data):
+    code, _user = _socket_session()
+    if not code:
+        return
+    rs = rooms.get(code)
+    chat_obj = rooms.chat(code)
     data = data or {}
-    name = (data.get("name") or "ناشناس").strip()[:24] or "ناشناس"
+    name = (data.get("name") or "").strip()[:24]
     avatar_url = None
-    if chat:
-        with CHAT_LOCK:
-            avatar_url = chat.get_avatar(name)
+    with CHAT_LOCK:
+        avatar_url = chat_obj.get_avatar(name)
     with LOCK:
-        if room:
-            room.users[request.sid] = {"name": name, "avatar_url": avatar_url, "in_voice": False}
-    if room:
-        emit("state_sync", room.to_public_dict())
-    broadcast_notify("join", name)
-    broadcast_presence()
+        entry = rs.users.get(request.sid)
+        if entry is None:
+            return
+        if name:
+            entry["name"] = name
+        if avatar_url:
+            entry["avatar_url"] = avatar_url
+    emit("state_sync", rs.to_public_dict())
+    broadcast_presence(rs)
 
 
 @socketio.on("voice_joined")
 def on_voice_joined(data):
+    code, _user = _socket_session()
+    if not code:
+        return
+    rs = rooms.get(code)
     data = data or {}
     name = (data.get("name") or "").strip()
     with LOCK:
-        if not room:
-            return
-        user = room.users.get(request.sid)
+        user = rs.users.get(request.sid)
         if user is None:
             return
         if name and name != user.get("name"):
             return
         user["in_voice"] = True
-    broadcast_presence()
+    broadcast_presence(rs)
 
 
 @socketio.on("voice_left")
 def on_voice_left(data):
+    code, _user = _socket_session()
+    if not code:
+        return
+    rs = rooms.get(code)
     data = data or {}
     name = (data.get("name") or "").strip()
     with LOCK:
-        if not room:
-            return
-        user = room.users.get(request.sid)
+        user = rs.users.get(request.sid)
         if user is None:
             return
         if name and name != user.get("name"):
             return
         user["in_voice"] = False
-    broadcast_presence()
+    broadcast_presence(rs)
 
 
 @socketio.on("control")
 def on_control(data):
+    code, user = _socket_session()
+    if not code or not user:
+        return
+    if not _may_control(user):
+        emit("notify", {
+            "type": "control_denied", "name": user.username,
+            "ts": time.time(),
+            "extra": {"action": (data or {}).get("action", "")},
+        })
+        return
+    rs = rooms.get(code)
     data = data or {}
     action = data.get("action")
-    name = (data.get("name") or "ناشناس").strip() or "ناشناس"
+    name = user.username or "ناشناس"
 
     with LOCK:
-        if not room:
-            return
         if action == "play":
-            room.set_play(float(data.get("at", room.current_position())))
+            rs.set_play(float(data.get("at", rs.current_position())))
         elif action == "pause":
-            room.set_pause(float(data.get("at", room.current_position())))
+            rs.set_pause(float(data.get("at", rs.current_position())))
         elif action == "seek":
-            room.seek(float(data.get("to", 0)))
+            rs.seek(float(data.get("to", 0)))
         elif action == "rate":
-            room.set_rate(float(data.get("rate", 1.0)))
+            rs.set_rate(float(data.get("rate", 1.0)))
         elif action == "select":
-            room.select_item(int(data.get("index")))
+            rs.select_item(int(data.get("index")))
         else:
             return
-        safe_save(room)
-        payload = room.to_public_dict()
+        safe_save(rs)
+        payload = rs.to_public_dict()
 
-    socketio.emit("state_sync", payload, include_self=False)
-    broadcast_notify(f"ctrl_{action}", name, extra=data)
+    socketio.emit("state_sync", payload, to=_room_channel(code), include_self=False)
+    broadcast_notify(f"ctrl_{action}", name, room_code=code, extra=data)
 
 
 @socketio.on("request_sync")
 def on_request_sync():
-    if room:
-        emit("state_sync", room.to_public_dict())
+    code, _user = _socket_session()
+    if not code:
+        return
+    rs = rooms.get(code)
+    emit("state_sync", rs.to_public_dict())
 
 
 @socketio.on("chat_send")
 def on_chat_send(data):
+    code, user = _socket_session()
+    if not code or not user:
+        return
+    chat_obj = rooms.chat(code)
     data = data or {}
-    name = (data.get("name") or "ناشناس").strip()[:24] or "ناشناس"
+    name = user.username or "ناشناس"
     text = (data.get("text") or "").strip()[:Config.CHAT_MAX_TEXT_LEN]
     image_url = (data.get("image_url") or "").strip() or None
 
@@ -1530,22 +2206,25 @@ def on_chat_send(data):
         image_url = None
 
     avatar_url = None
-    if chat:
-        with CHAT_LOCK:
-            avatar_url = chat.get_avatar(name)
+    with CHAT_LOCK:
+        avatar_url = chat_obj.get_avatar(name)
 
     msg = {
         "id": new_id(), "name": name, "text": text,
         "image_url": image_url, "avatar_url": avatar_url,
         "ts": time.time(),
     }
-    if chat:
-        with CHAT_LOCK:
-            chat.add_message(msg)
-    socketio.emit("chat_message", msg)
+    with CHAT_LOCK:
+        chat_obj.add_message(msg)
+    socketio.emit("chat_message", msg, to=_room_channel(code))
 
 
 if __name__ == "__main__":
+    try:
+        dbmod.init_db()
+        log_debug("Database tables ready.")
+    except Exception as e:
+        log_debug(f"[CRITICAL] Database init failed: {e}")
     gevent.spawn(_chat_purge_loop)
     from gevent import pywsgi
     from geventwebsocket.handler import WebSocketHandler

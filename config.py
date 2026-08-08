@@ -34,6 +34,29 @@ class Config:
     HOST = os.environ.get("STREAM_HOST", "127.0.0.1")
     PORT = int(os.environ.get("STREAM_PORT", "8801"))
 
+    # ---------------------------------------------------------------
+    # Accounts, rooms & admin (PostgreSQL, same stack as arman-music)
+    # ---------------------------------------------------------------
+    DATABASE_URL = os.environ.get(
+        "STREAM_DATABASE_URL", "postgresql+psycopg2://stream:stream@127.0.0.1:5432/stream"
+    )
+    # JWT signing secret (access + refresh tokens). Set via env; falls back
+    # to SECRET_KEY so a missing env var still produces working (if not
+    # perfectly unique) signatures.
+    JWT_SECRET = os.environ.get("STREAM_JWT_SECRET", "") or os.environ.get(
+        "STREAM_SECRET_KEY", "change-this-secret-please"
+    )
+    JWT_ALGORITHM = "HS256"
+    JWT_ACCESS_TTL_MINUTES = int(os.environ.get("STREAM_JWT_ACCESS_TTL_MINUTES", "4320"))  # 3 days
+    JWT_REFRESH_TTL_DAYS = int(os.environ.get("STREAM_JWT_REFRESH_TTL_DAYS", "30"))
+
+    # Room codes are 6 chars from an unambiguous alphabet (no 0/O/1/I/L).
+    ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    ROOM_CODE_LEN = 6
+
+    # Default per-user limits for a fresh signup (watcher).
+    DEFAULT_UPLOAD_QUOTA = int(os.environ.get("STREAM_DEFAULT_UPLOAD_QUOTA", "50"))
+
     MEDIA_DIR = os.path.join(BASE_DIR, "media")
     UPLOAD_DIR = os.path.join(MEDIA_DIR, "uploads")   # raw/original uploads before encode
     SUBS_DIR = os.path.join(MEDIA_DIR, "subs")

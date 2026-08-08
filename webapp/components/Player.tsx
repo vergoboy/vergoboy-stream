@@ -56,6 +56,7 @@ export function Player({
   latestNotify,
   myName,
   subStyle,
+  canControl,
   canPrev,
   canNext,
   onPrev,
@@ -74,6 +75,7 @@ export function Player({
   latestNotify: NotifyEvent | null;
   myName: string;
   subStyle: SubStyle;
+  canControl: boolean;
   canPrev: boolean;
   canNext: boolean;
   onPrev: () => void;
@@ -203,6 +205,10 @@ export function Player({
 
   const seek = useCallback(
     (to: number) => {
+      if (!canControl) {
+        showToast("فقط کنترلر اتاق می‌تونه پخش را کنترل کنه");
+        return;
+      }
       const target = clampToFrontier(to);
       const v = videoRef.current;
       if (v) {
@@ -211,15 +217,19 @@ export function Player({
       }
       requestControl("seek", { to: target });
     },
-    [requestControl, clampToFrontier]
+    [requestControl, clampToFrontier, canControl, showToast]
   );
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!item || !v) return;
+    if (!canControl) {
+      showToast("فقط کنترلر اتاق می‌تونه پخش را کنترل کنه");
+      return;
+    }
     if (v.paused) requestControl("play", { at: v.currentTime || 0 });
     else requestControl("pause", { at: v.currentTime || 0 });
-  }, [item, requestControl]);
+  }, [item, requestControl, canControl, showToast]);
 
   // ---- load / teardown source whenever the underlying item id changes ----
   // Derived, not raw item.status: ready and complete are BOTH "playable" and
@@ -945,7 +955,7 @@ export function Player({
                 max={isFinite(totalDuration) ? totalDuration || 0 : (duration || 0)}
                 step={0.1}
                 value={dragging ? dragValueRef.current : curTime}
-                disabled={item?.type === "live"}
+                disabled={!canControl || item?.type === "live"}
                 onMouseDown={() => setDragging(true)}
                 onTouchStart={() => setDragging(true)}
                 onChange={(e) => {
@@ -971,7 +981,7 @@ export function Player({
 
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-1">
-              <CtrlBtn title="پخش / مکث" main onClick={togglePlay}>
+              <CtrlBtn title={canControl ? "پخش / مکث" : "پخش/توقف (فقط کنترلر)"} main onClick={togglePlay} disabled={!canControl}>
                 {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
               </CtrlBtn>
               <CtrlBtn title="آیتم قبلی (P)" onClick={onPrev} disabled={!canPrev}>
@@ -995,7 +1005,7 @@ export function Player({
             <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item ? prettyTitle(item.title) : ""}</div>
 
             <div className="flex flex-wrap items-center gap-1">
-              <MenuBtn label={`${rate}x`} open={openMenu === "speed"} onToggle={() => setOpenMenu(openMenu === "speed" ? null : "speed")}>
+              <MenuBtn label={`${rate}x`} open={openMenu === "speed"} onToggle={() => setOpenMenu(openMenu === "speed" ? null : "speed")} disabled={!canControl}>
                 {SPEEDS.map((s) => (
                   <MenuItem key={s} active={rate === s} onClick={() => requestControl("rate", { rate: s })}>
                     {s}x

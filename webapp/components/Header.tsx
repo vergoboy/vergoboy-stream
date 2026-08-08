@@ -1,9 +1,12 @@
 "use client";
 
-import { Tv, Users, Radio, Sparkles } from "lucide-react";
+import { LayoutDashboard, LogOut } from "lucide-react";
 
 
 import { useState } from "react";
+import type { AuthUser } from "@/lib/auth";
+
+const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
 
 const LINKS = [
   ["/", "🏠 خانه"],
@@ -13,8 +16,9 @@ const LINKS = [
   ["/#contact", "✉️ تماس"],
 ] as const;
 
-export function Header() {
+export function Header({ user, onLogout }: { user?: AuthUser | null; onLogout?: () => void }) {
   const [open, setOpen] = useState(false);
+  const isAdmin = user?.role === "admin";
   return (
     <header className="sticky top-0 z-[100] border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/85 backdrop-blur-xl">
       <div className="mx-auto flex h-[64px] max-w-[1120px] items-center justify-between gap-4 px-5 md:px-7">
@@ -46,6 +50,25 @@ export function Header() {
               {label}
             </a>
           ))}
+          {isAdmin && (
+            <a
+              href={`${basePath}/admin/`}
+              className="flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-[14px] font-medium text-[color:var(--color-amber)] transition-colors hover:bg-white/5"
+            >
+              <LayoutDashboard className="h-4 w-4" />
+              ادمین
+            </a>
+          )}
+          {user && (
+            <button
+              onClick={onLogout}
+              title="خروج از حساب"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13.5px] text-[color:var(--color-ink-muted)] transition-colors hover:bg-white/5 hover:text-[color:var(--color-coral)]"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="max-w-[90px] truncate">{user.username}</span>
+            </button>
+          )}
         </nav>
 
         <button onClick={() => setOpen((o) => !o)} className="flex h-9 w-9 flex-col items-center justify-center gap-1.5 md:hidden" aria-label="منو">
@@ -62,6 +85,28 @@ export function Header() {
               {label}
             </a>
           ))}
+          {isAdmin && (
+            <a
+              href={`${basePath}/admin/`}
+              onClick={() => setOpen(false)}
+              className="flex items-center gap-2 rounded-xl px-3.5 py-3 text-[15px] text-[color:var(--color-amber)] hover:bg-white/5"
+            >
+              <LayoutDashboard className="h-4 w-4" />
+              پنل ادمین
+            </a>
+          )}
+          {user && (
+            <button
+              onClick={() => {
+                setOpen(false);
+                onLogout?.();
+              }}
+              className="flex items-center gap-2 rounded-xl px-3.5 py-3 text-[15px] text-[color:var(--color-coral)] hover:bg-white/5"
+            >
+              <LogOut className="h-4 w-4" />
+              خروج ({user.username})
+            </button>
+          )}
         </nav>
       )}
     </header>

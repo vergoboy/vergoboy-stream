@@ -1,3 +1,41 @@
+// ────────────────────────────────────────────────────────────────────────────
+// Accounts & rooms (DB-backed)
+// ────────────────────────────────────────────────────────────────────────────
+
+export type UserRole = "admin" | "controller" | "watcher";
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  can_control: boolean;
+  youtube_allowed: boolean;
+  upload_quota: number;
+  uploads_used: number;
+  current_room_id: string | null;
+  created_at?: string | null;
+}
+
+export interface AuthRoom {
+  id: string;
+  name: string;
+  owner_id: string;
+  online?: number;
+  items?: number;
+}
+
+export interface AuthTokens {
+  access_token: string;
+  refresh_token: string;
+}
+
+export interface AdminUser extends AuthUser {
+  online?: number;
+  room_items?: number;
+  own_room_id?: string | null;
+}
+
 export type ItemStatus = "queued" | "encoding" | "ready" | "complete" | "error";
 export type RenditionStatus = "pending" | "queued" | "encoding" | "ready" | "complete" | "error";
 

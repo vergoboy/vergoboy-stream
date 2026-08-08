@@ -29,11 +29,14 @@ export interface ControlExtra {
 }
 
 interface UseRoomStateOptions {
+  token: string | null;
+  roomCode: string;
   myName: string;
+  canControl: boolean;
   onNotify?: (n: NotifyEvent) => void;
 }
 
-export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
+export function useRoomState({ token, roomCode, myName, canControl, onNotify }: UseRoomStateOptions) {
   const [connected, setConnected] = useState(false);
   const [room, setRoom] = useState<RoomStateSync>(EMPTY_ROOM);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
@@ -53,7 +56,7 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
   }, []);
 
   useEffect(() => {
-    if (!myName || socketRef.current) return;
+    if (!token || !roomCode || socketRef.current) return;
     let cancelled = false;
 
     import("socket.io-client").then(({ io }) => {
@@ -61,6 +64,7 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
       const socket = io(API_ORIGIN || undefined, {
         path: SOCKET_PATH,
         transports: ["websocket"],
+        auth: { token },
       });
       socketRef.current = socket;
 
@@ -106,7 +110,7 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
       socketRef.current?.disconnect();
       socketRef.current = null;
     };
-  }, [myName]);
+  }, [token, roomCode, myName]);
 
   const expectedPosition = useCallback(() => {
     const elapsed = room.playing ? (Date.now() / 1000 - recvLocalRef.current) * room.rate : 0;
@@ -115,6 +119,7 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
 
   const requestControl = useCallback(
     (action: "play" | "pause" | "seek" | "rate" | "select", extra: ControlExtra = {}) => {
+      if (!canControl) return;
       // Optimistic local update so the UI feels instant.
       setRoom((r) => {
         const next = { ...r };
@@ -150,7 +155,7 @@ export function useRoomState({ myName, onNotify }: UseRoomStateOptions) {
       });
       socketRef.current?.emit("control", { action, name: myName, ...extra });
     },
-    [expectedPosition, myName]
+    [expectedPosition, myName, canControl]
   );
 
   const sendChat = useCallback(

@@ -20,7 +20,11 @@ CHAT_LOCK = threading.Lock()
 
 
 class RoomState:
-    def __init__(self):
+    def __init__(self, room_id: str = None):
+        # room_id is the room's invite code. When set, state is persisted to a
+        # per-room file (data/rooms/<code>.json) so each room keeps its own
+        # playlist/position across restarts. None keeps the legacy single file.
+        self.room_id = room_id
         self.playlist = []        # لیست آیتم‌های پلی‌لیست
         self.current_index = None
         self.playing = False
@@ -120,11 +124,19 @@ class RoomState:
         return next((x for x in self.playlist if x["id"] == item_id), None)
 
     # ---------- ماندگاری روی دیسک ----------
+    def _data_file(self) -> str:
+        if self.room_id:
+            d = os.path.join(os.path.dirname(Config.DATA_FILE), "rooms")
+            os.makedirs(d, exist_ok=True)
+            return os.path.join(d, f"{self.room_id}.json")
+        return Config.DATA_FILE
+
     def save(self):
         try:
-            with open(Config.DATA_FILE, "w", encoding="utf-8") as f:
+            with open(self._data_file(), "w", encoding="utf-8") as f:
                 json.dump(
                     {
+                        "room_id": self.room_id,
                         "playlist": self.playlist,
                         "current_index": self.current_index,
                         "position": self.position,
@@ -139,9 +151,10 @@ class RoomState:
 
     def _load(self):
         try:
-            if os.path.exists(Config.DATA_FILE):
-                with open(Config.DATA_FILE, encoding="utf-8") as f:
-                    d = json.load(f)
+            f = self._data_file()
+            if os.path.exists(f):
+                with open(f, encoding="utf-8") as fh:
+                    d = json.load(fh)
                 self.playlist = d.get("playlist", [])
                 self.current_index = d.get("current_index")
                 self.position = d.get("position", 0.0)
@@ -249,3 +262,42 @@ class ChatState:
 
 room = RoomState()
 chat = ChatState()
+
+
+class RoomManager:
+    """Holds one in-memory RoomState + ChatState per room code. Rooms are
+    materialized lazily (a room only exists in memory once someone is in it)
+    and their playlist/position is persisted per-room to
+    data/rooms/<code>.json."""
+
+    def __init__(self):
+        self._rooms: dict[str, RoomState] = {}
+        self._chats: dict[str, ChatState] = {}
+        self._lock = threading.Lock()
+
+    def get(self, code: str) -> RoomState:
+        code = (code or "").strip().upper()
+        with self._lock:
+            rs = self._rooms.get(code)
+            if rs is None:
+                rs = RoomState(room_id=code)
+                self._rooms[code] = rs
+            return rs
+
+    def chat(self, code: str) -> ChatState:
+        code = (code or "").strip().upper()
+        with self._lock:
+            cs = self._chats.get(code)
+            if cs is None:
+                cs = ChatState()
+                self._chats[code] = cs
+            return cs
+
+    def drop(self, code: str):
+        with self._lock:
+            self._rooms.pop(code, None)
+            self._chats.pop(code, None)
+
+
+rooms = RoomManager()
+

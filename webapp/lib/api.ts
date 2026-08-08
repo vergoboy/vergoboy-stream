@@ -1,27 +1,14 @@
 import { apiUrl } from "./config";
+import { authFetch, friendlyError, getAccessToken } from "./auth";
+import type { AdminUser, AuthRoom, AuthUser } from "./types";
 
 const FETCH_TIMEOUT_MS = 45000;
-
-function friendlyError(e: unknown): Error {
-  const msg = e instanceof Error ? e.message : String(e);
-  const name = e instanceof Error ? e.name : "";
-  if (name === "AbortError" || (typeof DOMException !== "undefined" && e instanceof DOMException && e.name === "AbortError")) {
-    return new Error("سرور پاسخ نداد؛ اتصال را بررسی کن و دوباره تلاش کن");
-  }
-  if (
-    name === "TypeError" ||
-    /failed to fetch|networkerror|load failed|network request failed/i.test(msg)
-  ) {
-    return new Error("ارتباط با سرور برقرار نشد؛ اتصال اینترنت را بررسی کن");
-  }
-  return e instanceof Error ? e : new Error(msg);
-}
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(apiUrl(path), {
+    const res = await authFetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -41,7 +28,7 @@ async function postForm<T>(path: string, form: FormData): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(apiUrl(path), { method: "POST", body: form, signal: controller.signal });
+    const res = await authFetch(path, { method: "POST", body: form, signal: controller.signal });
     const data = (await res.json().catch(() => ({}))) as T & { error?: string };
     if (!res.ok) throw new Error(data.error || `${path} failed (${res.status})`);
     return data;
@@ -70,6 +57,8 @@ export function uploadVideo(
     fd.append("name", name);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", apiUrl("/stream/api/upload"));
+    const token = getAccessToken();
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     xhr.upload.addEventListener("progress", (ev) => {
       if (ev.lengthComputable && onProgress) onProgress((ev.loaded / ev.total) * 100);
     });
@@ -101,7 +90,7 @@ export const api = {
     postJson<UploadResult>("/stream/api/add-youtube", { url, format_id, title, name }),
 
   newLiveKey: () =>
-    fetch(apiUrl("/stream/api/live/new-key"), { method: "POST" }).then((r) => r.json()) as Promise<{
+    authFetch("/stream/api/live/new-key", { method: "POST" }).then((r) => r.json()) as Promise<{
       key: string;
       push_url: string;
       playback_url: string;
@@ -114,10 +103,10 @@ export const api = {
     postJson<{ ok: true }>("/stream/api/request-quality", { item_id, label, name }),
 
   removeItem: (itemId: string, name: string) =>
-    fetch(apiUrl(`/stream/api/playlist/${itemId}?name=${encodeURIComponent(name)}`), { method: "DELETE" }),
+    authFetch(`/stream/api/playlist/${itemId}?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
 
   cleanup: () =>
-    fetch(apiUrl("/stream/api/cleanup"), { method: "POST" }).then((r) => r.json()) as Promise<{
+    authFetch("/stream/api/cleanup", { method: "POST" }).then((r) => r.json()) as Promise<{
       total: number;
       removed: Record<string, string[]>;
     }>,
@@ -139,10 +128,10 @@ export const api = {
     postJson<{ ok: true }>("/stream/api/audio-track", { item_id, url, label, name }),
 
   chatHistory: () =>
-    fetch(apiUrl("/stream/api/chat/history")).then((r) => r.json()) as Promise<{ messages: import("./types").ChatMessage[] }>,
+    authFetch("/stream/api/chat/history").then((r) => r.json()) as Promise<{ messages: import("./types").ChatMessage[] }>,
 
   chatClear: (name: string) =>
-    fetch(apiUrl(`/stream/api/chat/clear?name=${encodeURIComponent(name)}`), { method: "POST" }),
+    authFetch(`/stream/api/chat/clear?name=${encodeURIComponent(name)}`, { method: "POST" }),
 
   chatImage: (file: File) => {
     const fd = new FormData();
@@ -174,4 +163,52 @@ export const api = {
 
   addMany: (items: { title: string; url: string }[], name: string) =>
     postJson<{ added: number; skipped: number; dead: string[] }>("/stream/api/add-many", { items, name }),
+
+  // ── Auth / rooms / admin ──────────────────────────────────────────────
+
+  me: async () => {
+    const res = await authFetch("/stream/api/auth/me");
+    const data = (await res.json().catch(() => ({}))) as {
+      user?: AuthUser;
+      room?: AuthRoom | null;
+      own_room?: AuthRoom;
+      error?: string;
+    };
+    if (!res.ok) throw new Error(data.error || "نشست نامعتبر است");
+    return data;
+  },
+
+  roomJoin: (code: string) =>
+    postJson<{ room: AuthRoom; user: AuthUser }>("/stream/api/room/join", { code }),
+
+  roomMine: () => postJson<{ room: AuthRoom; user: AuthUser }>("/stream/api/room/mine", {}),
+
+  roomInfo: (code: string) =>
+    authFetch(`/stream/api/room/info?code=${encodeURIComponent(code)}`).then(async (r) => {
+      const data = (await r.json().catch(() => ({}))) as { room?: AuthRoom; error?: string };
+      if (!r.ok) throw new Error(data.error || "اتاق پیدا نشد");
+      return data;
+    }),
+
+  adminStats: async () => {
+    const res = await authFetch("/stream/api/admin/stats");
+    const data = (await res.json().catch(() => ({}))) as { users?: number; rooms?: number; online?: number; media?: number; error?: string };
+    if (!res.ok) throw new Error(data.error || "دسترسی ادمین لازم است");
+    return {
+      users: data.users ?? 0,
+      rooms: data.rooms ?? 0,
+      online: data.online ?? 0,
+      media: data.media ?? 0,
+    };
+  },
+
+  adminUsers: async () => {
+    const res = await authFetch("/stream/api/admin/users");
+    const data = (await res.json().catch(() => ({}))) as { users?: AdminUser[]; error?: string };
+    if (!res.ok) throw new Error(data.error || "دسترسی ادمین لازم است");
+    return { users: data.users ?? [] };
+  },
+
+  adminUpdateUser: (userId: string, patch: { role?: string; can_control?: boolean; youtube_allowed?: boolean; upload_quota?: number; is_active?: boolean }) =>
+    postJson<{ user: AdminUser }>(`/stream/api/admin/users/${userId}`, patch),
 };

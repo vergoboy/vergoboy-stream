@@ -1,28 +1,38 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { Users, Bell } from "lucide-react";
+import { Users, Bell, LogOut, Shield, Gamepad2, Eye } from "lucide-react";
 import { Avatar } from "./Avatar";
-import type { NotifyEvent, PlaylistItem, PresenceUser } from "@/lib/types";
+import type { NotifyEvent, PlaylistItem, PresenceUser, UserRole } from "@/lib/types";
 import { notifyText } from "@/lib/notifyText";
+
+const ROLE_LABELS: Record<UserRole, { label: string; icon: React.ReactNode; color: string }> = {
+  admin: { label: "ادمین", icon: <Shield className="h-3.5 w-3.5" />, color: "text-[color:var(--color-amber)]" },
+  controller: { label: "کنترلر", icon: <Gamepad2 className="h-3.5 w-3.5" />, color: "text-[color:var(--color-teal)]" },
+  watcher: { label: "تماشاگر", icon: <Eye className="h-3.5 w-3.5" />, color: "text-[color:var(--color-ink-dim)]" },
+};
 
 export function Sidebar({
   myName,
   myAvatarUrl,
-  onChangeName,
+  role,
   onChangeAvatar,
+  onLogout,
   onlineUsers,
   notifications,
   playlist,
 }: {
   myName: string;
   myAvatarUrl: string | null;
-  onChangeName: () => void;
+  role: UserRole;
   onChangeAvatar: (file: File) => void;
+  onLogout: () => void;
   onlineUsers: PresenceUser[];
   notifications: NotifyEvent[];
   playlist: PlaylistItem[];
 }) {
+  const roleInfo = ROLE_LABELS[role] ?? ROLE_LABELS.watcher;
+
   return (
     <aside className="flex flex-col gap-5 rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 p-5 backdrop-blur-md">
       <div>
@@ -33,9 +43,6 @@ export function Sidebar({
               شما: <b className="text-[color:var(--color-ink)]">{myName}</b>
             </div>
             <div className="flex gap-3 text-[11.5px]">
-              <button onClick={onChangeName} className="text-[color:var(--color-amber)] hover:underline">
-                تغییر نام
-              </button>
               <label className="cursor-pointer text-[color:var(--color-amber)] hover:underline">
                 تغییر عکس
                 <input
@@ -49,6 +56,14 @@ export function Sidebar({
                   }}
                 />
               </label>
+              <button onClick={onLogout} className="flex items-center gap-1 text-[color:var(--color-coral)] hover:underline">
+                <LogOut className="h-3 w-3" />
+                خروج
+              </button>
+            </div>
+            <div className={`mt-1 flex items-center gap-1 text-[11px] ${roleInfo.color}`}>
+              {roleInfo.icon}
+              {roleInfo.label}
             </div>
           </div>
         </div>
