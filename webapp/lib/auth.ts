@@ -158,6 +158,39 @@ export async function authFetch(path: string, init: RequestInit = {}): Promise<R
 
 // ── Auth API calls ──────────────────────────────────────────────────────────
 
+/** Thrown when a login/register attempt is blocked because the email hasn't
+ * been verified yet — carries the address so the UI can offer a resend. */
+export class VerifyRequiredError extends Error {
+  email: string;
+
+  constructor(message: string, email: string) {
+    super(message);
+    this.name = "VerifyRequiredError";
+    this.email = email;
+  }
+}
+
+export function oauthLoginUrl(provider: "google" | "github"): string {
+  return apiUrl(`/stream/api/auth/oauth/${provider}`);
+}
+
+/** Called after the OAuth callback redirects back with tokens in the URL
+ * hash — fetches the account from /me and stores the session. */
+export async function finishOAuthLogin(access: string, refresh: string): Promise<AuthUser | null> {
+  let res: Response;
+  try {
+    res = await fetch(apiUrl("/stream/api/auth/me"), {
+      headers: { Authorization: `Bearer ${access}` },
+    });
+  } catch {
+    return null;
+  }
+  const data = (await res.json().catch(() => ({}))) as { user?: AuthUser };
+  if (!res.ok || !data.user) return null;
+  saveAuth({ access_token: access, refresh_token: refresh }, data.user);
+  return data.user;
+}
+
 export async function login(username: string, password: string): Promise<AuthUser> {
   let res: Response;
   try {
@@ -169,29 +202,64 @@ export async function login(username: string, password: string): Promise<AuthUse
   } catch (e) {
     throw friendlyError(e);
   }
-  const data = (await res.json().catch(() => ({}))) as Partial<AuthTokens> & { user?: AuthUser; error?: string };
-  if (!res.ok) throw new Error(data.error || "خطا در ورود");
+  const data = (await res.json().catch(() => ({}))) as Partial<AuthTokens> & {
+    user?: AuthUser;
+    error?: string;
+    needs_verification?: boolean;
+    email?: string;
+  };
+  if (!res.ok) {
+    if (data.needs_verification) throw new VerifyRequiredError(data.error || "ایمیلت را تأیید کن", data.email || "");
+    throw new Error(data.error || "خطا در ورود");
+  }
   if (!data.access_token || !data.refresh_token || !data.user) throw new Error("پاسخ سرور ناقص بود");
   saveAuth({ access_token: data.access_token, refresh_token: data.refresh_token }, data.user);
   return data.user;
 }
 
-export async function register(username: string, password: string, display_name = ""): Promise<AuthUser> {
+export async function register(username: string, password: string, display_name = "", email = ""): Promise<AuthUser> {
   let res: Response;
   try {
     res = await fetch(apiUrl("/stream/api/auth/register"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password, display_name }),
+      body: JSON.stringify({ username, password, display_name, email }),
     });
   } catch (e) {
     throw friendlyError(e);
   }
-  const data = (await res.json().catch(() => ({}))) as Partial<AuthTokens> & { user?: AuthUser; error?: string };
-  if (!res.ok) throw new Error(data.error || "خطا در ثبت‌نام");
+  const data = (await res.json().catch(() => ({}))) as Partial<AuthTokens> & {
+    user?: AuthUser;
+    error?: string;
+    message?: string;
+    needs_verification?: boolean;
+    email?: string;
+  };
+  if (!res.ok) {
+    if (data.needs_verification) throw new VerifyRequiredError(data.error || "ایمیلت را تأیید کن", data.email || email);
+    throw new Error(data.error || "خطا در ثبت‌نام");
+  }
+  if (data.needs_verification && !data.access_token) {
+    throw new VerifyRequiredError(data.message || "ایمیل تأیید برایت ارسال شد", data.email || email);
+  }
   if (!data.access_token || !data.refresh_token || !data.user) throw new Error("پاسخ سرور ناقص بود");
   saveAuth({ access_token: data.access_token, refresh_token: data.refresh_token }, data.user);
   return data.user;
+}
+
+export async function resendVerification(email: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(apiUrl("/stream/api/auth/resend-verification"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+  } catch (e) {
+    throw friendlyError(e);
+  }
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) throw new Error(data.error || "ارسال دوباره ناموفق بود");
 }
 
 export async function logout(): Promise<void> {

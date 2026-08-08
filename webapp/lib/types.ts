@@ -8,6 +8,8 @@ export interface AuthUser {
   id: string;
   username: string;
   display_name: string;
+  email: string | null;
+  email_verified: boolean;
   role: UserRole;
   can_control: boolean;
   youtube_allowed: boolean;

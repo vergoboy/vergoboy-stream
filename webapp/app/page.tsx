@@ -7,7 +7,7 @@ import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
 import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
-import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl } from "@/lib/auth";
+import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, finishOAuthLogin } from "@/lib/auth";
 
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -78,6 +78,22 @@ function PageInner() {
       const q = p.toString();
       window.history.replaceState(null, "", `${window.location.pathname}${q ? `?${q}` : ""}`);
     }
+  }, []);
+
+  // OAuth callback: the server redirected back with fresh tokens in the URL
+  // hash. Save the session and clean the address bar in one pass.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const at = h.get("access_token");
+    const rt = h.get("refresh_token");
+    if (!at || !rt) return;
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    finishOAuthLogin(at, rt).catch(() => {
+      const id = `t${toastSeq++}`;
+      setToasts((prev) => [...prev, { id, text: "ورود با حساب خارجی ناموفق بود؛ دوباره تلاش کن" }]);
+      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+    });
   }, []);
 
   // One active room per user — always follow user.current_room_id.

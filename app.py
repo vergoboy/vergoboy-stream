@@ -5,15 +5,17 @@ import gevent
 import json
 import os
 import re as _re
+import secrets
 import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timedelta, timezone
 
-from flask import Flask, g, jsonify, render_template, request, send_from_directory
+from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit, join_room
 
 from config import Config
@@ -21,6 +23,7 @@ import archive_scraper
 import db as dbmod
 from db import User as DBUser
 from livekit_auth import generate_livekit_token
+import mail as mailmod
 from srt_to_vtt import convert_srt_to_vtt
 
 
@@ -1725,6 +1728,7 @@ def api_auth_register():
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     display_name = (data.get("display_name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
 
     if len(username) < 3 or len(username) > 24:
         return jsonify({"error": "نام کاربری باید ۳ تا ۲۴ حرف باشد"}), 400
@@ -1732,30 +1736,126 @@ def api_auth_register():
         return jsonify({"error": "نام کاربری فقط حروف انگلیسی، عدد، _ و - می‌تواند باشد"}), 400
     if len(password) < 6:
         return jsonify({"error": "رمز عبور باید حداقل ۶ کاراکتر باشد"}), 400
+    if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"error": "یک ایمیل معتبر وارد کن"}), 400
 
     session = dbmod.SessionLocal()
     try:
         if dbmod.get_user_by_username_or_email(session, username):
             return jsonify({"error": "این نام کاربری قبلاً ثبت شده است"}), 409
+        if dbmod.get_user_by_email(session, email):
+            return jsonify({"error": "این ایمیل قبلاً ثبت شده است"}), 409
 
         is_first = dbmod.first_user_count(session)
+        is_owner = dbmod.is_special_account(email)
         user = DBUser(
             username=username,
             display_name=display_name or username,
+            email=email,
+            email_verified=is_owner,
             password_hash=dbmod.hash_password(password),
-            role="admin" if is_first else "watcher",
-            can_control=bool(is_first),
-            youtube_allowed=bool(is_first),
+            role="admin" if (is_first or is_owner) else "watcher",
+            can_control=bool(is_first or is_owner),
+            youtube_allowed=bool(is_first or is_owner),
             upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
         )
         session.add(user)
         session.flush()
         own = dbmod.ensure_own_room(session, user)
         user.current_room_id = own.id
+
+        if not is_owner:
+            user.verification_token = dbmod.new_verification_token()
+            user.verification_expires = datetime.now(timezone.utc) + timedelta(
+                hours=Config.VERIFY_TOKEN_TTL_HOURS
+            )
+            session.commit()
+            verify_url = (
+                f"{Config.SITE_BASE_URL}/api/auth/verify-email?token={user.verification_token}"
+            )
+            mailmod.send_verification_email(user.email, verify_url)
+            log_debug(f"Registered user '{username}' (unverified) — verification email sent")
+            return jsonify({
+                "needs_verification": True,
+                "email": user.email,
+                "message": "ایمیل تأیید برایت ارسال شد؛ لینک داخل آن را باز کن تا وارد شوی",
+            }), 201
+
         tokens = _issue_tokens(session, user)
         session.commit()
-        log_debug(f"Registered user '{username}' as {'admin' if is_first else 'watcher'}")
+        log_debug(f"Registered user '{username}' as {'admin' if is_owner else 'watcher'}")
         return jsonify({**tokens, "user": user.public_dict(), "room": own.public_dict()}), 201
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/auth/verify-email")
+def api_auth_verify_email():
+    token = (request.args.get("token") or "").strip()
+    if not token:
+        return "توکن نامعتبر است", 400
+    session = dbmod.SessionLocal()
+    try:
+        user = session.execute(
+            dbmod.select(DBUser).where(DBUser.verification_token == token)
+        ).scalar_one_or_none()
+        if not user:
+            return _verify_page(False, "این لینک تأیید معتبر نیست یا قبلاً استفاده شده است.")
+        exp = user.verification_expires
+        if exp and exp.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            return _verify_page(False, "این لینک تأیید منقضی شده است؛ دوباره درخواست ارسال کن.")
+        user.email_verified = True
+        user.verification_token = None
+        user.verification_expires = None
+        session.commit()
+        return _verify_page(True, "ایمیلت تأیید شد! حالا می‌توانی وارد حساب‌ات شوی.")
+    finally:
+        session.close()
+
+
+def _verify_page(ok: bool, message: str):
+    color = "#2c8f6b" if ok else "#c0392b"
+    icon = "✓" if ok else "✗"
+    return f"""<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
+<title>تأیید ایمیل</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{{margin:0;font-family:Tahoma,Arial,sans-serif;background:#f2f0ea;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.box{{max-width:440px;background:#fff;border-radius:18px;padding:36px;text-align:center;border:1px solid #e6e2d8;margin:20px}}
+.icon{{font-size:46px;color:{color};font-weight:bold}}
+h2{{margin:14px 0 10px;font-size:18px;color:#2b2b2b}}
+p{{margin:0 0 22px;color:#555;font-size:14px;line-height:1.9}}
+a.btn{{display:inline-block;background:linear-gradient(135deg,#d4a017,#6b4e93);color:#fff;text-decoration:none;font-weight:bold;padding:13px 34px;border-radius:12px;font-size:14px}}</style>
+</head><body><div class="box">
+<div class="icon">{icon}</div>
+<h2>{"تأیید موفق بود" if ok else "تأیید ناموفق"}</h2>
+<p>{message}</p>
+<a class="btn" href="{Config.SITE_BASE_URL}/">ورود به تماشای مشترک</a>
+</div></body></html>"""
+
+
+@app.route("/stream/api/auth/resend-verification", methods=["POST"])
+def api_auth_resend_verification():
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "ایمیل را وارد کن"}), 400
+    session = dbmod.SessionLocal()
+    try:
+        user = dbmod.get_user_by_email(session, email)
+        if not user:
+            return jsonify({"ok": True}), 200  # don't leak which emails exist
+        if user.email_verified or dbmod.is_special_account(user.email):
+            return jsonify({"ok": True, "already_verified": True}), 200
+        user.verification_token = dbmod.new_verification_token()
+        user.verification_expires = datetime.now(timezone.utc) + timedelta(
+            hours=Config.VERIFY_TOKEN_TTL_HOURS
+        )
+        session.commit()
+        verify_url = (
+            f"{Config.SITE_BASE_URL}/api/auth/verify-email?token={user.verification_token}"
+        )
+        mailmod.send_verification_email(user.email, verify_url)
+        return jsonify({"ok": True})
     finally:
         session.close()
 
@@ -1775,6 +1875,12 @@ def api_auth_login():
             return jsonify({"error": "نام کاربری یا رمز عبور اشتباه است"}), 401
         if not user.is_active:
             return jsonify({"error": "حساب تو غیرفعال شده؛ با ادمین تماس بگیر"}), 403
+        if not user.email_verified and not dbmod.is_special_account(user.email):
+            return jsonify({
+                "error": "اول ایمیلت را تأیید کن؛ لینک تأیید برایت ارسال شده است",
+                "needs_verification": True,
+                "email": user.email or "",
+            }), 403
         own = dbmod.ensure_own_room(session, user)
         if not user.current_room_id:
             user.current_room_id = own.id
@@ -1783,6 +1889,217 @@ def api_auth_login():
         return jsonify({**tokens, "user": user.public_dict(), "room": own.public_dict()})
     finally:
         session.close()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# OAuth2 login — Google & GitHub (reuses the arman-music app credentials)
+# ────────────────────────────────────────────────────────────────────────────
+
+OAUTH_STATES = {}  # state -> (provider, issued_at) — single-server, in-memory
+
+
+def _oauth_redirect_uri(provider: str) -> str:
+    return f"{Config.SITE_BASE_URL}/api/auth/oauth/{provider}/callback"
+
+
+def _new_oauth_state(provider: str) -> str:
+    state = secrets.token_urlsafe(24)
+    OAUTH_STATES[state] = (provider, time.time())
+    return state
+
+
+def _clean_oauth_states():
+    now = time.time()
+    for k, (_, ts) in list(OAUTH_STATES.items()):
+        if now - ts > 600:
+            OAUTH_STATES.pop(k, None)
+
+
+def _oauth_start(provider: str):
+    _clean_oauth_states()
+    state = _new_oauth_state(provider)
+    redirect_uri = urllib.parse.quote(_oauth_redirect_uri(provider), safe="")
+    if provider == "google":
+        cid = Config.GOOGLE_OAUTH_CLIENT_ID
+        if not cid:
+            return jsonify({"error": "ورود با گوگل هنوز تنظیم نشده است"}), 503
+        return redirect(
+            "https://accounts.google.com/o/oauth2/v2/auth?"
+            f"client_id={cid}&redirect_uri={redirect_uri}&response_type=code"
+            "&scope=openid%20email%20profile&state=" + state
+        )
+    if provider == "github":
+        cid = Config.GITHUB_OAUTH_CLIENT_ID
+        if not cid:
+            return jsonify({"error": "ورود با گیت‌هاب هنوز تنظیم نشده است"}), 503
+        return redirect(
+            "https://github.com/login/oauth/authorize?"
+            f"client_id={cid}&redirect_uri={redirect_uri}"
+            "&scope=read:user%20user:email&state=" + state
+        )
+    return jsonify({"error": "روش ورود نامعتبر است"}), 400
+
+
+def _post_form_json(url: str, data: dict):
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Accept": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _oauth_exchange(provider: str, code: str) -> dict | None:
+    """Trades the auth code for a profile. Returns None on any failure."""
+    try:
+        if provider == "google":
+            tok = _post_form_json("https://oauth2.googleapis.com/token", {
+                "code": code,
+                "client_id": Config.GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": Config.GOOGLE_OAUTH_CLIENT_SECRET,
+                "redirect_uri": _oauth_redirect_uri("google"),
+                "grant_type": "authorization_code",
+            })
+            if "access_token" not in tok:
+                return None
+            req = urllib.request.Request(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {tok['access_token']}"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                info = json.loads(resp.read().decode())
+            return {
+                "provider": "google",
+                "oauth_id": str(info.get("id") or ""),
+                "email": (info.get("email") or "").lower(),
+                "verified": bool(info.get("verified_email")),
+                "name": info.get("name") or "",
+            }
+        if provider == "github":
+            tok = _post_form_json("https://github.com/login/oauth/access_token", {
+                "code": code,
+                "client_id": Config.GITHUB_OAUTH_CLIENT_ID,
+                "client_secret": Config.GITHUB_OAUTH_CLIENT_SECRET,
+                "redirect_uri": _oauth_redirect_uri("github"),
+            })
+            access = tok.get("access_token")
+            if not access:
+                return None
+            headers = {"Authorization": f"Bearer {access}", "Accept": "application/vnd.github+json"}
+            req = urllib.request.Request("https://api.github.com/user", headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                user = json.loads(resp.read().decode())
+            email, verified = "", False
+            try:
+                req2 = urllib.request.Request("https://api.github.com/user/emails", headers=headers)
+                with urllib.request.urlopen(req2, timeout=15) as resp:
+                    emails = json.loads(resp.read().decode())
+                for e in emails:
+                    if e.get("primary") and e.get("verified"):
+                        email, verified = (e.get("email") or "").lower(), True
+                        break
+                if not email:
+                    for e in emails:
+                        if e.get("verified"):
+                            email, verified = (e.get("email") or "").lower(), True
+                            break
+            except Exception:
+                pass
+            return {
+                "provider": "github",
+                "oauth_id": str(user.get("id") or ""),
+                "email": email,
+                "verified": verified,
+                "name": user.get("name") or user.get("login") or "",
+            }
+    except Exception as e:
+        log_debug(f"[oauth] {provider} exchange error: {e}")
+    return None
+
+
+def _oauth_finish_session(session, info: dict) -> dict | None:
+    """Finds or creates the user for an OAuth profile and returns tokens."""
+    user = dbmod.get_user_by_oauth(session, info["provider"], info["oauth_id"])
+    if user is None and info.get("email"):
+        user = dbmod.get_user_by_email(session, info["email"])
+        if user is not None:
+            user.oauth_provider = info["provider"]
+            user.oauth_id = info["oauth_id"]
+            if info.get("verified"):
+                user.email_verified = True
+    if user is None:
+        base = (_re.sub(r"[^A-Za-z0-9_.\-]", "", info.get("email") or "").split("@")[0]) or "user"
+        username = base[:24]
+        if dbmod.get_user_by_username_or_email(session, username):
+            username = f"{base[:20]}{secrets.choice('0123456789')}{secrets.choice('0123456789')}"
+        is_first = dbmod.first_user_count(session)
+        user = DBUser(
+            username=username,
+            display_name=(info.get("name") or "").strip()[:64] or username,
+            email=(info.get("email") or "").lower() or None,
+            email_verified=bool(info.get("verified")) or dbmod.is_special_account(info.get("email")),
+            password_hash=dbmod.hash_password(secrets.token_urlsafe(24)),
+            role="admin" if is_first else "watcher",
+            can_control=bool(is_first),
+            youtube_allowed=bool(is_first),
+            upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
+            oauth_provider=info["provider"],
+            oauth_id=info["oauth_id"],
+        )
+        session.add(user)
+        session.flush()
+    if not user.is_active:
+        return None
+    own = dbmod.ensure_own_room(session, user)
+    if not user.current_room_id:
+        user.current_room_id = own.id
+    tokens = _issue_tokens(session, user)
+    session.commit()
+    return tokens
+
+
+def _oauth_redirect_back(message: str):
+    q = urllib.parse.urlencode({"oauth_error": message})
+    return redirect(f"{Config.SITE_BASE_URL}/?{q}")
+
+
+@app.route("/stream/api/auth/oauth/<provider>")
+def api_oauth_login(provider: str):
+    return _oauth_start(provider)
+
+
+@app.route("/stream/api/auth/oauth/<provider>/callback")
+def api_oauth_callback(provider: str):
+    if provider not in ("google", "github"):
+        return jsonify({"error": "روش ورود نامعتبر است"}), 400
+    _clean_oauth_states()
+    if request.args.get("error"):
+        return _oauth_redirect_back("ورود با حساب خارجی لغو شد")
+    state = request.args.get("state") or ""
+    if not state or OAUTH_STATES.get(state, (None, 0))[0] != provider:
+        return _oauth_redirect_back("نشست ورود معتبر نیست؛ دوباره تلاش کن")
+    OAUTH_STATES.pop(state, None)
+    code = request.args.get("code") or ""
+    if not code:
+        return _oauth_redirect_back("کد ورود دریافت نشد")
+    info = _oauth_exchange(provider, code)
+    if not info or not info.get("oauth_id"):
+        return _oauth_redirect_back("ورود با حساب خارجی ناموفق بود")
+    session = dbmod.SessionLocal()
+    try:
+        tokens = _oauth_finish_session(session, info)
+    except Exception as e:
+        log_debug(f"[oauth] {provider} finish error: {e}")
+        session.rollback()
+        return _oauth_redirect_back("ورود با حساب خارجی ناموفق بود")
+    finally:
+        session.close()
+    if not tokens:
+        return _oauth_redirect_back("این حساب غیرفعال شده است")
+    return redirect(
+        f"{Config.SITE_BASE_URL}/?oauth=1"
+        f"#access_token={tokens['access_token']}&refresh_token={tokens['refresh_token']}"
+    )
 
 
 @app.route("/stream/api/auth/refresh", methods=["POST"])

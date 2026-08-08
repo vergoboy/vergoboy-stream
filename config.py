@@ -54,6 +54,25 @@ class Config:
     ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
     ROOM_CODE_LEN = 6
 
+    # ---------------------------------------------------------------
+    # Email verification & OAuth login
+    # ---------------------------------------------------------------
+    # Public base URL of the frontend (used in verification links and
+    # OAuth redirect URIs).
+    SITE_BASE_URL = os.environ.get("STREAM_SITE_URL", "https://vergoboy.ir/stream")
+    # Envelope/From address for outgoing verification mail (the server's
+    # own mailbox on the local postfix).
+    MAIL_FROM = os.environ.get("STREAM_MAIL_FROM", "info@vergoboy.ir")
+    # The site owner's account — the only one that skips email verification.
+    SPECIAL_ADMIN_EMAIL = os.environ.get("STREAM_ADMIN_EMAIL", "very.good.booyy@gmail.com")
+    VERIFY_TOKEN_TTL_HOURS = int(os.environ.get("STREAM_VERIFY_TTL_HOURS", "72"))
+
+    # OAuth2 providers (reuses the same Google/GitHub apps as arman-music).
+    GOOGLE_OAUTH_CLIENT_ID = os.environ.get("STREAM_GOOGLE_OAUTH_CLIENT_ID", "")
+    GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("STREAM_GOOGLE_OAUTH_CLIENT_SECRET", "")
+    GITHUB_OAUTH_CLIENT_ID = os.environ.get("STREAM_GITHUB_OAUTH_CLIENT_ID", "")
+    GITHUB_OAUTH_CLIENT_SECRET = os.environ.get("STREAM_GITHUB_OAUTH_CLIENT_SECRET", "")
+
     # Default per-user limits for a fresh signup (watcher).
     DEFAULT_UPLOAD_QUOTA = int(os.environ.get("STREAM_DEFAULT_UPLOAD_QUOTA", "50"))
 

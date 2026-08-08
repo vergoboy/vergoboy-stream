@@ -52,8 +52,19 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(64), default="")
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     password_hash: Mapped[str] = mapped_column(String(128))
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Email verification (null when already verified or when the user signed
+    # in via OAuth, whose emails are verified by the provider).
+    verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    verification_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # OAuth identity (provider + provider-side user id), used to find/link
+    # accounts when the same person signs in again via Google/GitHub.
+    oauth_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    oauth_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # Role decides what a user is allowed to do. Admin = dashboard access;
     # controller = can drive playback + add media; watcher = watch only.
@@ -81,6 +92,8 @@ class User(Base):
             "id": self.id,
             "username": self.username,
             "display_name": self.display_name,
+            "email": self.email,
+            "email_verified": self.email_verified,
             "role": self.role,
             "can_control": self.can_control,
             "youtube_allowed": self.youtube_allowed,
@@ -182,6 +195,29 @@ def get_user_by_username_or_email(session, login: str) -> User | None:
             select(User).where((User.email == login) | (User.username == login))
         ).scalar_one_or_none()
     return session.execute(select(User).where(User.username == login)).scalar_one_or_none()
+
+
+def get_user_by_email(session, email: str) -> User | None:
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    return session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+
+
+def get_user_by_oauth(session, provider: str, oauth_id: str) -> User | None:
+    return session.execute(
+        select(User).where(User.oauth_provider == provider, User.oauth_id == oauth_id)
+    ).scalar_one_or_none()
+
+
+def new_verification_token() -> str:
+    return secrets.token_urlsafe(40)
+
+
+def is_special_account(email: str | None) -> bool:
+    """The site-owner account is the only one that never needs email
+    verification (it also becomes admin)."""
+    return bool(email and email.strip().lower() == Config.SPECIAL_ADMIN_EMAIL.lower())
 
 
 def create_room_code(session) -> str:
