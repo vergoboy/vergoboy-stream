@@ -220,6 +220,11 @@ def is_special_account(email: str | None) -> bool:
     return bool(email and email.strip().lower() == Config.SPECIAL_ADMIN_EMAIL.lower())
 
 
+def is_exempt_email(email: str | None) -> bool:
+    """Addresses that are auto-verified and never get verification mail."""
+    return bool(email and email.strip().lower() in Config.EXEMPT_EMAILS)
+
+
 def create_room_code(session) -> str:
     """Random unambiguously-readable room code, unique across the table."""
     alpha = Config.ROOM_CODE_ALPHABET

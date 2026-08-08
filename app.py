@@ -1748,11 +1748,12 @@ def api_auth_register():
 
         is_first = dbmod.first_user_count(session)
         is_owner = dbmod.is_special_account(email)
+        needs_email = not (is_owner or dbmod.is_exempt_email(email))
         user = DBUser(
             username=username,
             display_name=display_name or username,
             email=email,
-            email_verified=is_owner,
+            email_verified=not needs_email,
             password_hash=dbmod.hash_password(password),
             role="admin" if (is_first or is_owner) else "watcher",
             can_control=bool(is_first or is_owner),
@@ -1764,7 +1765,7 @@ def api_auth_register():
         own = dbmod.ensure_own_room(session, user)
         user.current_room_id = own.id
 
-        if not is_owner:
+        if needs_email:
             user.verification_token = dbmod.new_verification_token()
             user.verification_expires = datetime.now(timezone.utc) + timedelta(
                 hours=Config.VERIFY_TOKEN_TTL_HOURS
@@ -1844,7 +1845,7 @@ def api_auth_resend_verification():
         user = dbmod.get_user_by_email(session, email)
         if not user:
             return jsonify({"ok": True}), 200  # don't leak which emails exist
-        if user.email_verified or dbmod.is_special_account(user.email):
+        if user.email_verified or dbmod.is_exempt_email(user.email):
             return jsonify({"ok": True, "already_verified": True}), 200
         user.verification_token = dbmod.new_verification_token()
         user.verification_expires = datetime.now(timezone.utc) + timedelta(
@@ -1875,7 +1876,7 @@ def api_auth_login():
             return jsonify({"error": "نام کاربری یا رمز عبور اشتباه است"}), 401
         if not user.is_active:
             return jsonify({"error": "حساب تو غیرفعال شده؛ با ادمین تماس بگیر"}), 403
-        if not user.email_verified and not dbmod.is_special_account(user.email):
+        if not user.email_verified and not dbmod.is_exempt_email(user.email):
             return jsonify({
                 "error": "اول ایمیلت را تأیید کن؛ لینک تأیید برایت ارسال شده است",
                 "needs_verification": True,
@@ -2037,7 +2038,7 @@ def _oauth_finish_session(session, info: dict) -> dict | None:
             username=username,
             display_name=(info.get("name") or "").strip()[:64] or username,
             email=(info.get("email") or "").lower() or None,
-            email_verified=bool(info.get("verified")) or dbmod.is_special_account(info.get("email")),
+            email_verified=bool(info.get("verified")) or dbmod.is_exempt_email(info.get("email")),
             password_hash=dbmod.hash_password(secrets.token_urlsafe(24)),
             role="admin" if is_first else "watcher",
             can_control=bool(is_first),

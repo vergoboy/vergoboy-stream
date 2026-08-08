@@ -65,6 +65,13 @@ class Config:
     MAIL_FROM = os.environ.get("STREAM_MAIL_FROM", "info@vergoboy.ir")
     # The site owner's account — the only one that skips email verification.
     SPECIAL_ADMIN_EMAIL = os.environ.get("STREAM_ADMIN_EMAIL", "very.good.booyy@gmail.com")
+    # Other addresses that should never receive verification mail (accounts
+    # registered with these are auto-verified). Comma-separated env override.
+    EXEMPT_EMAILS = {
+        e.strip().lower()
+        for e in os.environ.get("STREAM_EXEMPT_EMAILS", "very.good.booyy@gmail.com,the.arman.hosseini@gmail.com").split(",")
+        if e.strip()
+    }
     VERIFY_TOKEN_TTL_HOURS = int(os.environ.get("STREAM_VERIFY_TTL_HOURS", "72"))
 
     # OAuth2 providers (reuses the same Google/GitHub apps as arman-music).
