@@ -4,9 +4,9 @@ import type { AdminUser, AuthRoom, AuthUser } from "./types";
 
 const FETCH_TIMEOUT_MS = 45000;
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await authFetch(path, {
       method: "POST",
@@ -76,23 +76,67 @@ export function uploadVideo(
   });
 }
 
+export type YoutubeSubtitle = { code: string; name: string };
+
+export type YoutubeFormat = {
+  format_id: string;
+  height: number;
+  ext: string;
+  tbr: number;
+  label: string;
+};
+
+export type YoutubeScanVideo = {
+  type: "video";
+  title: string;
+  thumbnail: string;
+  duration?: number;
+  duration_string?: string;
+  channel?: string;
+  view_count?: number;
+  upload_date?: string;
+  subtitles: YoutubeSubtitle[];
+  auto_captions: YoutubeSubtitle[];
+  formats: YoutubeFormat[];
+};
+
+export type YoutubeScanPlaylist = {
+  type: "playlist";
+  playlist_title: string;
+  playlist_count: number;
+  entries: {
+    id: string;
+    title: string;
+    duration?: number;
+    duration_string?: string;
+    thumbnail?: string;
+    url: string;
+  }[];
+};
+
 export const api = {
   addUrl: (url: string, title: string, name: string) =>
     postJson<UploadResult>("/stream/api/add-url", { url, title, name }),
 
   youtubeFormats: (url: string) =>
-    postJson<{ title: string; thumbnail: string; formats: { format_id: string; height: number; ext: string; tbr: number; label: string }[] }>(
+    postJson<YoutubeScanVideo | YoutubeScanPlaylist>(
       "/stream/api/youtube-formats",
-      { url }
+      { url },
+      120000
     ),
 
-  addYoutube: (url: string, format_id: string, title: string, name: string) =>
-    postJson<UploadResult>("/stream/api/add-youtube", { url, format_id, title, name }),
+  addYoutube: (url: string, format_id: string, title: string, name: string, sub_lang = "") =>
+    postJson<UploadResult>("/stream/api/add-youtube", { url, format_id, title, name, sub_lang }),
+
+  addYoutubePlaylist: (url: string, title: string, name: string) =>
+    postJson<{ added: number }>("/stream/api/add-youtube-playlist", { url, title, name }),
 
   newLiveKey: () =>
     authFetch("/stream/api/live/new-key", { method: "POST" }).then((r) => r.json()) as Promise<{
       key: string;
       push_url: string;
+      server_url?: string;
+      push_urls?: string[];
       playback_url: string;
     }>,
 
@@ -182,6 +226,21 @@ export const api = {
     postJson<{ room: AuthRoom; user: AuthUser }>("/stream/api/room/join", { code }),
 
   roomMine: () => postJson<{ room: AuthRoom; user: AuthUser }>("/stream/api/room/mine", {}),
+
+  roomMembers: () =>
+    postJson<{ owner_id: string; online: import("./types").RoomMember[]; banned: import("./types").RoomBannedUser[] }>(
+      "/stream/api/room/members",
+      {}
+    ),
+
+  roomPromote: (userId: string) => postJson<{ ok: true; can_control: boolean }>("/stream/api/room/members/promote", { user_id: userId }),
+
+  roomDemote: (userId: string) => postJson<{ ok: true; can_control: boolean }>("/stream/api/room/members/demote", { user_id: userId }),
+
+  roomBan: (userId: string) => postJson<{ ok: true; already?: boolean }>("/stream/api/room/members/ban", { user_id: userId }),
+
+  roomUnban: (userId: string) => postJson<{ ok: true }>("/stream/api/room/members/unban", { user_id: userId }),
+
 
   roomInfo: (code: string) =>
     authFetch(`/stream/api/room/info?code=${encodeURIComponent(code)}`).then(async (r) => {

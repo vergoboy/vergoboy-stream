@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { api } from "@/lib/api";
-import type { ArchiveResult, ArchiveTitle, ArchiveGroup, ArchiveEpisode } from "@/lib/types";
+import type { ArchiveResult, ArchiveTitle, ArchiveGroup, ArchiveEpisode, ArchiveFile } from "@/lib/types";
 import {
   Search,
   ArrowRight,
@@ -61,6 +61,8 @@ export function ArchivePanel({ myName }: { myName: string }) {
   const [detailBusy, setDetailBusy] = useState(false);
   const [addBusy, setAddBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
+  const [animexFiles, setAnimexFiles] = useState<Record<string, ArchiveFile[]>>({});
+  const [animexOpen, setAnimexOpen] = useState<Record<string, boolean>>({});
 
   const activeSources = Object.entries(sources)
     .filter(([, on]) => on)
@@ -103,7 +105,7 @@ export function ArchivePanel({ myName }: { myName: string }) {
   async function importUrl(rawUrl: string) {
     const url = rawUrl.trim();
     if (!url || detailBusy) return;
-    const source = url.includes("animex.click") ? "animex" : url.includes("donyayeserial.com") ? "donyayeserial" : null;
+    const source = url.includes("animex.click") ? "animex" : url.includes("donyayeserial") ? "donyayeserial" : null;
     if (!source) {
       setMsg({ text: "فقط لینک صفحه از دنیای سریال یا انیمکس پشتیبانی می‌شود", error: true });
       return;
@@ -190,6 +192,36 @@ export function ArchivePanel({ myName }: { myName: string }) {
     setAddBusy(null);
   }
 
+  async function toggleAnimexFiles(dirUrl: string) {
+    setAnimexOpen((s) => ({ ...s, [dirUrl]: !s[dirUrl] }));
+    if (animexFiles[dirUrl]) return;
+    setAddBusy(`ax-files|${dirUrl}`);
+    setMsg(null);
+    try {
+      const { files } = await api.archiveFiles(dirUrl);
+      setAnimexFiles((s) => ({ ...s, [dirUrl]: files }));
+    } catch (err2) {
+      setMsg({ text: err2 instanceof Error ? err2.message : "خطا در دریافت لینک‌ها", error: true });
+    }
+    setAddBusy(null);
+  }
+
+  async function addAnimexEpisode(group: ArchiveGroup, dirUrl: string, quality: string, f: ArchiveFile, i: number) {
+    if (!detail) return;
+    setAddBusy(`ax-one|${dirUrl}|${i}`);
+    setMsg(null);
+    try {
+      await runAdd([
+        {
+          title: `${detail.title} — ${group.label} — ${quality} — ${episodeFromName(f.name)}`,
+          url: f.url,
+        },
+      ]);
+    } finally {
+      setAddBusy(null);
+    }
+  }
+
   const groupCount = detail ? detail.groups.reduce((n, g) => n + (g.episodes?.length ?? 0) + (g.items?.length ?? 0), 0) : 0;
 
   return (
@@ -222,6 +254,10 @@ export function ArchivePanel({ myName }: { myName: string }) {
           onAddDs={addDonyayeSerialGroup}
           onAddDsOne={addDonyayeSerialEpisode}
           onAddAnimex={addAnimexQuality}
+          animexFiles={animexFiles}
+          animexOpen={animexOpen}
+          onToggleAnimex={toggleAnimexFiles}
+          onAddAnimexEp={addAnimexEpisode}
         />
       )}
       {detailBusy && (
@@ -376,6 +412,10 @@ function DetailView({
   onAddDs,
   onAddDsOne,
   onAddAnimex,
+  animexFiles,
+  animexOpen,
+  onToggleAnimex,
+  onAddAnimexEp,
 }: {
   detail: ArchiveTitle;
   detailBusy: boolean;
@@ -386,6 +426,10 @@ function DetailView({
   onAddDs: (g: ArchiveGroup) => void;
   onAddDsOne: (g: ArchiveGroup, ep: ArchiveEpisode, i: number) => void;
   onAddAnimex: (g: ArchiveGroup, dirUrl: string, quality: string) => void;
+  animexFiles: Record<string, ArchiveFile[]>;
+  animexOpen: Record<string, boolean>;
+  onToggleAnimex: (dirUrl: string) => void;
+  onAddAnimexEp: (g: ArchiveGroup, dirUrl: string, quality: string, f: ArchiveFile, i: number) => void;
 }) {
   const [openEps, setOpenEps] = useState<Record<string, boolean>>({});
   return (
@@ -424,7 +468,7 @@ function DetailView({
           <h3 className="mt-1.5 line-clamp-3 text-[15px] font-bold leading-snug text-[color:var(--color-ink)]">{detail.title}</h3>
           <p className="mt-1 text-[11.5px] leading-relaxed text-[color:var(--color-ink-dim)]">
             {detail.source === "animex"
-              ? "برای افزودن، ابتدا لینک‌های مستقیم از پوشه دانلود سایت گرفته می‌شود."
+              ? "هر کیفیت یک ردیف است؛ «افزودن همه» تمام قسمت‌های آن کیفیت را اضافه می‌کند و با باز کردن هر ردیف می‌توانی تک‌قسمت اضافه کنی."
               : "هر ردیف یک فصل و کیفیت است؛ «افزودن همه» تمام قسمت‌های همان ردیف را به پلی‌لیست اضافه می‌کند."}
           </p>
         </div>
@@ -486,22 +530,77 @@ function DetailView({
                 {quals.length > 0 && (
                   <div className="mt-2.5 flex flex-col gap-2 border-t border-[color:var(--color-border)]/60 pt-2.5">
                     {quals.map((qitem) => {
-                      const key = `${g.label}|${qitem.quality}`;
-                      const isBusy = addBusy === key;
+                      const dirUrl = qitem.dir_url;
+                      const files = animexFiles[dirUrl] ?? [];
+                      const isOpen = !!animexOpen[dirUrl];
+                      const filesBusy = addBusy === `ax-files|${dirUrl}`;
                       return (
-                        <div key={key} className="flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] px-3 py-2">
-                          <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-[color:var(--color-ink)]">
-                            <DownloadCloud className="h-4 w-4 shrink-0 text-[color:var(--color-teal)]" />
-                            <span className="truncate">{qitem.quality}</span>
-                          </span>
+                        <div key={dirUrl} className="rounded-xl bg-white/[0.03] px-3 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-[color:var(--color-ink)]">
+                              <DownloadCloud className="h-4 w-4 shrink-0 text-[color:var(--color-teal)]" />
+                              <span className="truncate">{qitem.quality}</span>
+                              {files.length > 0 && (
+                                <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10.5px] text-[color:var(--color-ink-muted)]">{files.length} قسمت</span>
+                              )}
+                            </span>
+                            <button
+                              onClick={() => onAddAnimex(g, dirUrl, qitem.quality)}
+                              disabled={!!addBusy}
+                              className="flex shrink-0 items-center gap-1 rounded-lg border border-[color:var(--color-border)] bg-white/5 px-2.5 py-1.5 text-[11.5px] font-bold text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-50"
+                            >
+                              {addBusy === `${g.label}|${qitem.quality}` ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" /> : <Plus className="h-3.5 w-3.5" />}
+                              افزودن همه
+                            </button>
+                          </div>
                           <button
-                            onClick={() => onAddAnimex(g, qitem.dir_url, qitem.quality)}
-                            disabled={!!addBusy}
-                            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-[12px] font-bold text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-50"
+                            type="button"
+                            onClick={() => onToggleAnimex(dirUrl)}
+                            className="mt-1.5 flex items-center gap-1 text-[12px] font-semibold text-[color:var(--color-amber)]"
                           >
-                            {isBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" /> : <Plus className="h-3.5 w-3.5" />}
-                            {isBusy ? "در حال دریافت لینک‌ها…" : "افزودن همه"}
+                            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+                            {isOpen ? "بستن لیست قسمت‌ها" : "نمایش قسمت‌ها"}
                           </button>
+                          <AnimatePresence initial={false}>
+                            {isOpen && (
+                              <motion.div
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: "auto" }}
+                                exit={{ opacity: 0, height: 0 }}
+                                className="overflow-hidden"
+                              >
+                                <div className="mt-2 flex max-h-52 flex-col gap-1.5 overflow-y-auto pl-1">
+                                  {filesBusy && (
+                                    <div className="flex items-center gap-2 py-2 text-[12px] text-[color:var(--color-ink-muted)]">
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" /> در حال دریافت لینک‌های قسمت…
+                                    </div>
+                                  )}
+                                  {!filesBusy && files.length === 0 && (
+                                    <p className="py-2 text-center text-[12px] text-[color:var(--color-ink-dim)]">قسمتی برای نمایش پیدا نشد.</p>
+                                  )}
+                                  {!filesBusy &&
+                                    files.map((file, i) => (
+                                      <div key={`${file.url}-${i}`} className="flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] px-3 py-2">
+                                        <span className="flex min-w-0 items-center gap-2 text-[12.5px] text-[color:var(--color-ink)]">
+                                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-plum)]/20 text-[10.5px] font-bold text-[color:var(--color-plum-soft)]">
+                                            {i + 1}
+                                          </span>
+                                          <span className="truncate">{episodeFromName(file.name)}</span>
+                                        </span>
+                                        <button
+                                          onClick={() => onAddAnimexEp(g, dirUrl, qitem.quality, file, i)}
+                                          disabled={!!addBusy}
+                                          className="flex shrink-0 items-center gap-1 rounded-lg border border-[color:var(--color-border)] bg-white/5 px-2.5 py-1.5 text-[11.5px] font-bold text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-50"
+                                        >
+                                          {addBusy === `ax-one|${dirUrl}|${i}` ? <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" /> : <Plus className="h-3.5 w-3.5" />}
+                                          افزودن
+                                        </button>
+                                      </div>
+                                    ))}
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
                       );
                     })}

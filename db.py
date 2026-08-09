@@ -138,6 +138,24 @@ class Room(Base):
         }
 
 
+class RoomBan(Base):
+    """Room-level ban: a user kicked out of a room cannot rejoin it until
+    the room's owner/promoted user unbans them (managed from the room's
+    member panel)."""
+
+    __tablename__ = "room_bans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("rooms.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    banned_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # ── Password / token helpers (mirror arman-music's app/core/security.py) ─────
 
 def hash_password(password: str) -> str:
@@ -249,6 +267,48 @@ def ensure_own_room(session, user: User) -> Room:
     session.add(room)
     session.flush()
     return room
+
+
+def is_banned(session, room_id: str, user_id: str) -> bool:
+    if not room_id or not user_id:
+        return False
+    return (
+        session.execute(
+            select(RoomBan).where(
+                RoomBan.room_id == room_id, RoomBan.user_id == user_id
+            )
+        ).first()
+        is not None
+    )
+
+
+def banned_room_ids(session, user_id: str) -> set[str]:
+    if not user_id:
+        return set()
+    return {
+        r.room_id
+        for r in session.execute(
+            select(RoomBan).where(RoomBan.user_id == user_id)
+        ).scalars()
+    }
+
+
+def ban_user(session, room_id: str, user_id: str, banned_by: str | None = None) -> None:
+    if not room_id or not user_id:
+        return
+    if is_banned(session, room_id, user_id):
+        return
+    session.add(RoomBan(room_id=room_id, user_id=user_id, banned_by=banned_by))
+
+
+def unban_user(session, room_id: str, user_id: str) -> None:
+    if not room_id or not user_id:
+        return
+    session.execute(
+        delete(RoomBan).where(
+            RoomBan.room_id == room_id, RoomBan.user_id == user_id
+        )
+    )
 
 
 def init_db():

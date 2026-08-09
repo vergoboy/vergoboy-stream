@@ -33,10 +33,12 @@ interface UseRoomStateOptions {
   roomCode: string;
   myName: string;
   canControl: boolean;
+  myId?: string;
   onNotify?: (n: NotifyEvent) => void;
+  onKicked?: (reason?: string) => void;
 }
 
-export function useRoomState({ token, roomCode, myName, canControl, onNotify }: UseRoomStateOptions) {
+export function useRoomState({ token, roomCode, myName, canControl, myId, onNotify, onKicked }: UseRoomStateOptions) {
   const [connected, setConnected] = useState(false);
   const [room, setRoom] = useState<RoomStateSync>(EMPTY_ROOM);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
@@ -50,6 +52,10 @@ export function useRoomState({ token, roomCode, myName, canControl, onNotify }: 
   useEffect(() => {
     onNotifyRef.current = onNotify;
   }, [onNotify]);
+  const onKickedRef = useRef(onKicked);
+  useEffect(() => {
+    onKickedRef.current = onKicked;
+  }, [onKicked]);
 
   useEffect(() => {
     recvLocalRef.current = Date.now() / 1000;
@@ -103,6 +109,11 @@ export function useRoomState({ token, roomCode, myName, canControl, onNotify }: 
       socket.on("chat_purged", () => {
         import("./api").then(({ api }) => api.chatHistory()).then((d) => setChatMessages(d.messages || []));
       });
+
+      socket.on("kicked", (data: { reason?: string }) => {
+        socket.disconnect();
+        onKickedRef.current?.(data?.reason || "banned");
+      });
     });
 
     return () => {
@@ -119,7 +130,12 @@ export function useRoomState({ token, roomCode, myName, canControl, onNotify }: 
 
   const requestControl = useCallback(
     (action: "play" | "pause" | "seek" | "rate" | "select", extra: ControlExtra = {}) => {
-      if (!canControl) return;
+      // play/pause/seek are open to everyone; rate/select (changing the shared
+      // speed or switching the media everyone watches) need a room manager:
+      // an admin/promoted controller, or the owner of the room we're in.
+      // The backend enforces this too — this guard just avoids the chatter.
+      const isOwner = myId ? presenceUsers.some((u) => u.id === myId && u.is_owner) : false;
+      if ((action === "rate" || action === "select") && !canControl && !isOwner) return;
       // Optimistic local update so the UI feels instant.
       setRoom((r) => {
         const next = { ...r };
@@ -155,7 +171,7 @@ export function useRoomState({ token, roomCode, myName, canControl, onNotify }: 
       });
       socketRef.current?.emit("control", { action, name: myName, ...extra });
     },
-    [expectedPosition, myName, canControl]
+    [expectedPosition, myName, canControl, presenceUsers, myId]
   );
 
   const sendChat = useCallback(

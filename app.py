@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit, join_room
+from sqlalchemy.orm import selectinload
 
 from config import Config
 import archive_scraper
@@ -104,7 +105,11 @@ def _current_user() -> DBUser | None:
         return None
     session = dbmod.SessionLocal()
     try:
-        user = session.get(DBUser, payload.get("sub"))
+        user = session.execute(
+            dbmod.select(DBUser)
+            .where(DBUser.id == payload.get("sub"))
+            .options(selectinload(DBUser.own_room))
+        ).scalar_one_or_none()
         g.user = user if (user and user.is_active) else None
         return g.user
     finally:
@@ -141,7 +146,10 @@ def _current_room_code() -> str | None:
 
 
 def _may_control(user: DBUser) -> bool:
-    return bool(user and user.is_active and (user.can_control or user.role == "admin"))
+    """Room 'manager': admin, the room's own owner, or a promoted controller.
+    This is the gate for things that change what everyone watches (speed,
+    switching media, quality requests, removing items) plus room moderation."""
+    return bool(user and user.is_active and (_is_admin(user) or user.can_control or _is_room_owner(user)))
 
 
 def _may_youtube(user: DBUser) -> bool:
@@ -149,15 +157,32 @@ def _may_youtube(user: DBUser) -> bool:
 
 
 def _may_add(user: DBUser) -> bool:
+    """Adding media/streams is reserved for the room owner and promoted
+    controllers (plus admins); plain watchers cannot add."""
     if not user or not user.is_active:
         return False
     if user.role == "admin":
         return True
+    if not (user.can_control or _is_room_owner(user)):
+        return False
     return user.upload_quota == -1 or user.uploads_used < user.upload_quota
 
 
 def _is_admin(user: DBUser) -> bool:
     return bool(user and user.is_active and user.role == "admin")
+
+
+def _is_room_owner(user: DBUser) -> bool:
+    """True when the user is currently inside the room they own. Depends on
+    `own_room` being eager-loaded (both `_current_user` and the socket
+    `on_connect` load it via selectinload)."""
+    return bool(
+        user
+        and user.is_active
+        and user.own_room is not None
+        and user.current_room_id
+        and user.own_room.id == user.current_room_id
+    )
 
 
 def _bump_upload_used(session, user: DBUser, n: int = 1):
@@ -209,6 +234,30 @@ def broadcast_presence(room_obj=None):
         socketio.emit("presence", payload, to=_room_channel(room_obj.room_id))
     else:
         socketio.emit("presence", payload)
+
+
+def _refresh_socket_perms(code: str, user_id: str, can_control: bool = None):
+    """Updates the in-memory presence entry after a promote/demote so the
+    member panel reflects the new permission without a reconnect."""
+    rs = rooms.get(code) if code else None
+    if rs is None:
+        return
+    with LOCK:
+        for entry in rs.users.values():
+            if entry.get("id") == user_id and can_control is not None:
+                entry["can_control"] = bool(can_control)
+    broadcast_presence(rs)
+
+
+def _kick_room_user(code: str, user_id: str):
+    """Force-disconnects every socket of `user_id` currently in room `code`."""
+    for sid, (scode, suser) in list(SOCKET_SESSIONS.items()):
+        if scode == code and suser.id == user_id:
+            try:
+                socketio.emit("kicked", {"reason": "banned"}, to=sid)
+                socketio.server.disconnect(sid)
+            except Exception as e:
+                log_debug(f"kick failed for {sid}: {e}")
 
 
 def _room_for_item(item_id: str):
@@ -864,6 +913,11 @@ def _cleanup_orphans() -> dict:
     for fname in os.listdir(Config.UPLOAD_DIR):
         if fname in skip or fname.startswith("."):
             continue
+        # yt-dlp writes "<output>.mp4.part" while downloading — never delete
+        # a half-written file, the rename to the final name happens at the end
+        # and cleanup would otherwise break in-progress downloads.
+        if fname.endswith(".part"):
+            continue
         if fname not in upload_refs:
             try:
                 os.remove(os.path.join(Config.UPLOAD_DIR, fname))
@@ -1061,7 +1115,7 @@ def api_archive_title():
     url = (data.get("url") or "").strip()
     if source not in archive_scraper.SOURCES:
         return jsonify({"error": "منبع ناشناخته است"}), 400
-    if not url.startswith((archive_scraper.DS_BASE, archive_scraper.AX_BASE)):
+    if not url.startswith((archive_scraper.DS_BASE, archive_scraper.DS_ALT_BASE, archive_scraper.AX_BASE)):
         return jsonify({"error": "آدرس صفحه معتبر نیست"}), 400
     try:
         info = archive_scraper.title(source, url)
@@ -1183,8 +1237,108 @@ def api_add_many():
     return jsonify({"added": added, "skipped": skipped, "dead": dead})
 
 
+_LANG_NAME = {
+    "aa": "Afar", "ab": "Abkhaz", "ae": "Avestan", "af": "Afrikaans", "ak": "Akan",
+    "am": "Amharic", "an": "Aragonese", "ar": "Arabic", "as": "Assamese", "av": "Avaric",
+    "ay": "Aymara", "az": "Azerbaijani", "ba": "Bashkir", "be": "Belarusian",
+    "bg": "Bulgarian", "bh": "Bihari", "bi": "Bislama", "bm": "Bambara", "bn": "Bengali",
+    "bo": "Tibetan", "br": "Breton", "bs": "Bosnian", "ca": "Catalan", "ce": "Chechen",
+    "ch": "Chamorro", "co": "Corsican", "cr": "Cree", "cs": "Czech", "cu": "Church Slavic",
+    "cv": "Chuvash", "cy": "Welsh", "da": "Danish", "de": "German", "dv": "Divehi",
+    "dz": "Dzongkha", "ee": "Ewe", "el": "Greek", "en": "English", "eo": "Esperanto",
+    "es": "Spanish", "et": "Estonian", "eu": "Basque", "fa": "Persian", "ff": "Fulah",
+    "fi": "Finnish", "fj": "Fijian", "fo": "Faroese", "fr": "French", "fy": "Western Frisian",
+    "ga": "Irish", "gd": "Scottish Gaelic", "gl": "Galician", "gn": "Guarani",
+    "gu": "Gujarati", "gv": "Manx", "ha": "Hausa", "he": "Hebrew", "hi": "Hindi",
+    "ho": "Hiri Motu", "hr": "Croatian", "ht": "Haitian", "hu": "Hungarian",
+    "hy": "Armenian", "hz": "Herero", "ia": "Interlingua", "id": "Indonesian",
+    "ie": "Interlingue", "ig": "Igbo", "ii": "Nuosu", "ik": "Inupiaq", "io": "Ido",
+    "is": "Icelandic", "it": "Italian", "iu": "Inuktitut", "ja": "Japanese",
+    "jv": "Javanese", "ka": "Georgian", "kg": "Kongo", "ki": "Kikuyu", "kj": "Kwanyama",
+    "kk": "Kazakh", "kl": "Kalaallisut", "km": "Khmer", "kn": "Kannada", "ko": "Korean",
+    "kr": "Kanuri", "ks": "Kashmiri", "ku": "Kurdish", "kv": "Komi", "kw": "Cornish",
+    "ky": "Kyrgyz", "la": "Latin", "lb": "Luxembourgish", "lg": "Ganda", "li": "Limburgish",
+    "ln": "Lingala", "lo": "Lao", "lt": "Lithuanian", "lu": "Luba-Katanga",
+    "lv": "Latvian", "mg": "Malagasy", "mh": "Marshallese", "mi": "Maori", "mk": "Macedonian",
+    "ml": "Malayalam", "mn": "Mongolian", "mr": "Marathi", "ms": "Malay",
+    "mt": "Maltese", "my": "Burmese", "na": "Nauru", "nb": "Norwegian Bokmal",
+    "nd": "North Ndebele", "ne": "Nepali", "ng": "Ndonga", "nl": "Dutch",
+    "nn": "Norwegian Nynorsk", "no": "Norwegian", "nr": "South Ndebele", "nv": "Navajo",
+    "ny": "Chichewa", "oc": "Occitan", "oj": "Ojibwa", "om": "Oromo", "or": "Oriya",
+    "os": "Ossetian", "pa": "Punjabi", "pi": "Pali", "pl": "Polish", "ps": "Pashto",
+    "pt": "Portuguese", "qu": "Quechua", "rm": "Romansh", "rn": "Kirundi",
+    "ro": "Romanian", "ru": "Russian", "rw": "Kinyarwanda", "sa": "Sanskrit",
+    "sc": "Sardinian", "sd": "Sindhi", "se": "Northern Sami", "sg": "Sango",
+    "si": "Sinhala", "sk": "Slovak", "sl": "Slovenian", "sm": "Samoan", "sn": "Shona",
+    "so": "Somali", "sq": "Albanian", "sr": "Serbian", "ss": "Swati", "st": "Southern Sotho",
+    "su": "Sundanese", "sv": "Swedish", "sw": "Swahili", "ta": "Tamil", "te": "Telugu",
+    "tg": "Tajik", "th": "Thai", "ti": "Tigrinya", "tk": "Turkmen", "tl": "Tagalog",
+    "tn": "Tswana", "to": "Tongan", "tr": "Turkish", "ts": "Tsonga", "tt": "Tatar",
+    "tw": "Twi", "ty": "Tahitian", "ug": "Uyghur", "uk": "Ukrainian", "ur": "Urdu",
+    "uz": "Uzbek", "ve": "Venda", "vi": "Vietnamese", "vo": "Volapuk", "wa": "Walloon",
+    "wo": "Wolof", "xh": "Xhosa", "yi": "Yiddish", "yo": "Yoruba", "za": "Zhuang",
+    "zh": "Chinese", "zu": "Zulu", "zh-Hans": "Chinese (Simplified)", "zh-Hant": "Chinese (Traditional)",
+}
+
+
+def _lang_display(code: str, yt_name: str = "") -> str:
+    code = (code or "").strip()
+    if yt_name:
+        return yt_name
+    if code in _LANG_NAME:
+        return _LANG_NAME[code]
+    parts = code.split("-")
+    if parts and parts[0] in _LANG_NAME:
+        return _LANG_NAME[parts[0]]
+    return code or "نامشخص"
+
+
+_YT_BOT_RE = _re.compile(r"Sign in to confirm|Sign in to continue|not a bot", _re.I)
+
+
+def _run_ytdlp(cmd, timeout):
+    """Runs a yt-dlp command. YouTube frequently flags the proxy exit IP and
+    answers with a "Sign in to confirm you're not a bot" wall while the
+    server's direct connection works fine — so on that error we retry once
+    without the proxy."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        raise
+    if r.returncode != 0 and _YT_BOT_RE.search(r.stderr.decode(errors="ignore")):
+        stripped = []
+        skip = False
+        for a in cmd:
+            if skip:
+                skip = False
+                continue
+            if a == "--proxy":
+                skip = True
+                continue
+            stripped.append(a)
+        if stripped != cmd:
+            r = subprocess.run(stripped, capture_output=True, timeout=timeout)
+    return r
+
+
+def _ytdlp_cmd(extra=None, timeout=45):
+    """Builds the shared yt-dlp command with proxy/cookies from Config."""
+    cmd = ["yt-dlp", "--force-ipv4"]
+    cmd += ["--extractor-args", "youtube:player_client=web,android,ios"]
+    if extra:
+        cmd += extra
+    if Config.YTDLP_PROXY:
+        cmd += ["--proxy", Config.YTDLP_PROXY]
+    if Config.YTDLP_COOKIES and os.path.exists(Config.YTDLP_COOKIES):
+        cmd += ["--cookies", Config.YTDLP_COOKIES]
+    return cmd
+
+
 @app.route("/stream/api/youtube-formats", methods=["POST"])
 def api_youtube_formats():
+    """Scans a YouTube / yt-dlp-supported link and returns video info:
+    title, thumbnail, duration, channel, view count, subtitle/caption languages
+    and available formats. For playlist URLs, returns playlist entries."""
     user = _require_user()
     if not _may_youtube(user):
         return jsonify({"error": "مجوز افزودن لینک یوتیوب برای تو فعال نیست؛ با ادمین هماهنگ کن"}), 403
@@ -1193,19 +1347,13 @@ def api_youtube_formats():
     if not yt_url:
         return jsonify({"error": "لینک خالی است"}), 400
 
-    cmd = [
-        "yt-dlp", "--force-ipv4",
-        "--extractor-args", "youtube:player_client=web,android,ios",
-        "--no-playlist", "-J",
-    ]
-    if Config.YTDLP_PROXY:
-        cmd += ["--proxy", Config.YTDLP_PROXY]
-    if Config.YTDLP_COOKIES and os.path.exists(Config.YTDLP_COOKIES):
-        cmd += ["--cookies", Config.YTDLP_COOKIES]
+    is_playlist = "playlist?list=" in yt_url or "&list=" in yt_url or "/playlist?list=" in yt_url
+
+    cmd = _ytdlp_cmd(["--no-playlist" if not is_playlist else "--flat-playlist", "-J"])
     cmd.append(yt_url)
 
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=45)
+        r = _run_ytdlp(cmd, 90 if is_playlist else 60)
     except subprocess.TimeoutExpired:
         return jsonify({"error": "yt-dlp timeout — ممکنه پروکسی در دسترس نباشه"}), 504
     except FileNotFoundError:
@@ -1220,8 +1368,45 @@ def api_youtube_formats():
     except Exception:
         return jsonify({"error": "خروجی yt-dlp قابل پارس نیست"}), 502
 
+    # ---- playlist URL → return entries ------------------------------------
+    if is_playlist and info.get("_type") == "playlist":
+        entries = []
+        for e in info.get("entries") or []:
+            if not e or e.get("_type") not in ("video", "url") or not e.get("id"):
+                continue
+            eid = e["id"]
+            entries.append({
+                "id": eid,
+                "title": e.get("title") or "(بدون عنوان)",
+                "duration": e.get("duration"),
+                "duration_string": e.get("duration_string") or "",
+                "thumbnail": e.get("thumbnail") or f"https://i.ytimg.com/vi/{eid}/mqdefault.jpg",
+                "url": f"https://www.youtube.com/watch?v={eid}",
+            })
+        return jsonify({
+            "type": "playlist",
+            "playlist_title": info.get("playlist_title") or info.get("title") or "",
+            "playlist_count": info.get("playlist_count") or len(entries),
+            "entries": entries,
+        })
+
+    # ---- single video → full info ------------------------------------------
     title = info.get("title", "")
     thumbnail = info.get("thumbnail", "")
+
+    subtitles = []
+    for code, tracks in (info.get("subtitles") or {}).items():
+        name = (tracks[0].get("name") if tracks else "") or ""
+        subtitles.append({"code": code, "name": _lang_display(code, name)})
+    subtitles.sort(key=lambda x: x["name"].lower())
+
+    auto_captions = []
+    for code, tracks in (info.get("automatic_captions") or {}).items():
+        if code in ("en-orig",):
+            continue
+        name = (tracks[0].get("name") if tracks else "") or ""
+        auto_captions.append({"code": code, "name": _lang_display(code, name)})
+    auto_captions.sort(key=lambda x: x["name"].lower())
 
     seen_heights = set()
     formats = []
@@ -1242,24 +1427,40 @@ def api_youtube_formats():
         })
 
     formats.sort(key=lambda x: x["height"], reverse=True)
-    formats.insert(0, {
-        "format_id": "__best__", "height": 9999, "ext": "mp4", "tbr": 0,
-        "label": "⭐ بهترین کیفیت موجود (منبع برای تولید چند کیفیت داخلی)",
+    # only 360p is offered — filter to it, falling back to the lowest
+    # available height so the scan never returns an empty list.
+    formats = [f for f in formats if f["height"] == 360] or formats[-1:]
+
+    return jsonify({
+        "type": "video",
+        "title": title,
+        "thumbnail": thumbnail,
+        "duration": info.get("duration"),
+        "duration_string": info.get("duration_string") or "",
+        "channel": info.get("channel") or info.get("uploader") or "",
+        "view_count": info.get("view_count"),
+        "upload_date": info.get("upload_date") or "",
+        "subtitles": subtitles,
+        "auto_captions": auto_captions,
+        "formats": formats,
     })
-    return jsonify({"title": title, "thumbnail": thumbnail, "formats": formats})
 
 
-def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requester_name: str):
+def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requester_name: str,
+                              sub_lang: str = ""):
     """Downloads the chosen source quality locally first (rather than
     handing ffmpeg the ephemeral googlevideo URL directly), which avoids
     URL-expiry / missing-header failures, then feeds it into the normal
-    per-item encoding pipeline."""
+    per-item encoding pipeline. When `sub_lang` is set, the matching
+    subtitle track is downloaded alongside and attached to the item."""
     raw_path = os.path.join(Config.UPLOAD_DIR, f"{item_id}_src.mp4")
     cmd = [
         "yt-dlp", "--force-ipv4", "-f", fmt_selector,
         "--extractor-args", "youtube:player_client=web,android,ios",
         "--no-playlist", "--merge-output-format", "mp4", "-o", raw_path,
     ]
+    if sub_lang:
+        cmd += ["--write-subs", "--write-auto-subs", "--sub-langs", sub_lang, "--convert-subs", "srt"]
     if Config.YTDLP_PROXY:
         cmd += ["--proxy", Config.YTDLP_PROXY]
     if Config.YTDLP_COOKIES and os.path.exists(Config.YTDLP_COOKIES):
@@ -1283,7 +1484,7 @@ def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requ
         broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
 
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=1800)
+        r = _run_ytdlp(cmd, 1800)
     except subprocess.TimeoutExpired:
         fail("دانلود از یوتیوب بیش از حد طول کشید")
         return
@@ -1296,7 +1497,74 @@ def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requ
         fail(f"دانلود از یوتیوب ناموفق بود: {err[-1] if err else 'خطای نامشخص'}")
         return
 
+    if sub_lang:
+        _attach_yt_subtitle(item_id, raw_path, sub_lang, requester_name)
+
     start_item_encoding(item_id, raw_path, requester_name, raw_path)
+
+
+def _attach_yt_subtitle(item_id: str, raw_path: str, sub_lang: str, requester_name: str):
+    """Finds the subtitle track yt-dlp wrote next to the video and attaches
+    it to the item as a normal VTT subtitle so it shows in the sub menu."""
+    base = os.path.splitext(raw_path)[0]
+    srt_path = f"{base}.{sub_lang}.srt"
+    if not os.path.exists(srt_path):
+        for fname in os.listdir(Config.UPLOAD_DIR):
+            if fname.startswith(f"{os.path.basename(base)}.") and fname.endswith(f".{sub_lang}.srt"):
+                srt_path = os.path.join(Config.UPLOAD_DIR, fname)
+                break
+    if not os.path.exists(srt_path):
+        log_debug(f"No downloaded subtitle found for {item_id} ({sub_lang})")
+        return
+    try:
+        sub_id = new_id()
+        vtt_name = f"{sub_id}.vtt"
+        convert_srt_to_vtt(srt_path, os.path.join(Config.SUBS_DIR, vtt_name))
+        label = _lang_display(sub_lang) or f"زیرنویس"
+        rs = _room_for_item(item_id)
+        if rs is None:
+            return
+        with LOCK:
+            item = rs.find_item(item_id)
+            if item:
+                item.setdefault("subtitles", []).append({
+                    "id": sub_id, "label": label, "lang": sub_lang,
+                    "url": f"/stream/media/subs/{vtt_name}",
+                })
+                safe_save(rs)
+                title = item["title"]
+            else:
+                title = ""
+        broadcast_state(rs)
+        broadcast_notify("subtitle_auto_extracted", requester_name, room_code=rs.room_id,
+                         title=title, count=1)
+    except Exception as e:
+        log_debug(f"Failed to attach YouTube subtitle for {item_id}: {e}")
+
+
+def _queue_youtube_item(cur, user, yt_url, title, name, fmt_selector, count=1, sub_lang=""):
+    """Adds a single YouTube item to the room playlist and spawns the
+    background download+encode. Returns the item dict (or None)."""
+    item_id = new_id()
+    item = {
+        "id": item_id, "type": "youtube", "title": title, "src": None,
+        "subtitles": [], "audio_tracks": [], "added_by": name,
+        "added_at": time.time(), "status": "queued", "yt_url": yt_url,
+        "_room_id": cur.room_id, "added_by_user_id": user.id,
+    }
+    with LOCK:
+        cur.add_item(item)
+        safe_save(cur)
+    session = dbmod.SessionLocal()
+    try:
+        _bump_upload_used(session, user, count)
+        session.commit()
+    finally:
+        session.close()
+    broadcast_state(cur)
+    broadcast_notify("playlist_add_processing", name, room_code=cur.room_id, title=title)
+    gevent.spawn(_fetch_and_encode_youtube, item_id, yt_url, fmt_selector, name, sub_lang)
+    return item
 
 
 @app.route("/stream/api/add-youtube", methods=["POST"])
@@ -1314,6 +1582,7 @@ def api_add_youtube():
     title = (data.get("title") or "").strip()
     name = (data.get("name") or "ناشناس").strip()
     format_id = (data.get("format_id") or "").strip()
+    sub_lang = (data.get("sub_lang") or "").strip()
 
     if not yt_url:
         return jsonify({"error": "لینک خالی است"}), 400
@@ -1321,26 +1590,88 @@ def api_add_youtube():
     fmt_selector = (format_id if format_id and format_id != "__best__" else Config.YTDLP_FORMAT)
     title = title or yt_url
 
-    item_id = new_id()
-    item = {
-        "id": item_id, "type": "youtube", "title": title, "src": None,
-        "subtitles": [], "audio_tracks": [], "added_by": name,
-        "added_at": time.time(), "status": "queued", "yt_url": yt_url,
-        "_room_id": cur.room_id, "added_by_user_id": user.id,
-    }
-    with LOCK:
-        cur.add_item(item)
-        safe_save(cur)
-    session = dbmod.SessionLocal()
-    try:
-        _bump_upload_used(session, user)
-        session.commit()
-    finally:
-        session.close()
-    broadcast_state(cur)
-    broadcast_notify("playlist_add_processing", name, room_code=cur.room_id, title=title)
-    gevent.spawn(_fetch_and_encode_youtube, item_id, yt_url, fmt_selector, name)
+    item = _queue_youtube_item(cur, user, yt_url, title, name, fmt_selector, sub_lang=sub_lang)
+    if item is None:
+        return jsonify({"error": "اتاق فعال نیست"}), 500
     return jsonify(item)
+
+
+@app.route("/stream/api/add-youtube-playlist", methods=["POST"])
+def api_add_youtube_playlist():
+    """Adds every entry of a YouTube playlist to the room playlist."""
+    user = _require_user()
+    cur = _current_room()
+    if not cur:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_youtube(user):
+        return jsonify({"error": "مجوز افزودن لینک یوتیوب برای تو فعال نیست؛ با ادمین هماهنگ کن"}), 403
+    if not _may_add(user):
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    yt_url = (data.get("url") or "").strip()
+    title = (data.get("title") or "").strip()
+    name = (data.get("name") or "ناشناس").strip()
+    format_id = (data.get("format_id") or "").strip()
+
+    if not yt_url:
+        return jsonify({"error": "لینک خالی است"}), 400
+    if "list=" not in yt_url:
+        return jsonify({"error": "این لینک یک پلی‌لیست نیست"}), 400
+
+    cmd = _ytdlp_cmd(["--flat-playlist", "-J"], timeout=60)
+    cmd.append(yt_url)
+    try:
+        r = _run_ytdlp(cmd, 60)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "yt-dlp timeout — ممکنه پروکسی در دسترس نباشه"}), 504
+    except FileNotFoundError:
+        return jsonify({"error": "yt-dlp روی سرور نصب نیست"}), 500
+    if r.returncode != 0:
+        err = r.stderr.decode(errors="ignore").strip().splitlines()
+        return jsonify({"error": err[-1] if err else "خطای نامشخص"}), 502
+    try:
+        info = json.loads(r.stdout)
+    except Exception:
+        return jsonify({"error": "خروجی yt-dlp قابل پارس نیست"}), 502
+
+    entries = []
+    for e in info.get("entries") or []:
+        if not e or e.get("_type") not in ("video", "url") or not e.get("id"):
+            continue
+        eid = e["id"]
+        entries.append({
+            "title": e.get("title") or f"YouTube {eid}",
+            "url": f"https://www.youtube.com/watch?v={eid}",
+        })
+
+    limit = max(1, min(ARCHIVE_MAX_ADD, 30))
+    entries = entries[:limit]
+    if not entries:
+        return jsonify({"error": "هیچ ویدیویی در پلی‌لیست پیدا نشد"}), 422
+
+    remaining = _remaining_add_slots(user)
+    if remaining is not None:
+        entries = entries[:max(0, remaining)]
+    if not entries:
+        return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
+
+    fmt_selector = "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]/best"
+    added = 0
+    for e in entries:
+        dup = False
+        with LOCK:
+            dup = any(itm.get("yt_url") == e["url"] for itm in cur.playlist)
+        if dup:
+            continue
+        item = _queue_youtube_item(cur, user, e["url"], e["title"], name, fmt_selector)
+        if item is not None:
+            added += 1
+
+    if added == 0:
+        return jsonify({"error": "هیچ مورد جدیدی اضافه نشد (تکراری یا سهمیه)"}), 200
+    broadcast_notify("playlist_add_many", name, room_code=cur.room_id,
+                     title=title or "پلی‌لیست", count=added, skipped=0, dead=0)
+    return jsonify({"added": added})
 
 
 VIDEO_EXTS = {"mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi", "ts"}
@@ -1401,9 +1732,18 @@ def api_request_quality():
 @app.route("/stream/api/live/new-key", methods=["POST"])
 def api_new_key():
     key = uuid.uuid4().hex[:10]
+    host = urllib.parse.urlparse(Config.RTMP_PUSH_URL_TEMPLATE.format(key="")).netloc.split(":")[0]
+    primary_port = urllib.parse.urlparse(Config.RTMP_PUSH_URL_TEMPLATE.format(key="")).port or 1935
+    alt_ports = [int(p) for p in Config.RTMP_ALTERNATE_PORTS if str(p) != str(primary_port)]
+    scheme = urllib.parse.urlparse(Config.RTMP_PUSH_URL_TEMPLATE.format(key="")).scheme
     return jsonify({
         "key": key,
         "push_url": Config.RTMP_PUSH_URL_TEMPLATE.format(key=key),
+        # Server address WITHOUT the stream key — this is what goes in OBS's
+        # "Server" field; the key goes in the separate "Stream Key" field.
+        "server_url": f"{scheme}://{host}:{primary_port}/live",
+        "push_urls": [Config.RTMP_PUSH_URL_TEMPLATE.format(key=key)]
+                     + [f"rtmp://{host}:{p}/live/{key}" for p in alt_ports],
         "playback_url": Config.HLS_PLAYBACK_URL_TEMPLATE.format(key=key),
     })
 
@@ -2278,7 +2618,7 @@ def api_auth_me():
         if not fresh or not fresh.is_active:
             return jsonify({"error": "حساب غیرفعال است"}), 401
         own = dbmod.ensure_own_room(session, fresh)
-        if not fresh.current_room_id:
+        if not fresh.current_room_id or dbmod.is_banned(session, fresh.current_room_id, fresh.id):
             fresh.current_room_id = own.id
             session.commit()
         room_row = session.get(dbmod.Room, fresh.current_room_id) if fresh.current_room_id else None
@@ -2337,6 +2677,8 @@ def api_room_join():
         if not room_row:
             return jsonify({"error": f"اتاق با کد {code} پیدا نشد"}), 404
         fresh = session.get(DBUser, user.id)
+        if dbmod.is_banned(session, room_row.id, fresh.id):
+            return jsonify({"error": "از این اتاق اخراج شده‌ای و امکان ورود دوباره نداری"}), 403
         fresh.current_room_id = room_row.id
         session.commit()
         return jsonify({"room": _room_info_json(session, room_row), "user": fresh.public_dict()})
@@ -2354,6 +2696,170 @@ def api_room_mine():
         fresh.current_room_id = own.id
         session.commit()
         return jsonify({"room": _room_info_json(session, own), "user": fresh.public_dict()})
+    finally:
+        session.close()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Room member management — promote/demote/ban/unban by the room owner or a
+# promoted controller (the "مدیریت اعضا" panel).
+# ────────────────────────────────────────────────────────────────────────────
+
+def _room_manage_guard(session, user: DBUser):
+    """Returns (room_row, None, None) when `user` may manage the room they're
+    currently in, or (None, error_response, status) otherwise."""
+    code = user.current_room_id
+    if not code:
+        return None, jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
+    if not _may_control(user):
+        return None, jsonify({"error": "فقط صاحب اتاق یا کنترلر می‌تواند اعضا را مدیریت کند"}), 403
+    room_row = session.get(dbmod.Room, code)
+    if not room_row:
+        return None, jsonify({"error": "اتاق پیدا نشد"}), 404
+    return room_row, None, None
+
+
+@app.route("/stream/api/room/members", methods=["POST"])
+def api_room_members():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        room_row, err, status = _room_manage_guard(session, user)
+        if err is not None:
+            return err, status
+        rs = rooms.get(room_row.id)
+        online = []
+        with LOCK:
+            for entry in rs.users.values():
+                online.append({
+                    "id": entry.get("id"),
+                    "name": entry.get("name", "ناشناس"),
+                    "avatar_url": entry.get("avatar_url"),
+                    "can_control": bool(entry.get("can_control")),
+                    "is_owner": bool(entry.get("is_owner")),
+                    "in_voice": bool(entry.get("in_voice")),
+                })
+        online.sort(key=lambda u: (not u["is_owner"], not u["can_control"], (u["name"] or "").lower()))
+        bans = session.execute(
+            dbmod.select(dbmod.RoomBan).where(dbmod.RoomBan.room_id == room_row.id)
+        ).scalars().all()
+        banned = []
+        if bans:
+            targets = session.execute(
+                dbmod.select(DBUser).where(
+                    DBUser.id.in_([b.user_id for b in bans])
+                )
+            ).scalars().all()
+            for t in targets:
+                banned.append({
+                    "id": t.id,
+                    "name": t.username,
+                    "display_name": t.display_name,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
+                })
+            banned.sort(key=lambda u: (u["name"] or "").lower())
+        return jsonify({"owner_id": room_row.owner_id, "online": online, "banned": banned})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/room/members/promote", methods=["POST"])
+def api_room_promote():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        room_row, err, status = _room_manage_guard(session, user)
+        if err is not None:
+            return err, status
+        data = request.get_json(force=True, silent=True) or {}
+        target = session.get(DBUser, data.get("user_id") or "")
+        if not target:
+            return jsonify({"error": "کاربر پیدا نشد"}), 404
+        if target.id == room_row.owner_id:
+            return jsonify({"error": "صاحب اتاق از قبل مدیر است"}), 400
+        target.can_control = True
+        session.commit()
+        _refresh_socket_perms(room_row.id, target.id, can_control=True)
+        broadcast_notify("room_promote", user.username, room_code=room_row.id,
+                         extra={"target": target.username})
+        return jsonify({"ok": True, "can_control": True})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/room/members/demote", methods=["POST"])
+def api_room_demote():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        room_row, err, status = _room_manage_guard(session, user)
+        if err is not None:
+            return err, status
+        data = request.get_json(force=True, silent=True) or {}
+        target = session.get(DBUser, data.get("user_id") or "")
+        if not target:
+            return jsonify({"error": "کاربر پیدا نشد"}), 404
+        if target.id == room_row.owner_id:
+            return jsonify({"error": "صاحب اتاق را نمی‌توانی از مدیریت برداری"}), 400
+        if target.id == user.id:
+            return jsonify({"error": "نمی‌توانی خودت را از کنترلر خارج کنی"}), 400
+        target.can_control = False
+        session.commit()
+        _refresh_socket_perms(room_row.id, target.id, can_control=False)
+        broadcast_notify("room_demote", user.username, room_code=room_row.id,
+                         extra={"target": target.username})
+        return jsonify({"ok": True, "can_control": False})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/room/members/ban", methods=["POST"])
+def api_room_ban():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        room_row, err, status = _room_manage_guard(session, user)
+        if err is not None:
+            return err, status
+        data = request.get_json(force=True, silent=True) or {}
+        target = session.get(DBUser, data.get("user_id") or "")
+        if not target:
+            return jsonify({"error": "کاربر پیدا نشد"}), 404
+        if target.id == room_row.owner_id:
+            return jsonify({"error": "صاحب اتاق را نمی‌توانی اخراج کنی"}), 400
+        if target.id == user.id:
+            return jsonify({"error": "نمی‌توانی خودت را اخراج کنی"}), 400
+        if dbmod.is_banned(session, room_row.id, target.id):
+            return jsonify({"ok": True, "already": True})
+        dbmod.ban_user(session, room_row.id, target.id, banned_by=user.id)
+        if target.current_room_id == room_row.id:
+            target.current_room_id = None
+        session.commit()
+        _kick_room_user(room_row.id, target.id)
+        broadcast_notify("room_ban", user.username, room_code=room_row.id,
+                         extra={"target": target.username})
+        return jsonify({"ok": True})
+    finally:
+        session.close()
+
+
+@app.route("/stream/api/room/members/unban", methods=["POST"])
+def api_room_unban():
+    user = _require_user()
+    session = dbmod.SessionLocal()
+    try:
+        room_row, err, status = _room_manage_guard(session, user)
+        if err is not None:
+            return err, status
+        data = request.get_json(force=True, silent=True) or {}
+        target = session.get(DBUser, data.get("user_id") or "")
+        if not target:
+            return jsonify({"error": "کاربر پیدا نشد"}), 404
+        dbmod.unban_user(session, room_row.id, target.id)
+        session.commit()
+        broadcast_notify("room_unban", user.username, room_code=room_row.id,
+                         extra={"target": target.username})
+        return jsonify({"ok": True})
     finally:
         session.close()
 
@@ -2532,10 +3038,17 @@ def on_connect(auth=None):
         return False
     session = dbmod.SessionLocal()
     try:
-        user = session.get(DBUser, payload.get("sub"))
+        user = session.execute(
+            dbmod.select(DBUser)
+            .where(DBUser.id == payload.get("sub"))
+            .options(selectinload(DBUser.own_room))
+        ).scalar_one_or_none()
         if not user or not user.is_active or not user.current_room_id:
             return False
         code = user.current_room_id
+        if dbmod.is_banned(session, code, user.id):
+            log_debug(f"Socket connect rejected (banned from {code}): {user.username}")
+            return False
         SOCKET_SESSIONS[request.sid] = (code, user)
         join_room(_room_channel(code))
         rs = rooms.get(code)
@@ -2544,6 +3057,8 @@ def on_connect(auth=None):
             rs.users[request.sid] = {
                 "name": user.username, "display_name": user.display_name,
                 "avatar_url": None, "in_voice": False,
+                "id": user.id, "can_control": bool(user.can_control),
+                "is_owner": bool(user.own_room and user.own_room.id == code),
             }
         emit("state_sync", rs.to_public_dict())
         with CHAT_LOCK:
@@ -2634,16 +3149,20 @@ def on_control(data):
     code, user = _socket_session()
     if not code or not user:
         return
-    if not _may_control(user):
+    data = data or {}
+    action = data.get("action")
+    if action not in ("play", "pause", "seek", "rate", "select"):
+        return
+    # play/pause/seek are open to everyone in the room; changing the shared
+    # speed or switching the selected media needs a room manager.
+    if action in ("rate", "select") and not _may_control(user):
         emit("notify", {
             "type": "control_denied", "name": user.username,
             "ts": time.time(),
-            "extra": {"action": (data or {}).get("action", "")},
+            "extra": {"action": action},
         })
         return
     rs = rooms.get(code)
-    data = data or {}
-    action = data.get("action")
     name = user.username or "ناشناس"
 
     with LOCK:

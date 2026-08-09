@@ -25,6 +25,12 @@ TIMEOUT = 12
 RETRIES = 1
 
 DS_BASE = "https://donyayeserial.com"
+DS_ALT_BASE = "https://donyayeserial-new.top"
+# donyayeserial is frequently unreachable from datacenter IPs (TLS drops /
+# intermittent HTTP 500s) — retry a couple of times since failures return
+# fast, but keep each attempt short so searches don't hang waiting on it.
+DS_TIMEOUT = 4
+DS_RETRIES = 2
 AX_BASE = "https://animex.click"
 CDN_BASE = "https://csdl1.hollowofthealley.space"
 
@@ -80,13 +86,21 @@ def _media_links(blk):
 # ────────────────────────────────────────────────────────────────────────────
 
 def _ds_search_one(q, post_type):
-    """Searches a single donyayeserial archive (movies=post, series=series)."""
-    url = DS_BASE + "/?" + urllib.parse.urlencode({
-        "s": q, "search_type": "advanced", "post_type": post_type,
-    })
-    try:
-        page = _fetch(url)
-    except Exception:
+    """Searches a single donyayeserial archive (movies=post, series=series).
+
+    The site serves on two hostnames (donyayeserial.com redirects to the
+    newer -new.top) and is frequently flaky — one host 500s while the other
+    is fine — so try both in turn instead of giving up after the first."""
+    for base in (DS_BASE, DS_ALT_BASE):
+        url = base + "/?" + urllib.parse.urlencode({
+            "s": q, "search_type": "advanced", "post_type": post_type,
+        })
+        try:
+            page = _fetch(url, timeout=DS_TIMEOUT, _retries=DS_RETRIES)
+            break
+        except Exception:
+            page = None
+    if not page:
         return []
     results = []
     for m in re.finditer(r'<article class="[^"]*postItems', page):
@@ -127,6 +141,15 @@ def search_donyayeserial(q):
     return out
 
 
+def _ds_swap_domain(url):
+    """Returns the same donyayeserial page on the other hostname."""
+    if url.startswith(DS_BASE):
+        return DS_ALT_BASE + url[len(DS_BASE):]
+    if url.startswith(DS_ALT_BASE):
+        return DS_BASE + url[len(DS_ALT_BASE):]
+    return None
+
+
 def _ds_title_meta(page, url):
     title = None
     m = re.search(r'<meta property="og:title" content="([^"]+)"', page)
@@ -145,12 +168,21 @@ def _ds_title_meta(page, url):
 
 
 def parse_donyayeserial_title(url):
-    page = _fetch(url)
+    page = None
+    for u in (url, _ds_swap_domain(url)):
+        if not u or u == url and page is not None:
+            continue
+        try:
+            page = _fetch(u, timeout=DS_TIMEOUT, _retries=DS_RETRIES)
+            break
+        except Exception:
+            page = None
+    if not page:
+        raise TimeoutError("site timed out")
     meta = _ds_title_meta(page, url)
     seg = page
     i = page.find("content-downloads")
-    if i >= 0:
-        seg = page[i:]
+    if i >= 0:        seg = page[i:]
     groups = []
 
     # Series layout: one `div.item` per season × quality block, each with a
@@ -270,6 +302,16 @@ def parse_animex_title(url):
     m = re.search(r'<meta property="og:image" content="([^"]+)"', page)
     if m:
         poster = m.group(1)
+    if not poster:
+        # animex title pages carry no og:image — fall back to the post's
+        # featured thumbnail so the banner shows in the detail view.
+        imgm = re.search(
+            r'<img[^>]*class="[^"]*attachment-post-thumbnail[^"]*"[^>]*>',
+            page)
+        if imgm:
+            sm = re.search(r'src="([^"]+)"', imgm.group(0))
+            if sm:
+                poster = sm.group(1)
     km = re.search(r'<article[^>]+class="[^"]*type-(\w+)', page)
     kind = km.group(1).lower() if km else "anime"
 
@@ -324,7 +366,13 @@ def parse_animex_title(url):
 # ────────────────────────────────────────────────────────────────────────────
 
 def list_dir(url):
-    """Parses csdl1.hollowofthealley.space's ?dir= HTML into direct file URLs."""
+    """Parses csdl1.hollowofthealley.space's ?dir= HTML into direct file URLs.
+
+    Some titles (specials, movies) link straight to the media file instead of
+    a directory — those are returned as a single-episode listing."""
+    if _is_media_url(url):
+        name = urllib.parse.unquote(url.rsplit("/", 1)[-1].split("?")[0])
+        return [{"name": name, "url": url}]
     page = _fetch(url)
     files = []
     for h, t in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', page, re.S):
@@ -336,9 +384,12 @@ def list_dir(url):
             continue
         if not h.lower().endswith(_VIDEO_EXT):
             continue
+        # Resolve against the host that actually served the listing — the
+        # subdomains (ndl5/csdl1/...) are per-file shards and csdl1 404s on
+        # files that ndl5 serves.
         files.append({
             "name": name,
-            "url": urllib.parse.urljoin(CDN_BASE, h),
+            "url": urllib.parse.urljoin(url, h),
         })
     # natural sort by embedded episode number so قسمت 2 doesn't land after 10
     files.sort(key=lambda f: _sort_key(f["name"]))

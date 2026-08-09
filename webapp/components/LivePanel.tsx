@@ -1,18 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Radio } from "lucide-react";
 import { api } from "@/lib/api";
 
 const inputClass =
   "w-full rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3.5 py-2.5 text-[13.5px] text-[color:var(--color-ink)] outline-none focus:border-[color:var(--color-amber)]";
 
-function CopyField({ label, value }: { label: string; value: string }) {
+function CopyField({ label, value, primary }: { label: string; value: string; primary?: boolean }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex flex-col gap-1.5">
       <label className="text-xs text-[color:var(--color-ink-muted)]">{label}</label>
-      <div className="flex items-center gap-2 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3 py-2">
+      <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${primary ? "border-[color:var(--color-amber)]/40 bg-[color:var(--color-amber)]/5" : "border-[color:var(--color-border)] bg-white/5"}`}>
         <code className="flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs text-[color:var(--color-amber)]" dir="ltr">
           {value}
         </code>
@@ -32,7 +32,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
 }
 
 export function LivePanel({ myName }: { myName: string }) {
-  const [key, setKey] = useState<{ key: string; push_url: string; playback_url: string } | null>(null);
+  const [key, setKey] = useState<{ key: string; push_url: string; server_url?: string; push_urls?: string[]; playback_url: string } | null>(null);
   const [manualTitle, setManualTitle] = useState("");
   const [manualUrl, setManualUrl] = useState("");
 
@@ -40,7 +40,7 @@ export function LivePanel({ myName }: { myName: string }) {
     <div className="grid gap-6 md:grid-cols-2">
       <div>
         <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">۱) ساخت کلید استریم</h4>
-        <p className="mb-3 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">یک کلید بساز و آدرس Push رو در نرم‌افزار پخشت (OBS، اپ موبایل و ...) بذار.</p>
+        <p className="mb-3 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">یک کلید بساز و در نرم‌افزار پخشت (OBS و ...) آدرس Server و کلید رو جدا در دو فیلد وارد کن.</p>
         <button
           onClick={async () => setKey(await api.newLiveKey())}
           className="rounded-xl border border-[color:var(--color-border)] bg-white/5 px-4 py-2.5 text-[13px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50"
@@ -50,8 +50,15 @@ export function LivePanel({ myName }: { myName: string }) {
 
         {key && (
           <div className="mt-4 flex flex-col gap-3">
-            <CopyField label="آدرس Push (Server)" value={key.push_url} />
-            <CopyField label="کلید استریم (Stream Key)" value={key.key} />
+            <CopyField label="Server (فقط آدرس، بدون کلید)" value={key.server_url || key.push_url.replace(/\/[^/]+$/, "")} primary />
+            <CopyField label="Stream Key (کلید استریم)" value={key.key} />
+            <p className="text-[11.5px] leading-relaxed text-[color:var(--color-ink-dim)]">
+              این دو مقدار رو جدا در OBS وارد کن — کلید نباید توی آدرس Server تکرار بشه.
+            </p>
+            <CopyField label="کل پوش‌آدرس (یکجا، اگر نرم‌افزارت یک فیلد دارد)" value={key.push_url} />
+            {(key.push_urls || []).filter((u) => u !== key.push_url).map((u) => (
+              <CopyField key={u} label="Push جایگزین (اگر اولی وصل نشد)" value={u} />
+            ))}
             <CopyField label="آدرس پخش (HLS Playback)" value={key.playback_url} />
             <button
               onClick={async () => {

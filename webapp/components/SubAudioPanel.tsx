@@ -88,7 +88,7 @@ function SubtitleDropZone({ file, onFile, disabled }: { file: File | null; onFil
   );
 }
 
-export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; myName: string }) {
+export function SubAudioPanel({ playlist, myName, canUpload = true }: { playlist: PlaylistItem[]; myName: string; canUpload?: boolean }) {
   const [targetId, setTargetId] = useState(playlist[0]?.id ?? "");
   const [subMode, setSubMode] = useState<"file" | "url">("file");
 
@@ -107,6 +107,10 @@ export function SubAudioPanel({ playlist, myName }: { playlist: PlaylistItem[]; 
 
   if (!playlist.length) {
     return <p className="text-[13.5px] text-[color:var(--color-ink-dim)]">ابتدا یک ویدیو به پلی‌لیست اضافه کن</p>;
+  }
+
+  if (!canUpload) {
+    return <p className="text-[13.5px] text-[color:var(--color-ink-dim)]">فقط مدیریت اتاق می‌تونه زیرنویس و صدا اضافه کنه</p>;
   }
 
   async function uploadSub(e: React.FormEvent) {

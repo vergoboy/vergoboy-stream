@@ -3,11 +3,12 @@
 import { useRef } from "react";
 
 
-import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2, UploadCloud, FileUp, Link2, CirclePlay } from "lucide-react";
+import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2, UploadCloud, FileUp, Link2, CirclePlay, Search } from "lucide-react";
 
 
 import { useState } from "react";
 import { api, uploadVideo } from "@/lib/api";
+import type { YoutubeScanVideo, YoutubeScanPlaylist } from "@/lib/api";
 
 type Mode = "file" | "url" | "youtube";
 
@@ -195,21 +196,40 @@ function UrlForm({ myName }: { myName: string }) {
 function VideoForm({ myName }: { myName: string }) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
-  const [preview, setPreview] = useState<{ title: string; thumbnail: string; formats: { format_id: string; label: string }[] } | null>(null);
+  const [addingAll, setAddingAll] = useState(false);
+  const [preview, setPreview] = useState<YoutubeScanVideo | null>(null);
+  const [playlist, setPlaylist] = useState<YoutubeScanPlaylist | null>(null);
   const [formatId, setFormatId] = useState("__best__");
   const [customTitle, setCustomTitle] = useState("");
+  const [subLang, setSubLang] = useState("");
   const [status, setStatus] = useState<{ msg: string; error?: boolean } | null>(null);
+
+  function subOptions(preview: YoutubeScanVideo) {
+    const merged = new Map<string, { code: string; name: string }>();
+    for (const s of [...preview.subtitles, ...preview.auto_captions]) {
+      if (!merged.has(s.code)) merged.set(s.code, s);
+    }
+    const rank = (code: string) => (code === "fa" ? 0 : code === "en" ? 1 : 2);
+    return [...merged.values()].sort((a, b) => rank(a.code) - rank(b.code) || a.name.localeCompare(b.name));
+  }
 
   async function loadFormats() {
     if (!url.trim()) return;
     setLoading(true);
     setPreview(null);
-    setStatus({ msg: "در حال دریافت اطلاعات ویدیو… (۱۵–۴۵ ثانیه)" });
+    setPlaylist(null);
+    setStatus({ msg: "در حال اسکن لینک… (۱۵–۶۰ ثانیه)" });
     try {
       const data = await api.youtubeFormats(url.trim());
-      setPreview(data);
-      setFormatId(data.formats[0]?.format_id ?? "__best__");
-      setStatus(null);
+      if (data.type === "playlist") {
+        setPlaylist(data);
+        setStatus(null);
+      } else {
+        setPreview(data);
+        setFormatId(data.formats[0]?.format_id ?? "__best__");
+        setSubLang(subOptions(data).find((s) => s.code === "fa")?.code ?? "");
+        setStatus(null);
+      }
     } catch (err) {
       setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
     }
@@ -221,7 +241,7 @@ function VideoForm({ myName }: { myName: string }) {
     if (!url.trim()) return;
     setStatus({ msg: "در حال دریافت لینک مستقیم با کیفیت انتخابی… (۱۵–۳۰ ثانیه)" });
     try {
-      const data = await api.addYoutube(url.trim(), formatId, customTitle || preview?.title || "", myName);
+      const data = await api.addYoutube(url.trim(), formatId, customTitle || preview?.title || "", myName, subLang);
       setStatus({ msg: `<CheckCircle className="w-4 h-4 text-emerald-400" /> «${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });
       setPreview(null);
       setUrl("");
@@ -232,27 +252,58 @@ function VideoForm({ myName }: { myName: string }) {
     }
   }
 
+  async function addAllPlaylist() {
+    if (!playlist) return;
+    setAddingAll(true);
+    setStatus({ msg: `در حال افزودن ${playlist.entries.length} ویدیوی پلی‌لیست… (چند دقیقه صبر کن)` });
+    try {
+      const data = await api.addYoutubePlaylist(url.trim(), playlist.playlist_title, myName);
+      setStatus({ msg: `<CheckCircle className="w-4 h-4 text-emerald-400" /> ${data.added} ویدیو از پلی‌لیست اضافه شد — دانلودها در پس‌زمینه ادامه داره` });
+      setPlaylist(null);
+      setUrl("");
+      setTimeout(() => setStatus(null), 5000);
+    } catch (err) {
+      setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
+    }
+    setAddingAll(false);
+  }
+
+  function fmtViews(n?: number): string {
+    if (!n) return "";
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M بازدید`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K بازدید`;
+    return `${n} بازدید`;
+  }
+
   return (
     <form onSubmit={submit} className="flex flex-col gap-2.5">
       <label className={labelClass}>لینک یوتیوب (یا هر سایت پشتیبانی‌شده توسط yt-dlp)</label>
       <div className="flex gap-2">
-        <input className={`${inputClass} flex-1`} dir="ltr" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://youtu.be/..." />
+        <input className={`${inputClass} flex-1`} dir="ltr" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://youtu.be/... یا لینک پلی‌لیست" />
         <button
           type="button"
           onClick={loadFormats}
           disabled={loading}
           className="shrink-0 whitespace-nowrap rounded-xl border border-[color:var(--color-border)] bg-white/5 px-4 py-2.5 text-[13px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-50"
         >
-          🔍 بارگذاری
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
         </button>
       </div>
 
+      {/* single video scan result */}
       {preview && (
         <div className="flex flex-wrap items-start gap-3.5 rounded-2xl border border-[color:var(--color-border)] bg-white/5 p-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           {preview.thumbnail && <img src={preview.thumbnail} alt="" className="h-17 w-30 shrink-0 rounded-lg bg-black object-cover" style={{ width: 120, height: 68 }} />}
           <div className="min-w-0 flex-1 flex flex-col gap-2">
             <div className="truncate text-[13px] font-semibold text-[color:var(--color-ink)]">{preview.title}</div>
+            {(preview.duration_string || preview.channel || preview.view_count) && (
+              <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-[color:var(--color-ink-muted)]" dir="ltr">
+                {preview.duration_string && <span className="rounded-md bg-white/10 px-1.5 py-0.5">⏱ {preview.duration_string}</span>}
+                {preview.channel && <span className="truncate">📺 {preview.channel}</span>}
+                {fmtViews(preview.view_count) && <span>👁 {fmtViews(preview.view_count)}</span>}
+              </div>
+            )}
             <input
               className={inputClass}
               value={customTitle}
@@ -266,18 +317,66 @@ function VideoForm({ myName }: { myName: string }) {
                 </option>
               ))}
             </select>
+            {preview && subOptions(preview).length > 0 && (
+              <select value={subLang} onChange={(e) => setSubLang(e.target.value)} className={inputClass}>
+                <option value="">بدون زیرنویس</option>
+                {subOptions(preview).map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
       )}
 
-      {preview && (
+      {preview && !addingAll && (
         <button
           type="submit"
-          className={primaryBtn}
+          className="mt-1.5 self-end rounded-xl px-4 py-2 text-[12.5px] font-bold text-white transition-transform active:scale-[0.98] disabled:opacity-50"
           style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
         >
-          <Plus className="w-4 h-4" /> افزودن به پلی‌لیست
+          <Plus className="h-4 w-4" /> افزودن
         </button>
+      )}
+
+      {/* playlist scan result */}
+      {playlist && (
+        <div className="flex flex-col gap-2 rounded-2xl border border-[color:var(--color-border)] bg-white/5 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="truncate text-[13px] font-semibold text-[color:var(--color-ink)]">
+              📑 {playlist.playlist_title || "پلی‌لیست"}
+            </div>
+            <span className="shrink-0 rounded-md bg-white/10 px-1.5 py-0.5 text-[11px] text-[color:var(--color-ink-muted)]">
+              {playlist.playlist_count} ویدیو
+            </span>
+          </div>
+          <div className="max-h-44 overflow-y-auto flex flex-col gap-1 pr-1">
+            {playlist.entries.slice(0, 30).map((e) => (
+              <div key={e.id} className="flex items-center gap-2 rounded-lg bg-white/5 px-2 py-1.5">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                {e.thumbnail && <img src={e.thumbnail} alt="" className="h-8 w-12 shrink-0 rounded object-cover bg-black" />}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[12px] text-[color:var(--color-ink)]" dir="auto">{e.title}</div>
+                  {e.duration_string && <div className="text-[10.5px] text-[color:var(--color-ink-muted)]" dir="ltr">⏱ {e.duration_string}</div>}
+                </div>
+              </div>
+            ))}
+            {playlist.entries.length > 30 && (
+              <div className="px-2 py-1 text-[11px] text-[color:var(--color-ink-muted)]">… و {playlist.entries.length - 30} ویدیوی دیگر</div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={addAllPlaylist}
+            disabled={addingAll}
+            className={primaryBtn}
+            style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+          >
+            {addingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="w-4 h-4" />} افزودن کل پلی‌لیست
+          </button>
+        </div>
       )}
 
       {status && (
@@ -289,7 +388,7 @@ function VideoForm({ myName }: { myName: string }) {
           {status.msg}
         </div>
       )}
-      <p className="text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">افزودن الان انجام می‌شه و بلافاصله جواب می‌گیری؛ دانلود و آماده‌سازی در پس‌زمینه ادامه پیدا می‌کنه.</p>
+      <p className="text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">افزودن الان انجام می‌شه و بلافاصله جواب می‌گیری؛ دانلود و آماده‌سازی در پس‌زمینه ادامه پیدا می‌کنه. لینک پلی‌لیست هم پشتیبانی می‌شه.</p>
     </form>
   );
 }

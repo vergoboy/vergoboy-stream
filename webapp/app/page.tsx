@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useLocalStorage } from "@/lib/useLocalStorage";
 import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
 import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
-import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, finishOAuthLogin } from "@/lib/auth";
+import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, mayManage, finishOAuthLogin } from "@/lib/auth";
 
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
@@ -23,6 +23,7 @@ import { SubStylePanel } from "@/components/SubStylePanel";
 import { ChatPanel } from "@/components/ChatPanel";
 import { VoicePanel } from "@/components/VoicePanel";
 import { Sidebar } from "@/components/Sidebar";
+import { MembersPanel } from "@/components/MembersPanel";
 import { Toasts, type Toast } from "@/components/Toasts";
 import { AuthGate } from "@/components/AuthGate";
 import { RoomBar } from "@/components/RoomBar";
@@ -61,9 +62,8 @@ function PageInner() {
   const [joinCode, setJoinCode] = useState<string | null>(null);
 
   const myName = user?.username ?? "";
-  const canControl = mayControl(user);
-  const canAdd = mayAdd(user);
   const isAdm = isAdmin(user);
+  const canControl = mayControl(user);
 
   // Grab ?join=CODE once on load, then strip it from the URL so a refresh
   // doesn't re-trigger the join.
@@ -131,13 +131,32 @@ function PageInner() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
   };
 
+  // When a room manager bans me, the server drops my socket and clears my
+  // current_room_id; bounce back to my own room.
+  const handleKicked = useCallback(() => {
+    const id = `t${toastSeq++}`;
+    setToasts((prev) => [...prev, { id, text: "از اتاق اخراج شدی و به اتاق خودت برگشتی" }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+    api
+      .roomMine()
+      .then((res) => {
+        updateUser(res.user);
+        setRoomCode(res.room.id);
+      })
+      .catch(() => {});
+  }, []);
+
   const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat, setVoiceActive } =
-    useRoomState({ token: access, roomCode: roomCode ?? "", myName, canControl, onNotify: handleNotify });
+    useRoomState({ token: access, roomCode: roomCode ?? "", myName, canControl, myId: user?.id, onNotify: handleNotify, onKicked: handleKicked });
 
   // Only people actually connected to the voice room sit on the sofa — a
   // regular online visitor must stay invisible to the others until they
   // join the voice chat.
   const sofaUsers = presenceUsers.filter((u) => u.in_voice);
+
+  const isOwner = presenceUsers.some((u) => u.id !== undefined && u.id === user?.id && u.is_owner) || false;
+  const canManage = mayManage(user, isOwner);
+  const canAdd = mayAdd(user, isOwner);
 
   const currentItem = useMemo(
     () => (room.current_index !== null ? room.playlist[room.current_index] ?? null : null),
@@ -206,11 +225,11 @@ function PageInner() {
             latestNotify={latestNotify}
             myName={myName}
             subStyle={subStyle}
-            canControl={canControl}
-            canPrev={canControl && room.current_index !== null && room.current_index > 0}
-            canNext={canControl && room.current_index !== null && room.current_index < room.playlist.length - 1}
-            onPrev={() => canControl && room.current_index !== null && requestControl("select", { index: room.current_index - 1 })}
-            onNext={() => canControl && room.current_index !== null && requestControl("select", { index: room.current_index + 1 })}
+            canSpeed={canManage}
+            canPrev={canManage && room.current_index !== null && room.current_index > 0}
+            canNext={canManage && room.current_index !== null && room.current_index < room.playlist.length - 1}
+            onPrev={() => canManage && room.current_index !== null && requestControl("select", { index: room.current_index - 1 })}
+            onNext={() => canManage && room.current_index !== null && requestControl("select", { index: room.current_index + 1 })}
             onGoToAdd={() => setActiveTab("add")}
             onGoToSubStyle={() => setActiveTab("substyle")}
             onOpenShortcuts={() => setShortcutsOpen(true)}
@@ -244,13 +263,13 @@ function PageInner() {
                   currentIndex={room.current_index}
                   transcodeProgress={transcodeProgress}
                   myName={myName}
-                  onSelect={(index) => canControl && requestControl("select", { index })}
+                  onSelect={(index) => canManage && requestControl("select", { index })}
                 />
               )}
               {activeTab === "add" && <AddVideoPanel myName={myName} />}
               {activeTab === "archive" && <ArchivePanel myName={myName} />}
               {activeTab === "live" && <LivePanel myName={myName} />}
-              {activeTab === "subaudio" && <SubAudioPanel playlist={room.playlist} myName={myName} />}
+              {activeTab === "subaudio" && <SubAudioPanel playlist={room.playlist} myName={myName} canUpload={canManage} />}
               {activeTab === "substyle" && <SubStylePanel value={subStyle} onChange={setSubStyle} />}
               {activeTab === "chat" && <ChatPanel messages={chatMessages} myName={myName} onSend={sendChat} />}
             </motion.div>
@@ -282,6 +301,15 @@ function PageInner() {
               onlineUsers={presenceUsers}
               notifications={notifications}
               playlist={room.playlist}
+            />
+            <MembersPanel
+              myName={myName}
+              canManage={canManage}
+              onToast={(msg) => {
+                const id = `t${toastSeq++}`;
+                setToasts((prev) => [...prev, { id, text: msg }]);
+                setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+              }}
             />
             {isAdm && (
               <a

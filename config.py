@@ -149,10 +149,16 @@ class Config:
     # via env vars. {key} is substituted with the generated key.
     # ---------------------------------------------------------------
     RTMP_PUSH_URL_TEMPLATE = os.environ.get(
-        "STREAM_RTMP_PUSH_TEMPLATE", "rtmp://vergoboy.ir:1935/live/{key}"
+        "STREAM_RTMP_PUSH_TEMPLATE", "rtmps://vergoboy.ir:8443/live/{key}"
     )
+    # Extra RTMP ingest ports (all served by the same nginx-rtmp application).
+    # Iranian ISPs commonly block the default RTMP port 1935, so we advertise
+    # alternates — the user picks whichever one their connection allows.
+    RTMP_ALTERNATE_PORTS = os.environ.get("STREAM_RTMP_ALT_PORTS", "1935").split(",")
+    # MediaMTX writes HLS per-path under {hlsDirectory}/{path}/index.m3u8, served
+    # by nginx at /hls/ (alias /opt/stream/hls-live). {key} is the stream key.
     HLS_PLAYBACK_URL_TEMPLATE = os.environ.get(
-        "STREAM_HLS_PLAYBACK_TEMPLATE", "https://vergoboy.ir/hls/{key}/index.m3u8"
+        "STREAM_HLS_PLAYBACK_TEMPLATE", "https://vergoboy.ir/hls/live/{key}/index.m3u8"
     )
 
     # yt-dlp settings for YouTube and other supported sites.

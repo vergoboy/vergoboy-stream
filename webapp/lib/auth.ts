@@ -303,12 +303,20 @@ export function mayControl(user: AuthUser | null): boolean {
   return user?.role === "admin" || user?.can_control === true;
 }
 
+/** True when the user can manage the room they're currently in: admin, the
+ * room's owner, or a promoted controller. Drives speed control, media
+ * switching, adding media/streams and member moderation. */
+export function mayManage(user: AuthUser | null, isOwner = false): boolean {
+  return mayControl(user) || isOwner;
+}
+
 export function mayYoutube(user: AuthUser | null): boolean {
   return user?.role === "admin" || user?.youtube_allowed === true;
 }
 
-export function mayAdd(user: AuthUser | null): boolean {
+export function mayAdd(user: AuthUser | null, isOwner = false): boolean {
   if (!user) return false;
   if (user.role === "admin") return true;
+  if (!(user.can_control || isOwner)) return false;
   return user.upload_quota === -1 || user.uploads_used < user.upload_quota;
 }

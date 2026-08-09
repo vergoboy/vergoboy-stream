@@ -59,14 +59,19 @@ class RoomState:
         return {k: v for k, v in item.items() if not k.startswith("_")}
 
     def users_public_list(self):
-        """List of {name, avatar_url, in_voice} for every currently-connected
-        socket. `in_voice` is True only while that user is connected to the
-        voice room; the frontend renders the sofa from voice members."""
+        """List of {name, avatar_url, in_voice, id, can_control, is_owner} for
+        every currently-connected socket. `in_voice` is True only while that
+        user is connected to the voice room; the frontend renders the sofa
+        from voice members. `id`/`can_control`/`is_owner` back the room
+        owner/promoted member-management panel."""
         return [
             {
                 "name": u.get("name", "ناشناس"),
                 "avatar_url": u.get("avatar_url"),
                 "in_voice": bool(u.get("in_voice")),
+                "id": u.get("id"),
+                "can_control": bool(u.get("can_control")),
+                "is_owner": bool(u.get("is_owner")),
             }
             for u in self.users.values()
         ]

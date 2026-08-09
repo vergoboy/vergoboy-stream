@@ -56,6 +56,22 @@ export function notifyText(n: NotifyEvent, playlist: PlaylistItem[]): string {
       const item = idx >= 0 ? playlist[idx] : null;
       return `<b>${name}</b> «${escapeHtml(item ? item.title : "یک ویدیو")}» را برای پخش انتخاب کرد`;
     }
+    case "room_promote": {
+      const target = escapeHtml(String(extra.target || ""));
+      return target ? `<b>${name}</b> <b>${target}</b> را به کنترلر ارتقا داد` : `<b>${name}</b> یک کاربر را به کنترلر ارتقا داد`;
+    }
+    case "room_demote": {
+      const target = escapeHtml(String(extra.target || ""));
+      return target ? `<b>${name}</b> <b>${target}</b> را از کنترلری برداشت` : `<b>${name}</b> یک کاربر را از کنترلری برداشت`;
+    }
+    case "room_ban": {
+      const target = escapeHtml(String(extra.target || ""));
+      return target ? `<b>${name}</b> <b>${target}</b> را از اتاق اخراج کرد` : `<b>${name}</b> یک کاربر را از اتاق اخراج کرد`;
+    }
+    case "room_unban": {
+      const target = escapeHtml(String(extra.target || ""));
+      return target ? `<b>${name}</b> <b>${target}</b> را از لیست اخراج خارج کرد` : `<b>${name}</b> یک کاربر را از لیست اخراج خارج کرد`;
+    }
     default:
       return `${name} یک تغییر اعمال کرد`;
   }

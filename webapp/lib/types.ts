@@ -96,6 +96,25 @@ export interface PresenceUser {
   name: string;
   avatar_url: string | null;
   in_voice?: boolean;
+  id?: string;
+  can_control?: boolean;
+  is_owner?: boolean;
+}
+
+export interface RoomMember {
+  id: string | null;
+  name: string;
+  avatar_url: string | null;
+  can_control: boolean;
+  is_owner: boolean;
+  in_voice: boolean;
+}
+
+export interface RoomBannedUser {
+  id: string;
+  name: string;
+  display_name: string;
+  created_at?: string | null;
 }
 
 export interface NotifyEvent {
