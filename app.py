@@ -1427,9 +1427,8 @@ def api_youtube_formats():
         })
 
     formats.sort(key=lambda x: x["height"], reverse=True)
-    # only 360p is offered — filter to it, falling back to the lowest
-    # available height so the scan never returns an empty list.
-    formats = [f for f in formats if f["height"] == 360] or formats[-1:]
+    formats.insert(0, {"format_id": "__best__", "height": 9999, "ext": "mp4", "tbr": 0,
+                       "label": "بالاترین کیفیت"})
 
     return jsonify({
         "type": "video",
@@ -1655,7 +1654,7 @@ def api_add_youtube_playlist():
     if not entries:
         return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
 
-    fmt_selector = "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]/best"
+    fmt_selector = Config.YTDLP_FORMAT
     added = 0
     for e in entries:
         dup = False
