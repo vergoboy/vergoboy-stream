@@ -219,6 +219,12 @@ export function Player({
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!item || !v) return;
+    // live streams have no shared transport controls — a click can only
+    // (re)start local playback, never pause what everyone else watches
+    if (item.type === "live") {
+      if (v.paused) v.play().catch(() => {});
+      return;
+    }
     if (v.paused) requestControl("play", { at: v.currentTime || 0 });
     else requestControl("pause", { at: v.currentTime || 0 });
   }, [item, requestControl]);
@@ -420,7 +426,12 @@ export function Player({
     if (dubAudioRef.current && currentAudioTrackId) dubAudioRef.current.playbackRate = rate;
 
     function sync() {
-      if (!v || item?.type === "live") return;
+      if (!v) return;
+      // live streams: no shared position/pause — just keep local playback going
+      if (item?.type === "live") {
+        if (v.paused) v.play().catch(() => setBigPlay(true));
+        return;
+      }
       // Don't touch currentTime before the browser has parsed the metadata.
       if (v.readyState < 1) return;
       let expected = expectedPositionRef.current();
@@ -652,7 +663,7 @@ export function Player({
       switch (action) {
         case "playPause":
           e.preventDefault();
-          if (item) togglePlay();
+          if (item && item.type !== "live") togglePlay();
           return;
         case "seekBack":
           e.preventDefault();
@@ -699,7 +710,7 @@ export function Player({
       switch (e.key) {
         case "k":
           e.preventDefault();
-          if (item) togglePlay();
+          if (item && item.type !== "live") togglePlay();
           break;
         case "j":
           e.preventDefault();
@@ -792,13 +803,15 @@ export function Player({
               <GripVertical className="h-3.5 w-3.5 text-white/50" />
             </div>
             <span className="min-w-0 flex-1 truncate text-[11px] text-white/80">{item?.title || "پخش زنده"}</span>
-            <button
-              title={playing ? "توقف" : "پخش"}
-              onClick={togglePlay}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white"
-            >
-              {playing ? <Pause className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5 fill-current" />}
-            </button>
+            {item?.type !== "live" && (
+              <button
+                title={playing ? "توقف" : "پخش"}
+                onClick={togglePlay}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white"
+              >
+                {playing ? <Pause className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5 fill-current" />}
+              </button>
+            )}
             <button
               title="بستن پنجره‌ی شناور"
               onClick={() => setFloating(false)}
@@ -921,7 +934,35 @@ export function Player({
         )}
         </div>
 
-        {!processing && !floating && (
+        {!processing && !floating && item?.type === "live" && (
+        <div
+          dir="ltr"
+          className={`transition-opacity duration-300 ${
+            fullscreen
+              ? `absolute bottom-0 left-0 right-0 z-[20] p-4 sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent ${
+                  cursorHidden ? "pointer-events-none opacity-0" : "opacity-100"
+                }`
+              : "relative z-10 p-3.5 pb-4 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/90 rounded-b-3xl"
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-1">
+              <CtrlBtn title="بی‌صدا" onClick={() => setMuted((m) => !m)}>
+                {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </CtrlBtn>
+              <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
+            </div>
+            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item ? prettyTitle(item.title) : ""}</div>
+            <div className="flex items-center gap-1">
+              <CtrlBtn title="تمام‌صفحه (F)" onClick={toggleFullscreen}>
+                <Maximize className="w-4 h-4" />
+              </CtrlBtn>
+            </div>
+          </div>
+        </div>
+      )}
+
+        {!processing && !floating && item?.type !== "live" && (
         <div
           dir="ltr"
           className={`transition-opacity duration-300 ${
@@ -947,7 +988,6 @@ export function Player({
                 max={isFinite(totalDuration) ? totalDuration || 0 : (duration || 0)}
                 step={0.1}
                 value={dragging ? dragValueRef.current : curTime}
-                disabled={item?.type === "live"}
                 onMouseDown={() => setDragging(true)}
                 onTouchStart={() => setDragging(true)}
                 onChange={(e) => {

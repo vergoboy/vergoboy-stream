@@ -39,3 +39,9 @@ webapp-out/
 .npm-cache/
 .config/
 .stream_db.env
+
+# Server runtime — never commit
+cookies.txt
+hls-live/
+mediamtx/
+app.py.save

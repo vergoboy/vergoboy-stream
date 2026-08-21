@@ -102,6 +102,16 @@ function PageInner() {
     if (user?.current_room_id) setRoomCode(user.current_room_id);
   }, [user?.current_room_id]);
 
+  // Mark our pages so the browser screen-share feature can detect when one of
+  // them is being captured and drop its audio (prevents the room's own sound
+  // from feeding back into an external stream).
+  useEffect(() => {
+    const md = navigator.mediaDevices as MediaDevices & {
+      setCaptureHandleConfig?: (c: { handle?: string; permittedOrigins?: string[] }) => void;
+    };
+    md?.setCaptureHandleConfig?.({ handle: JSON.stringify({ app: "vergoboy-stream" }), permittedOrigins: ["*"] });
+  }, []);
+
   // Auto-join once logged in, if the invite code came from the URL.
   const joinedRef = useRef<string | null>(null);
   useEffect(() => {
@@ -268,7 +278,14 @@ function PageInner() {
               )}
               {activeTab === "add" && <AddVideoPanel myName={myName} />}
               {activeTab === "archive" && <ArchivePanel myName={myName} />}
-              {activeTab === "live" && <LivePanel myName={myName} />}
+              {activeTab === "live" && (
+                <LivePanel
+                  myName={myName}
+                  canAdd={canAdd}
+                  canManage={canManage}
+                  onLiveStarted={() => requestControl("select", { index: room.playlist.length })}
+                />
+              )}
               {activeTab === "subaudio" && <SubAudioPanel playlist={room.playlist} myName={myName} canUpload={canManage} />}
               {activeTab === "substyle" && <SubStylePanel value={subStyle} onChange={setSubStyle} />}
               {activeTab === "chat" && <ChatPanel messages={chatMessages} myName={myName} onSend={sendChat} />}
