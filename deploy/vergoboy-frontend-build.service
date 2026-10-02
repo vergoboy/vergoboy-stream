@@ -1,0 +1,25 @@
+[Unit]
+Description=vergoboy.ir — Stream frontend build (Next.js static export)
+# oneshot + RemainAfterExit: only runs when explicitly restarted (deploy time).
+# vergoboy-stream.service Wants/After this unit for ordering during startup, so
+# re-running this never stops the backend.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/stream/webapp
+Environment="HOME=/opt/stream"
+Environment="npm_config_cache=/opt/stream/.npm-cache"
+Environment="NEXT_PUBLIC_BUILD_TARGET=web"
+
+# Reproducible install from the lockfile, then build, then publish the static
+# export where Nginx serves it from.
+ExecStart=/usr/bin/npm ci --no-audit --no-fund
+ExecStart=/usr/bin/npm run build
+ExecStart=/bin/mkdir -p /opt/stream/webapp-out
+ExecStart=/usr/bin/rsync -a --delete /opt/stream/webapp/out/ /opt/stream/webapp-out/
+
+[Install]
+WantedBy=multi-user.target

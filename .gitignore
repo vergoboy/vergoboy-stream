@@ -45,3 +45,7 @@ cookies.txt
 hls-live/
 mediamtx/
 app.py.save
+
+# Ad-hoc editor backups
+*.bak
+*.bak[0-9]*
