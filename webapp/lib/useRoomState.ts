@@ -17,6 +17,8 @@ const EMPTY_ROOM: RoomStateSync = {
   playing: false,
   position: 0,
   rate: 1,
+  shuffle: false,
+  shuffle_order: [],
   server_time: Date.now() / 1000,
   online: 0,
 };
@@ -26,6 +28,7 @@ export interface ControlExtra {
   to?: number;
   rate?: number;
   index?: number;
+  on?: boolean;
 }
 
 interface UseRoomStateOptions {
@@ -129,13 +132,14 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
   }, [room.playing, room.position, room.rate]);
 
   const requestControl = useCallback(
-    (action: "play" | "pause" | "seek" | "rate" | "select", extra: ControlExtra = {}) => {
-      // play/pause/seek are open to everyone; rate/select (changing the shared
-      // speed or switching the media everyone watches) need a room manager:
-      // an admin/promoted controller, or the owner of the room we're in.
+    (action: "play" | "pause" | "seek" | "rate" | "select" | "shuffle", extra: ControlExtra = {}) => {
+      // play/pause/seek are open to everyone; rate/select/shuffle (changing
+      // the shared speed, the media everyone watches, or the playback order)
+      // need a room manager: an admin/promoted controller, or the owner of
+      // the room we're in.
       // The backend enforces this too — this guard just avoids the chatter.
       const isOwner = myId ? presenceUsers.some((u) => u.id === myId && u.is_owner) : false;
-      if ((action === "rate" || action === "select") && !canControl && !isOwner) return;
+      if ((action === "rate" || action === "select" || action === "shuffle") && !canControl && !isOwner) return;
       // Optimistic local update so the UI feels instant.
       setRoom((r) => {
         const next = { ...r };
@@ -164,6 +168,10 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
             next.current_index = extra.index ?? null;
             next.position = 0;
             next.playing = false;
+            recvLocalRef.current = now;
+            break;
+          case "shuffle":
+            next.shuffle = Boolean(extra.on);
             recvLocalRef.current = now;
             break;
         }

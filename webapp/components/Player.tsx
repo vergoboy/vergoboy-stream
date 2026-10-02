@@ -22,6 +22,7 @@ import {
   Settings,
   SkipBack,
   SkipForward,
+  Shuffle,
   GripVertical,
   X,
   TriangleAlert,
@@ -59,8 +60,11 @@ export function Player({
   canSpeed,
   canPrev,
   canNext,
+  shuffle,
+  canShuffle,
   onPrev,
   onNext,
+  onToggleShuffle,
   onGoToAdd,
   onGoToSubStyle,
   onOpenShortcuts,
@@ -70,7 +74,7 @@ export function Player({
   playing: boolean;
   rate: number;
   expectedPosition: () => number;
-  requestControl: (action: "play" | "pause" | "seek" | "rate" | "select", extra?: Record<string, number>) => void;
+  requestControl: (action: "play" | "pause" | "seek" | "rate" | "select" | "shuffle", extra?: Record<string, number>) => void;
   transcodeProgress: Record<string, TranscodeProgress>;
   latestNotify: NotifyEvent | null;
   myName: string;
@@ -78,8 +82,11 @@ export function Player({
   canSpeed: boolean;
   canPrev: boolean;
   canNext: boolean;
+  shuffle: boolean;
+  canShuffle: boolean;
   onPrev: () => void;
   onNext: () => void;
+  onToggleShuffle: () => void;
   onGoToAdd: () => void;
   onGoToSubStyle: () => void;
   onOpenShortcuts: () => void;
@@ -225,8 +232,18 @@ export function Player({
       if (v.paused) v.play().catch(() => {});
       return;
     }
-    if (v.paused) requestControl("play", { at: v.currentTime || 0 });
-    else requestControl("pause", { at: v.currentTime || 0 });
+    // VOD: start/pause local playback INSIDE the user click gesture, then
+    // tell the server so the shared clock follows. Browsers block play()
+    // calls made from timers/effects (autoplay policy), so playback would
+    // never start if we only emitted the control request and waited for the
+    // 6s sync loop to call v.play() on our behalf.
+    if (v.paused) {
+      v.play().catch(() => setBigPlay(true));
+      requestControl("play", { at: v.currentTime || 0 });
+    } else {
+      v.pause();
+      requestControl("pause", { at: v.currentTime || 0 });
+    }
   }, [item, requestControl]);
 
   // ---- load / teardown source whenever the underlying item id changes ----
@@ -1021,6 +1038,9 @@ export function Player({
               </CtrlBtn>
               <CtrlBtn title="آیتم بعدی (N)" onClick={onNext} disabled={!canNext}>
                 <SkipForward className="w-4 h-4" />
+              </CtrlBtn>
+              <CtrlBtn title="پخش تصادفی" onClick={onToggleShuffle} disabled={!canShuffle}>
+                <Shuffle className={`w-4 h-4 ${shuffle ? "text-[color:var(--color-amber)]" : ""}`} />
               </CtrlBtn>
               <CtrlBtn title="۱۰ ثانیه عقب (کلید ◄)" onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
                 <RotateCcw className="w-4 h-4" />

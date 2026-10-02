@@ -30,6 +30,8 @@ class RoomState:
         self.playing = False
         self.position = 0.0       # ثانیه - آخرین موقعیت معتبر شناخته‌شده
         self.rate = 1.0
+        self.shuffle = False
+        self.shuffle_order = []          # shuffled order of playlist item IDs
         self.updated_at = time.time()
         self.users = {}           # sid -> {"name": ..., "avatar_url": ...}
         self._load()
@@ -47,6 +49,8 @@ class RoomState:
             "playing": self.playing,
             "position": self.current_position(),
             "rate": self.rate,
+            "shuffle": self.shuffle,
+            "shuffle_order": list(self.shuffle_order),
             "server_time": time.time(),
             "online": len(self.users),
         }
@@ -91,6 +95,31 @@ class RoomState:
         self.position = max(0.0, to)
         self.updated_at = time.time()
 
+    def set_shuffle(self, on: bool):
+        import random as _r
+        on = bool(on)
+        self.shuffle = on
+        if on:
+            ids = [it["id"] for it in self.playlist]
+            _r.shuffle(ids)
+            self.shuffle_order = ids
+            # keep the currently-playing item first (if it exists) so
+            # playback continues naturally from where the room is.
+            if self.current_index is not None and 0 <= self.current_index < len(self.playlist):
+                cur = self.playlist[self.current_index].get("id")
+                if cur in self.shuffle_order:
+                    self.shuffle_order.remove(cur)
+                    self.shuffle_order.insert(0, cur)
+        else:
+            self.shuffle_order = []
+        self.updated_at = time.time()
+
+    def shuffled_index_of(self, item_id):
+        try:
+            return self.shuffle_order.index(item_id)
+        except ValueError:
+            return -1
+
     def set_rate(self, rate):
         # برای پیوستگی موقعیت، قبل از تغییر نرخ، موقعیت لحظه‌ای را snapshot می‌کنیم
         self.position = self.current_position()
@@ -108,6 +137,8 @@ class RoomState:
     # ---------- پلی‌لیست ----------
     def add_item(self, item):
         self.playlist.append(item)
+        if self.shuffle:
+            self.shuffle_order.append(item["id"])
         if self.current_index is None:
             self.current_index = len(self.playlist) - 1
 
@@ -116,6 +147,8 @@ class RoomState:
         if idx is None:
             return
         self.playlist.pop(idx)
+        if self.shuffle and item_id in self.shuffle_order:
+            self.shuffle_order.remove(item_id)
         if self.current_index is None:
             return
         if idx == self.current_index:
@@ -146,6 +179,8 @@ class RoomState:
                         "current_index": self.current_index,
                         "position": self.position,
                         "rate": self.rate,
+                        "shuffle": self.shuffle,
+                        "shuffle_order": self.shuffle_order,
                     },
                     f,
                     ensure_ascii=False,
@@ -164,6 +199,8 @@ class RoomState:
                 self.current_index = d.get("current_index")
                 self.position = d.get("position", 0.0)
                 self.rate = d.get("rate", 1.0)
+                self.shuffle = bool(d.get("shuffle", False))
+                self.shuffle_order = d.get("shuffle_order", []) or []
                 self._migrate_playlist()
         except Exception as e:
             print("[state] load error:", e)

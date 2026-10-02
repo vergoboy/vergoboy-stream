@@ -88,6 +88,8 @@ export interface RoomStateSync {
   playing: boolean;
   position: number;
   rate: number;
+  shuffle: boolean;
+  shuffle_order: string[];
   server_time: number;
   online: number;
 }

@@ -3256,11 +3256,11 @@ def on_control(data):
         return
     data = data or {}
     action = data.get("action")
-    if action not in ("play", "pause", "seek", "rate", "select"):
+    if action not in ("play", "pause", "seek", "rate", "select", "shuffle"):
         return
     # play/pause/seek are open to everyone in the room; changing the shared
     # speed or switching the selected media needs a room manager.
-    if action in ("rate", "select") and not _may_control(user):
+    if action in ("rate", "select", "shuffle") and not _may_control(user):
         emit("notify", {
             "type": "control_denied", "name": user.username,
             "ts": time.time(),
@@ -3281,6 +3281,8 @@ def on_control(data):
             rs.set_rate(float(data.get("rate", 1.0)))
         elif action == "select":
             rs.select_item(int(data.get("index")))
+        elif action == "shuffle":
+            rs.set_shuffle(bool(data.get("on", not rs.shuffle)))
         else:
             return
         safe_save(rs)
@@ -3329,12 +3331,47 @@ def on_chat_send(data):
     socketio.emit("chat_message", msg, to=_room_channel(code))
 
 
+def _resume_interrupted_encodes():
+    """Re-kicks encodes that were left in status "queued" when the process
+    stopped (a crash, deploy, or restart mid-encode). Rooms materialize
+    lazily, so scan the per-room JSON on disk and hand each item back to
+    start_item_encoding — which re-probes, rebuilds the rendition ladder and
+    spawns the default rendition's encode. Purely best-effort: anything not
+    in "queued" (completed, error, pending…) is left alone."""
+    for fname in sorted(os.listdir(os.path.join(Config.DATA_DIR, "rooms"))):
+        if not fname.endswith(".json"):
+            continue
+        code = fname[:-5]
+        try:
+            with open(os.path.join(Config.DATA_DIR, "rooms", fname), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as e:
+            log_debug(f"resume: skip {fname} ({e})")
+            continue
+        count = 0
+        for it in data.get("playlist", []) or []:
+            if it.get("status") != "queued":
+                continue
+            source = it.get("_source")
+            if not source:
+                continue
+            rs = rooms.get(code)
+            item = rs.find_item(it.get("id"))
+            if item is None:
+                continue
+            gevent.spawn(start_item_encoding, it["id"], source, it.get("added_by") or "ناشناس")
+            count += 1
+        if count:
+            log_debug(f"resume: {count} interrupted encode(s) re-queued in room {code}")
+
+
 if __name__ == "__main__":
     try:
         dbmod.init_db()
         log_debug("Database tables ready.")
     except Exception as e:
         log_debug(f"[CRITICAL] Database init failed: {e}")
+    gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
     from gevent import pywsgi
     from geventwebsocket.handler import WebSocketHandler

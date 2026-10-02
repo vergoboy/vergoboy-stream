@@ -173,6 +173,23 @@ function PageInner() {
     [room.current_index, room.playlist]
   );
 
+  // pick the next/prev playlist index. In shuffle mode the items are followed
+  // in the room's shuffled order (which wraps around); otherwise it's a plain
+  // +/-1 step clamped by the caller's canPrev/canNext.
+  function shuffleStep(room: { playlist: { id: string }[]; shuffle: boolean; shuffle_order: string[]; current_index: number | null }, dir: 1 | -1): number {
+    const ci = room.current_index;
+    if (ci === null) return 0;
+    if (room.shuffle && room.shuffle_order.length > 0) {
+      const cur = room.playlist[ci]?.id;
+      const pos = room.shuffle_order.indexOf(cur);
+      const N = room.shuffle_order.length;
+      const nid = room.shuffle_order[(((pos % N) + N) + dir) % N];
+      const idx = room.playlist.findIndex((p) => p.id === nid);
+      return idx >= 0 ? idx : 0;
+    }
+    return Math.max(0, ci + dir);
+  }
+
   const prevChatLenRef = useRef(0);
   useEffect(() => {
     const grew = chatMessages.length - prevChatLenRef.current;
@@ -236,10 +253,13 @@ function PageInner() {
             myName={myName}
             subStyle={subStyle}
             canSpeed={canManage}
-            canPrev={canManage && room.current_index !== null && room.current_index > 0}
-            canNext={canManage && room.current_index !== null && room.current_index < room.playlist.length - 1}
-            onPrev={() => canManage && room.current_index !== null && requestControl("select", { index: room.current_index - 1 })}
-            onNext={() => canManage && room.current_index !== null && requestControl("select", { index: room.current_index + 1 })}
+            canPrev={canManage && room.current_index !== null && (room.shuffle ? room.playlist.length > 1 : room.current_index > 0)}
+            canNext={canManage && room.current_index !== null && (room.shuffle ? room.playlist.length > 1 : room.current_index < room.playlist.length - 1)}
+            onPrev={() => canManage && room.current_index !== null && requestControl("select", { index: shuffleStep(room, -1) })}
+            onNext={() => canManage && room.current_index !== null && requestControl("select", { index: shuffleStep(room, 1) })}
+            shuffle={room.shuffle}
+            canShuffle={canManage && room.playlist.length > 1}
+            onToggleShuffle={() => requestControl("shuffle", { on: !room.shuffle })}
             onGoToAdd={() => setActiveTab("add")}
             onGoToSubStyle={() => setActiveTab("substyle")}
             onOpenShortcuts={() => setShortcutsOpen(true)}
