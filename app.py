@@ -308,6 +308,105 @@ def _check_link_ok(url: str, timeout: int = 15) -> bool:
         return False
 
 
+_DIRECT_MEDIA_EXT = {
+    ".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov",
+    ".mp3", ".aac", ".mka", ".ogg", ".flac", ".wav",
+}
+_RESOLVE_VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov")
+
+_UA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    ),
+}
+
+
+def _is_direct_media_url(url: str) -> bool:
+    ext = url_ext(url)
+    return "." + ext in _DIRECT_MEDIA_EXT if ext else False
+
+
+def _resolve_media_url_remote(url: str, timeout: int = 15) -> str:
+    """Turns a user-pasted link into a URL ffmpeg can actually read.
+
+    Links pasted into "add video" sometimes point at a folder or a directory
+    listing page instead of the media file itself — e.g. the verGoBoy file
+    manager serves its /files/data/… folder URLs as a redirect to the UI. Such
+    URLs can never be encoded, so before queueing an item we inspect the
+    target and, when it turns out to be an HTML/directory page, pick the first
+    playable media file's direct URL from inside it. If nothing resolves, the
+    original URL is returned so the normal "link is broken" flow still applies.
+    """
+    if _is_direct_media_url(url):
+        return url
+
+    html = None
+    try:
+        req = urllib.request.Request(url, headers=_UA_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if ctype.startswith(("video/", "audio/")) or "matroska" in ctype:
+                return url
+            if not ctype.startswith(("text/html", "application/xhtml")):
+                return url
+            html = resp.read().decode("utf-8", errors="ignore")[:1_000_000]
+    except Exception:
+        return url
+
+    # 1) plain HTML directory page → first direct media link
+    if html:
+        for u in _re.findall(r'href="(https?://[^"]+)"', html, _re.I):
+            if u.lower().split("?")[0].endswith(_RESOLVE_VIDEO_EXT):
+                return u
+
+    # 2) verGoBoy-style file manager: /files/data/<folder> is a directory that
+    #    redirects to the UI, so list the folder via its API and take the video.
+    m = _re.match(r"^(https?://[^/]+)/files/data/(.*)$", url)
+    if m:
+        base, folder = m.group(1), urllib.parse.unquote(m.group(2))
+        list_url = f"{base}/files/api/list?p=" + urllib.parse.quote(folder, safe="/")
+        try:
+            req = urllib.request.Request(list_url, headers=_UA_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            for it in (data or {}).get("items", []) or []:
+                if it.get("type") != "file":
+                    continue
+                name = it.get("name") or ""
+                if not name.lower().endswith(_RESOLVE_VIDEO_EXT):
+                    continue
+                segs = [urllib.parse.quote(s, safe="")
+                        for s in (folder.strip("/") + "/" + name).split("/")]
+                return base + "/files/data/" + "/".join(segs)
+        except Exception:
+            pass
+
+    return url
+
+def _local_mirror(url: str) -> str:
+    """If `url` is a verGoBoy file URL that also exists on this server's local
+    disk (/opt/files/data/...), return the local path. ffmpeg then reads the
+    file from disk instead of over HTTP, so a flaky/overloaded HTTP fetch can
+    never silently truncate a long encode."
+    """
+    if not isinstance(url, str) or not url.startswith("http"):
+        return url
+    m = _re.match(r"^https?://[^/]+/files/data/(.*)$", url)
+    if not m:
+        return url
+    rel = urllib.parse.unquote(m.group(1))
+    local = os.path.join("/opt/files/data", rel)
+    if os.path.exists(local) and os.path.isfile(local):
+        return local
+    return url
+
+
+def _resolve_media_url(url: str, timeout: int = 15) -> str:
+    return _local_mirror(_resolve_media_url_remote(url, timeout=timeout))
+
+
+
 MIN_FREE_MB_FOR_TRANSCODE = 500
 TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
 LANG_LABELS = {
@@ -468,7 +567,7 @@ def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vb
         "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
         "-g", "60", "-sc_threshold", "0",
         "-force_key_frames", "expr:gte(t,n_forced*4)",
-        "-c:a", "aac", "-b:a", abr,
+        "-c:a", "aac", "-ac", "2", "-b:a", abr,
         "-f", "hls",
         "-hls_time", str(Config.HLS_SEGMENT_SECONDS),
         "-hls_list_size", "0",
@@ -746,6 +845,12 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
                 detail = lines[-1] if lines else f"ffmpeg exit code {returncode}"
             fail(f"تبدیل ({label}) ناموفق بود: {detail}")
             return
+
+        if dur and dur > 0:
+            actual = _get_duration_s(_ffprobe_source(os.path.join(rendition_dir, "index.m3u8"), timeout=30))
+            if actual and actual < dur - 5:
+                fail(f"تبدیل ({label}) ناقص بود: فقط {int(actual)} از {int(dur)} ثانیه تولید شد (منبع ناقص/قطع شد).")
+                return
 
         item = set_rendition_status("complete")
         if not item:
@@ -1140,6 +1245,7 @@ def api_archive_files():
 def _add_url_item(url: str, title: str, name: str, room_code: str = None,
                   added_by_user_id: str = None):
     """Shared logic for the single add-url endpoint and the bulk archive add."""
+    url = _resolve_media_url(url)
     item_id = new_id()
     is_hls = _is_hls(url)
     needs_encode = not is_hls
