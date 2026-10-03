@@ -259,6 +259,23 @@ class PartialCleanup(unittest.TestCase):
     def test_missing_root_is_not_an_error(self):
         self.assertEqual(cleanup_orphaned_partials(os.path.join(self.root, "nope")), [])
 
+    def test_renditions_are_cleaned_too(self):
+        """Rendition partials nest one level deeper than item partials
+        (<item>/<label>.partial), and a top-level scan would miss every one."""
+        nested = os.path.join(self.root, "item_a", "720p" + PARTIAL_SUFFIX)
+        os.makedirs(nested)
+        with open(os.path.join(nested, "index.m3u8"), "w") as fh:
+            fh.write("#EXTM3U")
+        keep = os.path.join(self.root, "item_a", "480p")
+        os.makedirs(keep)
+        with open(os.path.join(keep, "index.m3u8"), "w") as fh:
+            fh.write("#EXTM3U")
+
+        removed = cleanup_orphaned_partials(self.root)
+        self.assertIn(nested, removed)
+        self.assertFalse(os.path.exists(nested))
+        self.assertTrue(os.path.exists(os.path.join(keep, "index.m3u8")))
+
 
 # ── preflight ────────────────────────────────────────────────────────────────
 

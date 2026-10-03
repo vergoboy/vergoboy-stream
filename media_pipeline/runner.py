@@ -340,29 +340,38 @@ def _free_bytes(path: str) -> int:
 
 
 def cleanup_orphaned_partials(root: str) -> list[str]:
-    """Delete leftover ``*.partial`` directories under ``root``.
+    """Delete leftover ``*.partial`` directories anywhere under ``root``.
 
-    Called on boot: a crash or ``kill -9`` mid-encode leaves a partial
-    directory behind, and nothing will ever finish it.
+    Called on boot: a crash or ``kill -9`` mid-encode leaves a partial directory
+    behind, and nothing will ever finish it. The walk is recursive because
+    renditions nest (``<item_id>/<label>.partial``) while items do not
+    (``<item_id>.partial``), and both kinds can be orphaned.
     """
     removed: list[str] = []
     if not root or not os.path.isdir(root):
         return removed
-    for name in os.listdir(root):
-        if not name.endswith(PARTIAL_SUFFIX):
-            continue
-        path = os.path.join(root, name)
-        try:
-            if os.path.isdir(path):
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                os.remove(path)
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        # Prune as we go so the walk never descends into something we are about
+        # to delete.
+        for name in list(dirnames):
+            if not name.endswith(PARTIAL_SUFFIX):
+                continue
+            path = os.path.join(dirpath, name)
+            shutil.rmtree(path, ignore_errors=True)
+            dirnames.remove(name)
             removed.append(path)
-        except OSError:
-            continue
+        for name in filenames:
+            if not name.endswith(PARTIAL_SUFFIX):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                os.remove(path)
+                removed.append(path)
+            except OSError:
+                continue
     if removed:
-        log.warning("removed %d orphaned %s director%s at boot",
-                    len(removed), PARTIAL_SUFFIX, "y" if len(removed) == 1 else "ies")
+        log.warning("removed %d orphaned %s path(s) at boot: %s",
+                    len(removed), PARTIAL_SUFFIX, ", ".join(removed[:5]))
     return removed
 
 

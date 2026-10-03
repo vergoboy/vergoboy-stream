@@ -23,6 +23,15 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import selectinload
 
 from config import Config
+from media_pipeline import (
+    Attempt,
+    EncodeError,
+    EncodeRequest,
+    EncodeRunner,
+    ErrorKind,
+    build_fallback_chain,
+    cleanup_orphaned_partials,
+)
 import archive_scraper
 import db as dbmod
 from db import User as DBUser
@@ -96,6 +105,12 @@ socketio = SocketIO(
 )
 
 ENCODE_SEMAPHORE = gevent.lock.BoundedSemaphore(Config.MAX_CONCURRENT_ENCODES)
+
+# One runner for the whole process. It owns the hardware circuit breaker,
+# which is deliberately global: a GPU that has stopped working is a fact
+# about the machine, not about one room, and per-call breakers would have
+# every room rediscover it on its own.
+ENCODE_RUNNER = EncodeRunner()
 
 
 def allowed(filename: str, exts: set) -> bool:
@@ -446,7 +461,6 @@ LANG_LABELS = {
     "ar": "عربی", "ara": "عربی",
 }
 
-_FFMPEG_DURATION_RE = _re.compile(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -630,79 +644,114 @@ def _rewrite_master_playlist(out_dir: str, ready_renditions: list, aspect: float
     os.replace(tmp_path, final_path)
 
 
-def _run_progressive_ffmpeg(cmd: list, item_id: str, duration_s: float, label: str, on_ready=None, timeout: int = 10800):
-    """Runs one rendition's ffmpeg command with -progress pipe:1, emitting
-    real transcode_progress events (real % from ffprobe duration — this is
-    the fix for the old "tick every 5MB" heuristic that only applied to
-    sources without a Content-Length header). Fires `on_ready` exactly once,
-    the moment enough of the timeline is encoded for safe early playback."""
-    progress_cmd = [cmd[0]] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
-    log_debug(f"FFmpeg [{item_id}/{label}] start: {' '.join(progress_cmd[:4])} ...")
+def _run_progressive_ffmpeg(cmd: list, item_id: str, duration_s: float, label: str,
+                            on_ready=None, timeout: int = 10800,
+                            output_paths=None):
+    """Runs one rendition's ffmpeg command, emitting real transcode_progress
+    events (real % from the real duration — never a byte-count heuristic) and
+    firing `on_ready` exactly once, the moment enough of the timeline is encoded
+    for safe early playback.
 
-    proc = subprocess.Popen(progress_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    Now backed by media_pipeline's EncodeRunner, which owns the parts that were
+    previously missing here: a stall watchdog (a wedged ffmpeg used to hold its
+    semaphore until the hard timeout), a duration-scaled timeout, a process
+    group killed as a group (proc.kill() left orphans holding the output), a
+    bounded stderr buffer (the old version accumulated the whole log in memory
+    and then handed it to the client), typed failures, and output written to a
+    ``.partial`` directory that is renamed into place only on success.
 
-    stderr_chunks = []
-    last_pct = -1
+    The signature, the emitted event payloads and the (returncode, stderr) shape
+    are unchanged, so the swap is not a behavioural change for the frontend —
+    except that a failure is now reported as a translated message instead of
+    ffmpeg's last stderr line.
+    """
+    output_paths = tuple(output_paths or ())
+    last_pct = [-1]
     ready_fired = [False]
-    _duration = [duration_s]
+    duration_holder = [duration_s or 0.0]
 
-    def _read_stderr():
-        for chunk in proc.stderr:
-            stderr_chunks.append(chunk)
-            if _duration[0] == 0:
-                text = chunk.decode(errors="ignore")
-                m = _FFMPEG_DURATION_RE.search(text)
-                if m:
-                    h, mi, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
-                    _duration[0] = h * 3600 + mi * 60 + s
-                    log_debug(f"Duration extracted from ffmpeg stderr: {_duration[0]:.1f}s")
-
-    gevent.spawn(_read_stderr)
-
-    deadline = time.time() + timeout
-    start_time = time.time()
-    for raw_line in proc.stdout:
-        if time.time() > deadline:
-            log_debug(f"FFmpeg [{item_id}/{label}] hit timeout deadline — killing.")
-            proc.kill()
-            break
-        line = raw_line.decode(errors="ignore").strip()
-        if line.startswith("out_time_ms="):
-            try:
-                val = line.split("=", 1)[1]
-                if val == "N/A":
-                    continue
-                elapsed_s = int(val) / 1_000_000
-                dur = _duration[0]
-                pct = min(99, int(elapsed_s / dur * 100)) if dur > 0 else min(90, int(elapsed_s / 3))
-                if not ready_fired[0] and elapsed_s >= Config.HLS_READY_AFTER_SECONDS:
-                    ready_fired[0] = True
-                    if on_ready:
-                        try:
-                            on_ready(elapsed_s)
-                        except Exception as e:
-                            log_debug(f"on_ready callback error: {e}")
-                if pct != last_pct or ready_fired[0]:
-                    last_pct = pct
-                    socketio.emit("transcode_progress", {
-                        "id": item_id, "label": label, "pct": pct,
-                        "encoded_seconds": round(elapsed_s, 1),
-                        "duration": round(dur, 1) if dur > 0 else None,
-                        "ready": ready_fired[0],
-                    })
-            except (ValueError, ZeroDivisionError):
-                pass
-
-    proc.wait()
-    log_debug(f"FFmpeg [{item_id}/{label}] exited code={proc.returncode} in {time.time()-start_time:.1f}s")
-    if proc.returncode == 0:
+    def emit(elapsed_s):
+        """Same payload shape the Player already expects."""
+        dur = duration_holder[0]
+        pct = min(99, int(elapsed_s / dur * 100)) if dur > 0 else min(90, int(elapsed_s / 3))
         socketio.emit("transcode_progress", {
-            "id": item_id, "label": label, "pct": 100,
-            "encoded_seconds": round(_duration[0], 1) if _duration[0] else None,
-            "duration": round(_duration[0], 1) if _duration[0] else None,
-            "ready": True, "complete": True,
+            "id": item_id, "label": label, "pct": pct,
+            "encoded_seconds": round(elapsed_s, 1),
+            "duration": round(dur, 1) if dur > 0 else None,
+            "ready": ready_fired[0],
         })
-    return proc.returncode, b"".join(stderr_chunks)
+        last_pct[0] = pct
+
+    def on_progress(ev):
+        dur = ev.get("duration") or duration_holder[0]
+        if dur:
+            duration_holder[0] = dur
+        elapsed = ev.get("encoded_seconds") or 0.0
+        pct = min(99, int(elapsed / duration_holder[0] * 100)) if duration_holder[0] > 0 \
+            else min(90, int(elapsed / 3))
+        # Emit on a changed percentage, exactly as before, so the event volume
+        # on the socket does not change just because the runner reports more
+        # often than the old loop did.
+        if pct != last_pct[0] or ready_fired[0]:
+            emit(elapsed)
+
+    def on_ready_tick(elapsed_s):
+        duration_holder[0] = duration_holder[0] or duration_s or 0.0
+        ready_fired[0] = True
+        emit(elapsed_s)
+        if on_ready:
+            try:
+                on_ready(elapsed_s)
+            except Exception as e:
+                log_debug(f"on_ready callback error: {e}")
+
+    chain = build_fallback_chain(Attempt(
+        argv=cmd,
+        label=label,
+        output_paths=output_paths,
+    ))
+
+    log_debug(f"FFmpeg [{item_id}/{label}] start: {' '.join(cmd[:4])} ...")
+    started = time.time()
+    result = ENCODE_RUNNER.run(
+        EncodeRequest(
+            item_id=item_id, label=label, duration_s=duration_s or 0.0,
+            # The runner derives the partial directory from this.
+            output_dir=os.path.dirname(output_paths[-1]) if output_paths else "",
+            on_progress=on_progress,
+            on_ready=on_ready_tick,
+            ready_after_s=Config.HLS_READY_AFTER_SECONDS,
+            log_prefix=f"{item_id}/{label}",
+        ),
+        chain,
+    )
+    elapsed = time.time() - started
+    log_debug(f"FFmpeg [{item_id}/{label}] finished ok={result.ok} in {elapsed:.1f}s "
+              f"history={result.history}")
+
+    if not result.ok:
+        err = result.error or EncodeError(ErrorKind.UNKNOWN, "no attempt succeeded")
+        # The client gets the translated sentence only. `detail` and the stderr
+        # tail stay in the log — the old code put ffmpeg's own wording (and
+        # sometimes a filesystem path) straight into item["error"], which is
+        # broadcast to every viewer in the room.
+        socketio.emit("transcode_error", err.client_payload(item_id))
+        log_debug(f"FFmpeg [{item_id}/{label}] failed kind={err.kind.value} "
+                  f"detail={err.detail} history={result.history}")
+        return result.returncode or -1, (err.stderr_tail or err.detail).encode(), err
+
+    total = result.duration or duration_holder[0] or duration_s or 0.0
+    # Reproduces the old completion event field for field. It is deliberately
+    # not routed through emit(): that clamps to 99 and reports the real
+    # ready_fired flag, and on a clip shorter than HLS_READY_AFTER_SECONDS the
+    # old code still sent pct=100/ready=true here. The Player keys off this.
+    socketio.emit("transcode_progress", {
+        "id": item_id, "label": label, "pct": 100,
+        "encoded_seconds": round(total, 1) if total else None,
+        "duration": round(total, 1) if total else None,
+        "ready": True, "complete": True,
+    })
+    return 0, b"", None
 
 
 def _extract_subtitles_async(item_id: str, source: str, sub_streams: list, requester_name: str):
@@ -865,16 +914,26 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
                                  id=item_id, title=title, label=label)
 
         cmd = _build_single_rendition_cmd(source, rendition_dir, height, vbr, abr)
-        returncode, stderr_bytes = _run_progressive_ffmpeg(cmd, item_id, dur, label, on_ready=on_ready)
+        # The runner needs to know which arguments are outputs so it can build
+        # into a .partial directory and rename on success. It matches them by
+        # exact string, so it can never mistake the input for an output.
+        output_paths = (
+            os.path.join(rendition_dir, "seg_%03d.ts"),
+            os.path.join(rendition_dir, "index.m3u8"),
+        )
+        returncode, stderr_bytes, encode_error = _run_progressive_ffmpeg(
+            cmd, item_id, dur, label, on_ready=on_ready, output_paths=output_paths,
+        )
 
         if returncode != 0:
-            stderr_txt = stderr_bytes.decode(errors="ignore")
-            if "No space left" in stderr_txt:
-                detail = "فضای دیسک سرور در حین تبدیل تمام شد"
-            else:
-                lines = stderr_txt.strip().splitlines()
-                detail = lines[-1] if lines else f"ffmpeg exit code {returncode}"
-            fail(f"تبدیل ({label}) ناموفق بود: {detail}")
+            # The translated message goes to viewers; ffmpeg's own wording stays
+            # in the log. Previously the last stderr line was put straight into
+            # item["error"], which is broadcast to the whole room.
+            err = encode_error or EncodeError(ErrorKind.UNKNOWN, "no attempt succeeded")
+            tail = (stderr_bytes or b"").decode(errors="ignore")[-1500:]
+            log_debug(f"Encode failure [{item_id}/{label}] kind={err.kind.value} "
+                      f"detail={err.detail} stderr_tail={tail}")
+            fail(f"تبدیل ({label}) ناموفق بود: {err.user_message}")
             return
 
         if dur and dur > 0:
@@ -3504,6 +3563,15 @@ if __name__ == "__main__":
     Config.validate()
     dbmod.init_db()
     log_debug("Database tables ready.")
+    # A crash or `kill -9` mid-encode leaves a .partial directory behind and
+    # nothing will ever finish it. Clear them before anything else looks at the
+    # HLS tree, so a stale partial can never be served or counted as output.
+    try:
+        orphans = cleanup_orphaned_partials(Config.HLS_DIR)
+        if orphans:
+            log_debug(f"Boot cleanup removed {len(orphans)} orphaned partial encode(s).")
+    except Exception as e:
+        log_debug(f"Boot cleanup of partial encodes failed: {e}")
     gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
     from gevent import pywsgi
