@@ -9,6 +9,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -16,7 +17,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory
+from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import selectinload
 
 from config import Config
@@ -30,6 +33,21 @@ from srt_to_vtt import convert_srt_to_vtt
 
 def log_debug(msg):
     print(f"[DEBUG_STREAM] {msg}", file=sys.stderr, flush=True)
+
+
+def _safe_source_for_log(source: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(source)
+        if not parsed.scheme or not parsed.netloc:
+            return source
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    except ValueError:
+        return "<invalid media URL>"
 
 
 def safe_save(room_obj):
@@ -54,16 +72,29 @@ except ImportError as e:
 app = Flask(__name__, static_url_path="/stream/static", template_folder="templates")
 app.config.from_object(Config)
 
+CORS(
+    app,
+    resources={
+        r"/stream/api/*": {
+            "origins": list(Config.CORS_ORIGINS),
+            "supports_credentials": False,
+            "methods": ["GET", "POST", "OPTIONS", "DELETE"],
+        },
+        r"/stream/media/*": {
+            "origins": list(Config.CORS_ORIGINS),
+            "supports_credentials": False,
+            "methods": ["GET", "OPTIONS"],
+        },
+    },
+)
+
 socketio = SocketIO(
     app,
     path="stream/socket.io",
-    cors_allowed_origins="*",
+    cors_allowed_origins=list(Config.CORS_ORIGINS),
     async_mode="gevent",
 )
 
-# Limits how many ffmpeg rendition-encode jobs can run at once so a burst of
-# adds/quality-requests can't starve the server's CPU. Extra jobs sit at
-# status "queued" until a slot frees up.
 ENCODE_SEMAPHORE = gevent.lock.BoundedSemaphore(Config.MAX_CONCURRENT_ENCODES)
 
 
@@ -227,9 +258,9 @@ def broadcast_presence(room_obj=None):
     if room_obj is None:
         return
     payload = {
-        "online": len(room_obj.users),
         "users": room_obj.users_public_list(),
     }
+    payload["online"] = len(payload["users"])
     if room_obj.room_id:
         socketio.emit("presence", payload, to=_room_channel(room_obj.room_id))
     else:
@@ -423,7 +454,7 @@ _FFMPEG_DURATION_RE = _re.compile(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)")
 # ────────────────────────────────────────────────────────────────────────────
 
 def _ffprobe_source(source: str, timeout: int = 20) -> dict:
-    log_debug(f"Starting ffprobe on: {source}")
+    log_debug(f"Starting ffprobe on: {_safe_source_for_log(source)}")
     start_time = time.time()
     try:
         args = [
@@ -893,7 +924,7 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
     only the default rendition's encode. `source` can be a local path or a
     remote URL — ffmpeg reads both the same way.
     """
-    log_debug(f"start_item_encoding: {item_id} <- {source}")
+    log_debug(f"start_item_encoding: {item_id} <- {_safe_source_for_log(source)}")
 
     def fail_all(msg: str):
         rs = _room_for_item(item_id)
@@ -1095,6 +1126,70 @@ def index():
     return render_template("index.html")
 
 
+def _probe_storage() -> bool:
+    for directory in (Config.MEDIA_DIR, Config.DATA_DIR):
+        try:
+            with tempfile.TemporaryFile(dir=directory):
+                pass
+        except OSError as exc:
+            log_debug(f"[health] storage probe failed ({type(exc).__name__})")
+            return False
+    return True
+
+
+def _probe_transcoder() -> bool:
+    for name in ("ffmpeg", "ffprobe"):
+        binary = shutil.which(name)
+        if not binary:
+            return False
+        try:
+            result = subprocess.run(
+                [binary, "-version"], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=3, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode != 0:
+            return False
+    return True
+
+
+def _probe_livekit() -> bool:
+    if not Config.LIVEKIT_CONFIGURED:
+        return False
+    parsed = urllib.parse.urlsplit(Config.LIVEKIT_URL)
+    scheme = {"wss": "https", "ws": "http"}.get(parsed.scheme)
+    if not scheme or not parsed.netloc:
+        return False
+    health_url = urllib.parse.urlunsplit(
+        (scheme, parsed.netloc, parsed.path.rstrip("/") + "/", "", "")
+    )
+    try:
+        req = urllib.request.Request(health_url, headers={"User-Agent": "vergoboy-stream-health"})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            return 200 <= response.status < 300
+    except Exception as exc:
+        log_debug(f"[health] LiveKit probe failed ({type(exc).__name__})")
+        return False
+
+
+@app.route("/stream/api/health")
+def api_health():
+    checks = {}
+    try:
+        with dbmod.engine.connect() as conn:
+            conn.execute(sql_text("SELECT 1"))
+        checks["database"] = True
+    except Exception as exc:
+        log_debug(f"[health] database probe failed ({type(exc).__name__})")
+        checks["database"] = False
+    checks["storage"] = _probe_storage()
+    checks["transcoder"] = _probe_transcoder()
+    checks["livekit"] = _probe_livekit()
+    healthy = all(checks.values())
+    return jsonify({"status": "healthy" if healthy else "degraded", "checks": checks}), (200 if healthy else 503)
+
+
 @app.route("/stream/media/uploads/<path:filename>")
 def serve_upload(filename):
     return send_from_directory(Config.UPLOAD_DIR, filename, conditional=True)
@@ -1114,7 +1209,10 @@ def serve_hls(item_id, filename):
     d = os.path.join(Config.HLS_DIR, item_id)
     resp = send_from_directory(d, filename, conditional=True)
     if filename.endswith(".m3u8"):
+        resp.headers["Content-Type"] = "application/vnd.apple.mpegurl"
         resp.headers["Cache-Control"] = "no-cache"
+    elif filename.endswith(".ts"):
+        resp.headers["Content-Type"] = "video/mp2t"
     return resp
 
 
@@ -1869,8 +1967,10 @@ def api_voice_token():
     room_code = _current_room_code()
     if not room_code:
         return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
-    if not Config.LIVEKIT_API_KEY or not Config.LIVEKIT_API_SECRET:
-        return jsonify({"error": "LiveKit روی سرور تنظیم نشده است"}), 500
+    if not Config.LIVEKIT_CONFIGURED:
+        return jsonify({
+            "error": "Voice room is unavailable because LiveKit is not configured in this environment. Set real STREAM_LIVEKIT_API_KEY and STREAM_LIVEKIT_API_SECRET values plus a reachable STREAM_LIVEKIT_URL before joining voice."
+        }), 503
     data = request.get_json(force=True, silent=True) or {}
     name = (data.get("name") or user.username or "ناشناس").strip()[:24] or "ناشناس"
     avatar = (data.get("avatar_url") or "").strip()
@@ -2191,18 +2291,17 @@ def api_auth_register():
         if dbmod.get_user_by_email(session, email):
             return jsonify({"error": "این ایمیل قبلاً ثبت شده است"}), 409
 
-        is_first = dbmod.first_user_count(session)
         is_owner = dbmod.is_special_account(email)
-        needs_email = not (is_owner or dbmod.is_exempt_email(email))
+        needs_email = True
         user = DBUser(
             username=username,
             display_name=display_name or username,
             email=email,
             email_verified=not needs_email,
             password_hash=dbmod.hash_password(password),
-            role="admin" if (is_first or is_owner) else "watcher",
-            can_control=bool(is_first or is_owner),
-            youtube_allowed=bool(is_first or is_owner),
+            role="watcher",
+            can_control=False,
+            youtube_allowed=False,
             upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
         )
         session.add(user)
@@ -2251,6 +2350,10 @@ def api_auth_verify_email():
         if exp and exp.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
             return _verify_page(False, "این لینک تأیید منقضی شده است؛ دوباره درخواست ارسال کن.")
         user.email_verified = True
+        if dbmod.is_special_account(user.email):
+            user.role = "admin"
+            user.can_control = True
+            user.youtube_allowed = True
         user.verification_token = None
         user.verification_expires = None
         session.commit()
@@ -2290,7 +2393,7 @@ def api_auth_resend_verification():
         user = dbmod.get_user_by_email(session, email)
         if not user:
             return jsonify({"ok": True}), 200  # don't leak which emails exist
-        if user.email_verified or dbmod.is_exempt_email(user.email):
+        if user.email_verified:
             return jsonify({"ok": True, "already_verified": True}), 200
         user.verification_token = dbmod.new_verification_token()
         user.verification_expires = datetime.now(timezone.utc) + timedelta(
@@ -2438,7 +2541,7 @@ def api_auth_login():
             return jsonify({"error": "نام کاربری یا رمز عبور اشتباه است"}), 401
         if not user.is_active:
             return jsonify({"error": "حساب تو غیرفعال شده؛ با ادمین تماس بگیر"}), 403
-        if not user.email_verified and not dbmod.is_exempt_email(user.email):
+        if not user.email_verified:
             return jsonify({
                 "error": "اول ایمیلت را تأیید کن؛ لینک تأیید برایت ارسال شده است",
                 "needs_verification": True,
@@ -2595,22 +2698,27 @@ def _oauth_finish_session(session, info: dict) -> dict | None:
         username = base[:24]
         if dbmod.get_user_by_username_or_email(session, username):
             username = f"{base[:20]}{secrets.choice('0123456789')}{secrets.choice('0123456789')}"
-        is_first = dbmod.first_user_count(session)
+        verified_email = bool(info.get("verified"))
+        is_admin = verified_email and dbmod.is_special_account(info.get("email"))
         user = DBUser(
             username=username,
             display_name=(info.get("name") or "").strip()[:64] or username,
             email=(info.get("email") or "").lower() or None,
-            email_verified=bool(info.get("verified")) or dbmod.is_exempt_email(info.get("email")),
+            email_verified=verified_email,
             password_hash=dbmod.hash_password(secrets.token_urlsafe(24)),
-            role="admin" if is_first else "watcher",
-            can_control=bool(is_first),
-            youtube_allowed=bool(is_first),
+            role="admin" if is_admin else "watcher",
+            can_control=is_admin,
+            youtube_allowed=is_admin,
             upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
             oauth_provider=info["provider"],
             oauth_id=info["oauth_id"],
         )
         session.add(user)
         session.flush()
+    if user.email_verified and dbmod.is_special_account(user.email):
+        user.role = "admin"
+        user.can_control = True
+        user.youtube_allowed = True
     if not user.is_active:
         return None
     own = dbmod.ensure_own_room(session, user)
@@ -2833,17 +2941,11 @@ def api_room_members():
         if err is not None:
             return err, status
         rs = rooms.get(room_row.id)
-        online = []
+        # One entry per PERSON, not per socket. Iterating rs.users.values()
+        # directly (one entry per socket sid) listed the same account once per
+        # open tab, so a member with 3 tabs appeared 3 times in the panel.
         with LOCK:
-            for entry in rs.users.values():
-                online.append({
-                    "id": entry.get("id"),
-                    "name": entry.get("name", "ناشناس"),
-                    "avatar_url": entry.get("avatar_url"),
-                    "can_control": bool(entry.get("can_control")),
-                    "is_owner": bool(entry.get("is_owner")),
-                    "in_voice": bool(entry.get("in_voice")),
-                })
+            online = list(rs.users_public_list())
         online.sort(key=lambda u: (not u["is_owner"], not u["can_control"], (u["name"] or "").lower()))
         bans = session.execute(
             dbmod.select(dbmod.RoomBan).where(dbmod.RoomBan.room_id == room_row.id)
@@ -3162,6 +3264,11 @@ def on_connect(auth=None):
             rs.users[request.sid] = {
                 "name": user.username, "display_name": user.display_name,
                 "avatar_url": None, "in_voice": False,
+                # A freshly connected tab starts as browsing/idle. The client
+                # flips this to True the moment playback actually starts, so
+                # "watching" on the lounge couch always reflects real playback
+                # rather than mere page presence.
+                "watching": False, "last_seen": time.time(),
                 "id": user.id, "can_control": bool(user.can_control),
                 "is_owner": bool(user.own_room and user.own_room.id == code),
             }
@@ -3210,6 +3317,34 @@ def on_join(data):
         if avatar_url:
             entry["avatar_url"] = avatar_url
     emit("state_sync", rs.to_public_dict())
+    broadcast_presence(rs)
+
+
+@socketio.on("watching")
+def on_watching(data):
+    """Client reports whether THIS tab is actually playing the shared media.
+
+    This is what separates "watching" from "browsing" on the lounge couches.
+    The value comes from the real HTMLMediaElement state, so it can never
+    claim someone is watching when they are not.
+    """
+    code, _user = _socket_session()
+    if not code:
+        return
+    rs = rooms.get(code)
+    data = data or {}
+    watching = bool(data.get("watching"))
+    item_id = (data.get("item_id") or "").strip() or None
+    with LOCK:
+        entry = rs.users.get(request.sid)
+        if entry is None:
+            return
+        entry["watching"] = watching
+        entry["last_seen"] = time.time()
+        if watching and item_id:
+            entry["watching_item"] = item_id
+        elif not watching:
+            entry.pop("watching_item", None)
     broadcast_presence(rs)
 
 
@@ -3366,11 +3501,9 @@ def _resume_interrupted_encodes():
 
 
 if __name__ == "__main__":
-    try:
-        dbmod.init_db()
-        log_debug("Database tables ready.")
-    except Exception as e:
-        log_debug(f"[CRITICAL] Database init failed: {e}")
+    Config.validate()
+    dbmod.init_db()
+    log_debug("Database tables ready.")
     gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
     from gevent import pywsgi
