@@ -6,6 +6,7 @@ import { Send, Image, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Avatar } from "./Avatar";
+import { mediaUrl } from "@/lib/config";
 import { api } from "@/lib/api";
 import type { ChatMessage } from "@/lib/types";
 
@@ -57,7 +58,7 @@ export function ChatPanel({
           onClick={() => setLightboxImg(null)}
         >
           <div className="relative max-h-[90vh] max-w-[90vw]">
-            <img src={lightboxImg} alt="" className="max-h-[85vh] max-w-[85vw] rounded-2xl object-contain shadow-2xl" />
+            <img src={mediaUrl(lightboxImg)} alt="" className="max-h-[85vh] max-w-[85vw] rounded-2xl object-contain shadow-2xl" />
             <button
               onClick={() => setLightboxImg(null)}
               className="absolute -top-4 -right-4 flex h-9 w-9 items-center justify-center rounded-full bg-white/20 text-white hover:bg-white/40"
@@ -114,7 +115,7 @@ export function ChatPanel({
                   {m.image_url && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={m.image_url}
+                      src={mediaUrl(m.image_url)}
                       alt=""
                       className="mt-2 max-h-56 max-w-full cursor-pointer rounded-xl border border-white/15 hover:opacity-95 transition-opacity"
                       onClick={() => setLightboxImg(m.image_url!)}

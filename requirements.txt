@@ -13,8 +13,11 @@ gevent-websocket>=0.10.1
 # Accounts, rooms, admin panel (db.py) — PostgreSQL
 SQLAlchemy>=2.0,<3.0
 psycopg2-binary>=2.9
-python-jose>=3.3          # JWT access/refresh tokens
+PyJWT>=2.10,<3            # HS256 access/refresh tokens
 bcrypt>=4.0               # password hashing
 
 # archive_scraper.py (series/movie search)
 requests>=2.31
+Flask-Cors>=6.0.0
+PyYAML>=6.0.2,<7.0
+yt-dlp>=2026.8.19,<2027.0

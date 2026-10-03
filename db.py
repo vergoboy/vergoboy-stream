@@ -12,7 +12,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 from sqlalchemy import (
     Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, text,
     update,
@@ -172,6 +173,12 @@ def verify_password(plain: str, hashed: str) -> bool:
 def _sign(payload: dict, ttl: timedelta) -> str:
     payload = dict(payload)
     payload["exp"] = datetime.now(timezone.utc) + ttl
+    # A JWT's `exp` is a whole number of SECONDS, so two tokens minted for the
+    # same user within the same second were byte-identical. That made a second
+    # login (a second tab, another device, or simply retrying) collide on the
+    # unique refresh-token index and fail with a 500. A random `jti` makes every
+    # token unique without changing any of the claims we actually rely on.
+    payload["jti"] = uuid.uuid4().hex
     return jwt.encode(payload, Config.JWT_SECRET, algorithm=Config.JWT_ALGORITHM)
 
 
@@ -186,7 +193,7 @@ def create_refresh_token(user_id: str) -> str:
 def decode_token(token: str) -> dict | None:
     try:
         return jwt.decode(token, Config.JWT_SECRET, algorithms=[Config.JWT_ALGORITHM])
-    except JWTError:
+    except PyJWTError:
         return None
 
 
@@ -238,14 +245,8 @@ def new_verification_token() -> str:
 
 
 def is_special_account(email: str | None) -> bool:
-    """The site-owner account is the only one that never needs email
-    verification (it also becomes admin)."""
-    return bool(email and email.strip().lower() == Config.SPECIAL_ADMIN_EMAIL.lower())
-
-
-def is_exempt_email(email: str | None) -> bool:
-    """Addresses that are auto-verified and never get verification mail."""
-    return bool(email and email.strip().lower() in Config.EXEMPT_EMAILS)
+    """Whether this verified address is the explicitly configured admin."""
+    return bool(Config.ADMIN_EMAIL and email and email.strip().lower() == Config.ADMIN_EMAIL)
 
 
 def create_room_code(session) -> str:
@@ -342,7 +343,3 @@ def _migrate_columns():
     with engine.begin() as conn:
         for table, col, dtype in missing:
             conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {dtype}'))
-
-
-def first_user_count(session) -> int:
-    return session.execute(select(User.id)).first() is None

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Crown, UserRoundPlus, UserRoundX, ShieldCheck, ShieldOff, Users, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { RoomMember, RoomBannedUser } from "@/lib/types";
+import { Avatar } from "./Avatar";
 
 interface MembersPanelProps {
   myName: string;
@@ -51,17 +52,12 @@ export function MembersPanel({ myName, canManage, onToast }: MembersPanelProps) 
       </h2>
 
       <ul className="flex flex-col gap-2">
-        {members.map((m) => {
+        {members.map((m, index) => {
           const isOwner = m.id !== null && m.id === ownerId;
           const isSelf = m.name === myName;
           return (
-            <li key={m.id ?? m.name} className="flex items-center gap-2.5 rounded-2xl border border-[color:var(--color-border)] bg-white/5 px-3 py-2">
-              <img
-                src={m.avatar_url ?? ""}
-                alt=""
-                className="h-8 w-8 rounded-full object-cover bg-white/10"
-                onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }}
-              />
+            <li key={`${m.id ?? m.name}-${index}`} className="flex items-center gap-2.5 rounded-2xl border border-[color:var(--color-border)] bg-white/5 px-3 py-2">
+              <Avatar name={m.name} url={m.avatar_url} size={32} className="bg-white/10" />
               <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-[color:var(--color-ink)]">
                 {m.name}
                 {isSelf && <span className="mr-1.5 text-[11px] text-[color:var(--color-ink-muted)]">(تو)</span>}

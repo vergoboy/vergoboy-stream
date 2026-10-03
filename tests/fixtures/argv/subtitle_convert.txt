@@ -1,0 +1,9 @@
+ffmpeg
+-y
+-i
+/srv/media/uploads/source.mkv
+-map
+0:3
+-c:s
+srt
+/srv/media/hls/item-1/720p/subs.srt

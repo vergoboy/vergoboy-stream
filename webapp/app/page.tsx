@@ -37,6 +37,9 @@ import { ListVideo, Plus, Archive, Radio, Captions, Palette, MessageSquare, User
 
 let toastSeq = 0;
 
+type ContextTarget = "player" | "user" | "voice" | "page";
+type ContextMenuState = { x: number; y: number; kind: ContextTarget; name: string | null };
+
 const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
 
 export default function Page() {
@@ -60,6 +63,8 @@ function PageInner() {
   const [unreadChat, setUnreadChat] = useState(0);
   const [voiceProfiles, setVoiceProfiles] = useState<{ name: string; avatarUrl: string | null; speaking: boolean }[]>([]);
   const [joinCode, setJoinCode] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
 
   const myName = user?.username ?? "";
   const isAdm = isAdmin(user);
@@ -156,13 +161,20 @@ function PageInner() {
       .catch(() => {});
   }, []);
 
-  const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat, setVoiceActive } =
+  const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat, setVoiceActive, reportWatching } =
     useRoomState({ token: access, roomCode: roomCode ?? "", myName, canControl, myId: user?.id, onNotify: handleNotify, onKicked: handleKicked });
 
-  // Only people actually connected to the voice room sit on the sofa — a
-  // regular online visitor must stay invisible to the others until they
-  // join the voice chat.
-  const sofaUsers = presenceUsers.filter((u) => u.in_voice);
+  // The two lounge couches. These are NOT mutually exclusive: the server sends
+  // one entry per person carrying every state they hold at once, so someone
+  // who is watching AND in voice appears on both couches as the same person.
+  //
+  // The previous code filtered the watching couch with `!u.in_voice`, which
+  // made anyone who joined voice vanish from the watching area entirely — they
+  // were rendered as a different kind of person rather than as one person doing
+  // two things. "watching" now means the real thing: this person is actually
+  // playing the shared media.
+  const watchingUsers = presenceUsers.filter((u) => u.watching === true);
+  const voiceUsers = presenceUsers.filter((u) => u.in_voice);
 
   const isOwner = presenceUsers.some((u) => u.id !== undefined && u.id === user?.id && u.is_owner) || false;
   const canManage = mayManage(user, isOwner);
@@ -206,6 +218,166 @@ function PageInner() {
     if (id === "chat") setUnreadChat(0);
   }
 
+  function showContextMenu(target: EventTarget | null, x: number, y: number) {
+    const element = target instanceof Element ? target : null;
+    const contextTarget = element?.closest<HTMLElement>("[data-context-kind]");
+    const kind = contextTarget?.dataset.contextKind as ContextTarget | undefined;
+    const menuWidth = 224;
+    const menuHeight = 240;
+    setContextMenu({
+      x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8)),
+      kind: kind ?? "page",
+      name: contextTarget?.dataset.contextName ?? null,
+    });
+  }
+
+  function handleContextMenu(event: React.MouseEvent<HTMLElement>) {
+    const element = event.target as HTMLElement;
+    if (element.closest("[data-context-menu-root], input, textarea, select, [contenteditable='true']")) return;
+    event.preventDefault();
+    showContextMenu(event.target, event.clientX, event.clientY);
+  }
+
+  function handleContextKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    const target = event.target as HTMLElement;
+    const bounds = target.getBoundingClientRect();
+    showContextMenu(target, bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+  }
+
+  function handleContextMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setContextMenu(null);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const items = Array.from(contextMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    items[(currentIndex + step + items.length) % items.length]?.focus();
+  }
+
+  async function runContextAction(action: string) {
+    const target = contextMenu;
+    setContextMenu(null);
+    if (!target) return;
+    switch (action) {
+      case "play-pause":
+        if (currentItem && currentItem.type !== "live") {
+          requestControl(room.playing ? "pause" : "play", { at: expectedPosition() });
+        }
+        break;
+      case "seek-back":
+        if (currentItem && currentItem.type !== "live") {
+          requestControl("seek", { to: Math.max(0, expectedPosition() - 10) });
+        }
+        break;
+      case "seek-forward":
+        if (currentItem && currentItem.type !== "live") {
+          requestControl("seek", { to: expectedPosition() + 10 });
+        }
+        break;
+      case "prev":
+        if (canManage && room.current_index !== null) requestControl("select", { index: shuffleStep(room, -1) });
+        break;
+      case "next":
+        if (canManage && room.current_index !== null) requestControl("select", { index: shuffleStep(room, 1) });
+        break;
+      case "shuffle":
+        if (canManage) requestControl("shuffle", { on: !room.shuffle });
+        break;
+      case "rate-1":
+        if (canManage) requestControl("rate", { rate: 1 });
+        break;
+      case "rate-1.5":
+        if (canManage) requestControl("rate", { rate: 1.5 });
+        break;
+      case "rate-2":
+        if (canManage) requestControl("rate", { rate: 2 });
+        break;
+      case "copy-name":
+        if (target.name) {
+          try {
+            await navigator.clipboard.writeText(target.name);
+          } catch {
+            const id = `t${toastSeq++}`;
+            setToasts((prev) => [...prev, { id, text: "کپی نام کاربر ناموفق بود" }]);
+            setTimeout(() => setToasts((prev) => prev.filter((toast) => toast.id !== id)), 4000);
+          }
+        }
+        break;
+      case "mute-participant": {
+        const participant = voice.participants.find((entry) => entry.name === target.name && !entry.isLocal);
+        if (participant) voice.setParticipantVolume(participant.identity, 0);
+        break;
+      }
+      case "chat":
+        handleTabChange("chat");
+        break;
+      case "add-media":
+        if (canAdd) setActiveTab("add");
+        break;
+      case "settings":
+        setSettingsOpen(true);
+        break;
+      case "shortcuts":
+        setShortcutsOpen(true);
+        break;
+    }
+  }
+
+  const contextActions = contextMenu?.kind === "player"
+    ? [
+        ...(currentItem && currentItem.type !== "live" ? [
+          { id: "play-pause", label: room.playing ? "توقف" : "پخش" },
+          { id: "seek-back", label: "۱۰ ثانیه عقب" },
+          { id: "seek-forward", label: "۱۰ ثانیه جلو" },
+          { id: "prev", label: "آیتم قبلی" },
+          { id: "next", label: "آیتم بعدی" },
+          { id: "shuffle", label: room.shuffle ? "پخش ترتیبی" : "پخش تصادفی" },
+          { id: "rate-1", label: "سرعت ۱x" },
+          { id: "rate-1.5", label: "سرعت ۱.۵x" },
+          { id: "rate-2", label: "سرعت ۲x" },
+        ] : []),
+        { id: "shortcuts", label: "میانبرها" },
+        { id: "settings", label: "تنظیمات" },
+      ]
+    : contextMenu?.kind === "user"
+      ? [
+          ...(contextMenu.name ? [{ id: "copy-name", label: `کپی نام ${contextMenu.name}` }] : []),
+          { id: "chat", label: "رفتن به چت" },
+        ]
+      : contextMenu?.kind === "voice"
+        ? [
+            ...(contextMenu.name ? [{ id: "copy-name", label: `کپی نام ${contextMenu.name}` }] : []),
+            ...(voice.participants.some((entry) => entry.name === contextMenu.name && !entry.isLocal)
+              ? [{ id: "mute-participant", label: "بی‌صدا کردن این کاربر برای من" }]
+              : []),
+            { id: "settings", label: "تنظیمات صدا" },
+          ]
+        : [
+            { id: "chat", label: "رفتن به چت" },
+            ...(canAdd ? [{ id: "add-media", label: "افزودن ویدیو" }] : []),
+            { id: "shortcuts", label: "میانبرها" },
+            { id: "settings", label: "تنظیمات" },
+          ];
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest("[data-context-menu-root]")) {
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => window.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [contextMenu]);
+
   if (!hydrated) return null;
 
   if (!user) {
@@ -213,12 +385,46 @@ function PageInner() {
   }
 
   return (
-    <main className="page relative z-[1]">
+    <main
+      className="page relative z-[1]"
+      onContextMenu={handleContextMenu}
+      onKeyDown={handleContextKeyDown}
+      onClick={(event) => {
+        if (!(event.target as HTMLElement).closest("[data-context-menu-root]")) setContextMenu(null);
+      }}
+    >
       <Header user={user} onLogout={() => logout()} />
       <Toasts toasts={toasts} />
       <OnboardingModal />
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} voice={voice} />
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          data-context-menu-root
+          role="menu"
+          aria-label="عملیات"
+          dir="rtl"
+          onContextMenu={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={handleContextMenuKeyDown}
+          className="fixed z-[10000] min-w-56 overflow-hidden rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/95 p-1.5 shadow-2xl backdrop-blur-xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {contextActions.map((action, index) => (
+            <button
+              key={action.id}
+              type="button"
+              role="menuitem"
+              autoFocus={index === 0}
+              onClick={() => void runContextAction(action.id)}
+              className="flex min-h-9 w-full items-center rounded-lg px-3 text-right text-[13px] text-[color:var(--color-ink)] outline-none transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:ring-2 focus-visible:ring-[color:var(--color-amber)]"
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="mx-auto max-w-[1120px] px-4 pt-8 md:px-7">
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-5">
@@ -240,7 +446,27 @@ function PageInner() {
 
         {roomCode && <RoomBar roomCode={roomCode} online={room.online} onRoomChange={setRoomCode} />}
 
-        <Sofa users={sofaUsers} voiceSpeaking={voiceProfiles} />
+        {/* Exactly two couches. They are a metaphor for doing something together,
+            not a capacity limit — any number of people can be on either one,
+            and the same person can be on both at once (watching while talking). */}
+        <div className="grid gap-4 mb-6 md:grid-cols-2">
+          <Sofa
+            title="WATCHING"
+            description="کسانی که همین حالا دارند ویدیوی مشترک را تماشا می‌کنند."
+            users={watchingUsers}
+            voiceSpeaking={voiceProfiles}
+            kind="watching"
+            emptyLabel="هنوز کسی در حال تماشا نیست — پخش را شروع کنید."
+          />
+          <Sofa
+            title="VOICE"
+            description="در اتاق صدا با هم کنار هم هستیم؛ کسی که صحبت می‌کند، روشن می‌شود."
+            users={voiceUsers}
+            voiceSpeaking={voiceProfiles}
+            kind="voice"
+            emptyLabel="هنوز کسی وارد اتاق صدا نشده."
+          />
+        </div>
 
         <Player
             item={currentItem}
@@ -253,6 +479,8 @@ function PageInner() {
             myName={myName}
             subStyle={subStyle}
             canSpeed={canManage}
+            canControl={canManage}
+            onPlaybackState={reportWatching}
             canPrev={canManage && room.current_index !== null && (room.shuffle ? room.playlist.length > 1 : room.current_index > 0)}
             canNext={canManage && room.current_index !== null && (room.shuffle ? room.playlist.length > 1 : room.current_index < room.playlist.length - 1)}
             onPrev={() => canManage && room.current_index !== null && requestControl("select", { index: shuffleStep(room, -1) })}
@@ -272,17 +500,17 @@ function PageInner() {
               active={activeTab}
               onChange={handleTabChange}
               tabs={[
-                { id: "playlist", label: (<span className="flex items-center gap-1.5"><ListVideo className="h-4 w-4" /> پلی‌لیست</span>) },
+                { id: "playlist", label: (<span className="flex items-center gap-1.5"><ListVideo className="w-4 h-4" /> پلی‌لیست</span>) },
                 ...(canAdd
                   ? [
-                      { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="h-4 w-4" /> افزودن ویدیو</span>) } as const,
-                      { id: "archive", label: (<span className="flex items-center gap-1.5"><Archive className="h-4 w-4" /> آرشیو جستجو</span>) } as const,
+                      { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="w-4 h-4" /> افزودن ویدیو</span>) } as const,
+                      { id: "archive", label: (<span className="flex items-center gap-1.5"><Archive className="w-4 h-4" /> آرشیو جستجو</span>) } as const,
                     ]
                   : []),
-                ...(canAdd ? [{ id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="h-4 w-4" /> استریم خارجی</span>) } as const] : []),
-                { id: "subaudio", label: (<span className="flex items-center gap-1.5"><Captions className="h-4 w-4" /> زیرنویس و صدا</span>) },
-                { id: "substyle", label: (<span className="flex items-center gap-1.5"><Palette className="h-4 w-4" /> استایل زیرنویس</span>) },
-                { id: "chat", label: (<span className="flex items-center gap-1.5"><MessageSquare className="h-4 w-4" /> چت</span>), badge: unreadChat },
+                ...(canAdd ? [{ id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="w-4 h-4" /> استریم خارجی</span>) } as const] : []),
+                { id: "subaudio", label: (<span className="flex items-center gap-1.5"><Captions className="w-4 h-4" /> زیرنویس و صدا</span>) },
+                { id: "substyle", label: (<span className="flex items-center gap-1.5"><Palette className="w-4 h-4" /> استایل زیرنویس</span>) },
+                { id: "chat", label: (<span className="flex items-center gap-1.5"><MessageSquare className="w-4 h-4" /> چت</span>), badge: unreadChat },
               ]}
             />
 
@@ -334,8 +562,6 @@ function PageInner() {
                   alert(e instanceof Error ? e.message : "خطا در آپلود عکس");
                 }
               }}
-              onLogout={() => logout()}
-              onlineUsers={presenceUsers}
               notifications={notifications}
               playlist={room.playlist}
             />

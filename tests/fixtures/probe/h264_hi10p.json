@@ -1,0 +1,96 @@
+{
+  "_fixture": {
+    "expect": {
+      "hdr": false,
+      "hevc_only": false,
+      "ten_bit": true
+    },
+    "expect_mode": "transcode",
+    "has_faststart": true,
+    "name": "h264_hi10p",
+    "note": "Hi10P H.264: 10-bit in an H.264 stream is not a thing browsers decode in HLS, so it has to be re-encoded down to 8-bit.",
+    "synthetic_stream": null
+  },
+  "format": {
+    "bit_rate": "282604",
+    "duration": "2.000000",
+    "filename": "/tmp/probe-fixtures-hdxqpen2/out.mp4",
+    "format_long_name": "QuickTime / MOV",
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "nb_programs": 0,
+    "nb_stream_groups": 0,
+    "nb_streams": 1,
+    "probe_score": 100,
+    "size": "70651",
+    "start_time": "0.000000",
+    "tags": {
+      "compatible_brands": "isomiso2avc1mp41",
+      "encoder": "Lavf63.1.102",
+      "major_brand": "isom",
+      "minor_version": "512"
+    }
+  },
+  "streams": [
+    {
+      "avg_frame_rate": "24/1",
+      "bit_rate": "276868",
+      "bits_per_raw_sample": "10",
+      "chroma_location": "left",
+      "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+      "codec_name": "h264",
+      "codec_tag": "0x31637661",
+      "codec_tag_string": "avc1",
+      "codec_type": "video",
+      "coded_height": 240,
+      "coded_width": 320,
+      "display_aspect_ratio": "4:3",
+      "disposition": {
+        "attached_pic": 0,
+        "captions": 0,
+        "clean_effects": 0,
+        "comment": 0,
+        "default": 1,
+        "dependent": 0,
+        "descriptions": 0,
+        "dub": 0,
+        "forced": 0,
+        "hearing_impaired": 0,
+        "karaoke": 0,
+        "lyrics": 0,
+        "metadata": 0,
+        "multilayer": 0,
+        "non_diegetic": 0,
+        "original": 0,
+        "still_image": 0,
+        "timed_thumbnails": 0,
+        "visual_impaired": 0
+      },
+      "duration": "2.000000",
+      "duration_ts": 24576,
+      "extradata_size": 46,
+      "field_order": "progressive",
+      "has_b_frames": 2,
+      "height": 240,
+      "id": "0x1",
+      "index": 0,
+      "is_avc": "true",
+      "level": 13,
+      "mime_codec_string": "avc1.6e000d",
+      "nal_length_size": "4",
+      "nb_frames": "48",
+      "pix_fmt": "yuv420p10le",
+      "profile": "High 10",
+      "r_frame_rate": "24/1",
+      "sample_aspect_ratio": "1:1",
+      "start_pts": 0,
+      "start_time": "0.000000",
+      "tags": {
+        "encoder": "Lavc63.1.102 libx264",
+        "handler_name": "VideoHandler",
+        "language": "und"
+      },
+      "time_base": "1/12288",
+      "width": 320
+    }
+  ]
+}

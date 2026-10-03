@@ -49,3 +49,8 @@ app.py.save
 # Ad-hoc editor backups
 *.bak
 *.bak[0-9]*
+
+# pytest / coverage artefacts
+.coverage
+.coverage.*
+.pytest_cache/

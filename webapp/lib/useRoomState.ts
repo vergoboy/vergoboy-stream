@@ -196,6 +196,14 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
     [myName]
   );
 
+  // Report whether THIS tab is genuinely playing the shared media. The server
+  // uses it to tell "watching" apart from "browsing" on the lounge couches, so
+  // it must always mirror the real HTMLMediaElement state — never an
+  // optimistic guess. Throttled by the caller on state changes.
+  const reportWatching = useCallback((watching: boolean, itemId: string | null) => {
+    socketRef.current?.emit("watching", { watching, item_id: itemId });
+  }, []);
+
   return {
     connected,
     room,
@@ -207,5 +215,6 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
     requestControl,
     sendChat,
     setVoiceActive,
+    reportWatching,
   };
 }

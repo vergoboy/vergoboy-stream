@@ -12,15 +12,14 @@ Get from a fresh clone to a running dev server in about five minutes.
 
 | Requirement | Version | Needed for |
 |---|---|---|
-| Python | 3.10+ (3.12 tested) | backend |
-| Node.js | 18+ (22 tested) | Next.js build |
-| PostgreSQL | 13+ | accounts, rooms, admin panel |
-| `ffmpeg` + `ffprobe` | any recent build | HLS transcoding, subtitle extraction |
-| `yt-dlp` | latest, on `$PATH` | YouTube / series imports |
+| Python | 3.12 | backend and pinned Python lock |
+| Node.js | 20.9+ | Next.js 16 build |
+| PostgreSQL | 13+ for production | accounts, rooms, admin panel; the dev runner provisions a persistent local instance |
+| `uv` (optional) | current stable | preferred Python lockfile installer; `run.sh` falls back to pip |
+| `ffmpeg` + `ffprobe` | installed on `PATH` | HLS transcoding, subtitle extraction |
 
 ```bash
-sudo apt install -y postgresql ffmpeg python3-venv
-pipx install yt-dlp   # or: sudo apt install yt-dlp
+sudo apt install -y ffmpeg python3-venv
 ```
 
 ### 1. Clone and install
@@ -29,65 +28,47 @@ pipx install yt-dlp   # or: sudo apt install yt-dlp
 git clone https://github.com/vergoboy/vergoboy-stream.git
 cd vergoboy-stream
 
-# Backend
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-
-# Frontend (static export, built and served by Nginx)
-cd webapp && npm ci && cd ..
+./run.sh setup
 ```
 
 ### 2. Create the database
 
-Tables are created automatically on first boot (`db.init_db()`), so only the
-role and database need to exist:
+For local development, `./run.sh setup` installs the Python and npm lockfiles,
+initializes an isolated persistent PostgreSQL cluster, and generates a random
+database password in the ignored local environment file. For production,
+provision a persistent PostgreSQL database and use its real connection URI;
+there is no SQLite or in-memory fallback.
 
-```bash
-sudo -u postgres psql -c "CREATE USER stream WITH PASSWORD 'stream';"
-sudo -u postgres psql -c "CREATE DATABASE stream OWNER stream;"
-```
+Tables are currently created and incrementally adjusted at startup by
+`db.init_db()`; this project does not yet have versioned Alembic migrations.
 
 ### 3. Configure
 
-Put your secrets in `.stream_db.env` — it is git-ignored, and it is what
-`deploy/vergoboy-stream.service` loads via `EnvironmentFile=`:
+Put real, independent secrets in `.stream_db.env` — it is git-ignored, and it
+is what `deploy/vergoboy-stream.service` loads via `EnvironmentFile=`. Set
+`STREAM_ADMIN_EMAIL` to the operator's verified address; first signup is not
+automatically privileged.
 
-```bash
-cat > .stream_db.env <<'EOF'
-STREAM_DATABASE_URL=postgresql+psycopg2://stream:stream@127.0.0.1:5432/stream
-STREAM_SECRET_KEY=<paste: openssl rand -hex 32>
-STREAM_JWT_SECRET=<paste: openssl rand -hex 32>
-EOF
-```
+The local runner starts a real, checksum-verified LiveKit server and generates
+a random local keypair outside the repository. Production must use a separate
+LiveKit config and a reachable WSS URL.
 
-Everything else has a working default in `config.py` — bind host/port, upload
-cap, HLS preset, RTMP/HLS URL templates, yt-dlp proxy. See
+Everything else has a local default in `config.py` — bind host/port, upload
+cap, HLS preset, and RTMP/HLS URL templates. The yt-dlp proxy and cookies are
+optional and unset unless configured. See
 [Configuration](#configuration) for the full list.
 
-### 4. Run it (two terminals)
-
-**Backend** (gevent WSGI on `127.0.0.1:8801`):
+### 4. Run it
 
 ```bash
-cd vergoboy-stream
-set -a && . ./.stream_db.env && set +a
-./venv/bin/python3 app.py
+./run.sh start
 ```
 
-**Frontend** (Next.js dev server with hot reload on `:3000`):
+The runner starts PostgreSQL, the real local LiveKit SFU, Flask, and Next.js.
+Open **http://localhost:3000/stream/**.
 
-```bash
-cd vergoboy-stream/webapp
-cp .env.local.example .env.local   # points NEXT_PUBLIC_API_ORIGIN at :8801
-npm run dev
-```
-
-Open **http://localhost:3000** for the dev server, or
-**http://127.0.0.1:8801/stream/** for the Flask-served page.
-
-Create the first account with the address in `STREAM_ADMIN_EMAIL`
-(default `very.good.booyy@gmail.com`) — that account skips email verification
-and gets the `admin` role, which unlocks `/stream/admin` (user list, delete).
+The configured admin account receives the `admin` role only after its email is
+verified (or after a verified OAuth provider authenticates that address).
 
 ### 5. Run it for production
 
@@ -96,14 +77,62 @@ and gets the `admin` role, which unlocks `/stream/admin` (user list, delete).
 cd webapp && npm run build
 mkdir -p webapp-out && rsync -a --delete webapp/out/ webapp-out/ && cd ..
 
-# systemd units (template placeholders — edit the two CHANGE_ME secrets first)
+# Backend and LiveKit units; create the protected LiveKit config as described below.
 sudo cp deploy/vergoboy-stream.service deploy/vergoboy-frontend-build.service /etc/systemd/system/
+sudo cp deploy/livekit-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now vergoboy-frontend-build vergoboy-stream
+sudo systemctl enable --now livekit-server vergoboy-frontend-build vergoboy-stream
 
 # Nginx: paste deploy/nginx-stream.conf into your server{} block
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+### Self-hosted LiveKit
+
+The existing production architecture already routes `wss://vergoboy.ir/livekit`
+through Nginx to a local SFU on port `7880`. There was no LiveKit service in
+the repository or on this development host. The deployment unit pins the
+official LiveKit Server `v1.13.7` binary at
+`/usr/local/lib/livekit/v1.13.7/livekit-server`; install that exact release
+for the server architecture and verify its published checksum before enabling
+the unit. The Linux amd64 asset SHA-256 is
+`6634aeeb2fb1366b6723708ae4320b9d5408106a4c63457c5e845ae3979c90e2`.
+
+Create the service account and a root-managed config containing generated
+credentials. Do not commit this file. The `www-data` group is used deliberately
+so the backend can read the same key pair without copying secrets into the app
+environment file:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin livekit
+sudo install -d -o root -g www-data -m 0750 /etc/livekit
+sudo sh -c 'umask 027
+key=$(openssl rand -hex 12)
+secret=$(openssl rand -hex 32)
+cat > /etc/livekit/config.yaml <<EOF
+port: 7880
+log_level: info
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+keys:
+  ${key}: ${secret}
+EOF
+chown root:www-data /etc/livekit/config.yaml
+chmod 0640 /etc/livekit/config.yaml'
+sudo systemctl enable --now livekit-server
+```
+
+Keep port `7880` private behind Nginx/WSS. Allow TCP `7881` and UDP
+`50000-60000` through the host and cloud firewall for ICE media; the configured
+public-IP discovery requires working outbound STUN. TURN is not configured:
+restrictive client networks may additionally require a TURN hostname, valid
+certificate, and reachable relay port, which must be provisioned on the real
+domain rather than guessed here. The backend's `/stream/api/health` endpoint
+probes PostgreSQL, writable storage, FFmpeg tools, and the configured LiveKit
+endpoint.
 
 Follow logs with `journalctl -u vergoboy-stream -f`. Redeploying the frontend
 is just `sudo systemctl restart vergoboy-frontend-build`.
@@ -219,46 +248,56 @@ Fullscreen uses a **React Portal** pattern: the fullscreen overlay is rendered a
 
 ## Configuration
 
-Everything is environment-driven with sensible defaults in `config.py`. The
-Quick Start only requires the three values marked **required**; the rest are
-tuned per deployment.
+Runtime secrets and the PostgreSQL URL are mandatory. Local-only defaults are
+used for bind addresses and processing limits; production startup validates
+HTTPS/WSS domains and refuses missing secrets or LiveKit configuration.
 
 | Variable | Default | Description |
 |---|---|---|
+| STREAM_ENV | development | `development` or `production`; systemd sets `production` explicitly |
 | STREAM_HOST | 127.0.0.1 | Local bind host |
 | STREAM_PORT | 8801 | Local bind port |
-| STREAM_SECRET_KEY | **required** | Flask session secret |
-| STREAM_DATABASE_URL | **required** | `postgresql+psycopg2://stream:stream@127.0.0.1:5432/stream` |
-| STREAM_JWT_SECRET | falls back to SECRET_KEY | JWT access/refresh signing key |
-| STREAM_SITE_URL | https://vergoboy.ir/stream | Public base URL (verification links, OAuth redirects) |
-| STREAM_ADMIN_EMAIL | very.good.booyy@gmail.com | Skips email verification, gets the `admin` role |
-| STREAM_EXEMPT_EMAILS | (see config.py) | Comma-separated auto-verified addresses |
+| STREAM_SECRET_KEY | required | Flask/session signing key, at least 32 characters |
+| STREAM_DATABASE_URL | required | Persistent PostgreSQL SQLAlchemy URI; no fallback |
+| STREAM_JWT_SECRET | required | Independent JWT access/refresh signing key, at least 32 characters |
+| STREAM_SITE_URL | https://vergoboy.ir/stream | Public HTTPS base URL (verification links, OAuth redirects); explicit in production |
+| STREAM_ADMIN_EMAIL | unset | Verified address promoted to admin; explicit in production |
+| STREAM_CORS_ORIGINS | environment-specific | Comma-separated exact browser origins |
 | STREAM_MAIL_FROM | info@vergoboy.ir | Envelope/From for outgoing mail |
 | STREAM_GOOGLE_OAUTH_CLIENT_ID / _SECRET | (empty) | Google login |
 | STREAM_GITHUB_OAUTH_CLIENT_ID / _SECRET | (empty) | GitHub login |
 | STREAM_DEFAULT_UPLOAD_QUOTA | 50 | Per-user upload quota for new signups |
 | STREAM_MAX_UPLOAD_MB | 8192 | Max video upload size (MB) — mirror in nginx `client_max_body_size` |
-| STREAM_HLS_PRESET | ultrafast | ffmpeg preset for transcoding |
+| STREAM_HLS_PRESET | veryfast | x264 speed preset for transcoding (ignored by hardware encodes) |
 | STREAM_HLS_READY_AFTER_SECONDS | 20 | Seconds encoded before an item is playable |
 | STREAM_MAX_CONCURRENT_ENCODES | 2 | Max simultaneous ffmpeg processes |
+| STREAM_ENCODE_STALL_SECONDS | 120 | Kill an encode after this long with no progress |
+| STREAM_ENCODE_MAX_RETRIES | 2 | Retries for the last fallback rung, jittered backoff |
+| STREAM_ENCODE_HW_FAILURES | 3 | Hardware failures before the encoder is disabled |
+| STREAM_ENCODE_HW_DISABLE_SECONDS | 600 | How long the hardware encoder stays disabled |
+| STREAM_MAX_CONCURRENT_REMUX | 4 | Concurrent copy-only jobs (own pool — these are cheap) |
 | STREAM_RTMP_PUSH_TEMPLATE | rtmpps://vergoboy.ir:8443/live/{key} | RTMP push URL template for live streaming |
 | STREAM_RTMP_ALT_PORTS | 1935 | Extra ingest ports advertised to the user |
 | STREAM_HLS_PLAYBACK_TEMPLATE | https://vergoboy.ir/hls/live/{key}/index.m3u8 | HLS playback URL template |
 | STREAM_YTDLP_PROXY | socks5://127.0.0.1:1080 | Proxy for yt-dlp (YouTube imports) |
 | STREAM_YTDLP_COOKIES | /opt/stream/cookies.txt | Cookies file for yt-dlp |
 | STREAM_YTDLP_FORMAT | bestvideo[ext=mp4]+bestaudio[ext=m4a]/… | yt-dlp format selector |
-| STREAM_LIVEKIT_URL / _ROOM / _TOKEN_TTL | wss://vergoboy.ir/livekit | Voice-room connection |
-| STREAM_LIVEKIT_API_KEY / _API_SECRET | parsed from /etc/livekit/config.yaml | LiveKit token minting |
+| STREAM_LIVEKIT_URL / _ROOM / _TOKEN_TTL | URL unset in development | Voice-room connection; production requires an explicit reachable WSS URL |
+| STREAM_LIVEKIT_API_KEY / _API_SECRET | parsed from `/etc/livekit/config.yaml` | LiveKit token minting; never sent to clients |
 
 Notes:
 
 - `RTMP_PUSH_TEMPLATE` and `HLS_PLAYBACK_TEMPLATE` must match your existing
   RTMP/HLS server's path structure. The app only substitutes `{key}` with a
   randomly generated stream key — it does not run an RTMP or HLS server itself.
-- LiveKit credentials are never committed: `config.py` falls back to parsing
-  `/etc/livekit/config.yaml` when the env vars are unset.
+- LiveKit credentials are never committed: the backend reads environment
+  variables first, then the structured `keys` mapping in
+  `/etc/livekit/config.yaml`. Production fails startup if credentials or a
+  non-local WSS URL are missing.
 - `STREAM_YTDLP_COOKIES` is optional; drop it entirely for sources that do not
   need a logged-in session.
+- `STREAM_PG_PASSWORD` is used only by the local `run.sh` PostgreSQL bootstrap;
+  production database credentials are supplied in `STREAM_DATABASE_URL`.
 
 ### Fonts
 
@@ -274,7 +313,8 @@ to be copied — just make sure the main app is running.
   with `ProtectSystem=full`; only `media/` and `data/` are writable.
   `deploy/vergoboy-frontend-build.service` is a `oneshot` build that the
   backend `Wants=`/`After=` for startup ordering, so re-running the build never
-  stops the backend.
+  stops the backend. `deploy/livekit-server.service` runs the pinned SFU as the
+  `livekit` user and reads its protected config from `/etc/livekit/config.yaml`.
 - **Nginx** — see the comments in `deploy/nginx-stream.conf`. Three things are
   easy to get wrong:
   - `/stream/` serves the static Next.js export from disk, not through Flask;
@@ -282,6 +322,8 @@ to be copied — just make sure the main app is running.
     (the latter needs the `Upgrade`/`Connection` headers).
   - `/stream/media/` is served with `alias` and Range support so video bytes
     never traverse Flask.
+  - `/livekit/` proxies signaling and the HTTP health endpoint over TLS; actual
+    WebRTC media uses direct ICE over the configured TCP/UDP port ranges.
   - `.m3u8` playlists under `/stream/media/hls/` must be `no-cache`: they grow
     while ffmpeg encodes, and a cached one makes hls.js re-read a stale
     2-3 segment playlist and stall.
@@ -295,12 +337,12 @@ to be copied — just make sure the main app is running.
 
 | Symptom | Cause / fix |
 |---|---|
-| `[CRITICAL] Database init failed` on boot | Wrong `STREAM_DATABASE_URL`, or the role/database does not exist. Check step 2 of the Quick Start. |
-| Backend exits immediately | Missing deps — `gevent` is required; `app.py` calls `monkey.patch_all()` before anything else. Reinstall with `./venv/bin/pip install -r requirements.txt`. |
+| Backend exits immediately | Check required environment variables, PostgreSQL connectivity, the gevent dependency, and `journalctl -u vergoboy-stream`. Install locked dependencies with `uv pip sync --python /opt/stream/venv/bin/python /opt/stream/requirements.lock.txt`. |
+| `/stream/api/health` returns 503 | Inspect its component checks; a missing/unreachable LiveKit endpoint intentionally keeps full health degraded. |
 | Page loads but nothing updates | Socket.IO blocked — the `/stream/socket.io` location must forward `Upgrade`/`Connection` headers. |
 | Video stalls at ~10s while encoding | A cached `.m3u8`. Confirm the `no-cache` regex locations from `deploy/nginx-stream.conf` are in place. |
 | Import fails with a yt-dlp timeout | `STREAM_YTDLP_PROXY` unreachable, or `yt-dlp` is not on the server's `$PATH`. |
-| Login e-mail never arrives | Expected for addresses in `STREAM_EXEMPT_EMAILS` (auto-verified). Otherwise check the mail relay used by `mail.py`. |
+| Login e-mail never arrives | Check the mail relay used by `mail.py`; all password registrations now require email verification. |
 | Upload rejected at 413 | Raise nginx `client_max_body_size` to match `STREAM_MAX_UPLOAD_MB`. |
 
 ---

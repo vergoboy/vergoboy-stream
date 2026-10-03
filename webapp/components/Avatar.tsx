@@ -1,6 +1,7 @@
 "use client";
 
 import { nameHueColor, nameInitial } from "@/lib/format";
+import { mediaUrl } from "@/lib/config";
 
 export function Avatar({
   name,
@@ -17,7 +18,7 @@ export function Avatar({
     return (
       // eslint-disable-next-line @next/next/no-img-element -- dynamic, remote-origin avatar; next/image gives no benefit since images.unoptimized is set
       <img
-        src={url}
+        src={mediaUrl(url)}
         alt={name}
         width={size}
         height={size}

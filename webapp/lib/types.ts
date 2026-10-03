@@ -94,10 +94,33 @@ export interface RoomStateSync {
   online: number;
 }
 
+/**
+ * One PERSON in the lounge — never one row per socket. The server merges every
+ * socket a person has open into a single entry, so one account with five tabs
+ * is still one person on the couches.
+ *
+ * A person can hold several of these at the same time, and all of them are
+ * simultaneous rather than exclusive: `watching: true` together with
+ * `in_voice: true` means one person who is watching AND talking (they appear
+ * on both couches, not as two separate people).
+ */
 export interface PresenceUser {
   name: string;
   avatar_url: string | null;
+  /** Connected to the voice room right now. */
   in_voice?: boolean;
+  /** Actively playing the shared media right now (driven by real media events). */
+  watching?: boolean;
+  /** Connected to the room but not currently playing. */
+  browsing?: boolean;
+  /** Neither watching nor in voice. */
+  idle?: boolean;
+  /** Playlist item this person is watching, when known. */
+  watching_item?: string | null;
+  /** Unix seconds of their most recent activity. */
+  last_seen?: number;
+  /** How many of their sockets are open (diagnostics only). */
+  sockets?: number;
   id?: string;
   can_control?: boolean;
   is_owner?: boolean;
@@ -110,6 +133,9 @@ export interface RoomMember {
   can_control: boolean;
   is_owner: boolean;
   in_voice: boolean;
+  watching?: boolean;
+  browsing?: boolean;
+  idle?: boolean;
 }
 
 export interface RoomBannedUser {

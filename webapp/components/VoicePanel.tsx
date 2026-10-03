@@ -15,7 +15,7 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import { Avatar } from "./Avatar";
 import type { VoiceParticipant } from "@/lib/types";
-import type { useVoiceRoom } from "@/lib/useVoiceRoom";
+import type { useVoiceRoom, VoiceStatus, MicStatus } from "@/lib/useVoiceRoom";
 
 const NETWORK_QUALITY_LABEL: Record<string, string> = {
   excellent: "عالی",
@@ -23,6 +23,32 @@ const NETWORK_QUALITY_LABEL: Record<string, string> = {
   poor: "ضعیف",
   lost: "قطعی",
   unknown: "—",
+};
+
+/**
+ * Every label here is driven by a real LiveKit event or a real browser signal.
+ * There is deliberately no "connected"-looking state that can appear without a
+ * genuine Connected event behind it — that was the whole point of replacing the
+ * old boolean with an explicit status.
+ */
+const STATUS_VIEW: Record<
+  VoiceStatus,
+  { label: string; dot: string; chip: string; pulse?: boolean }
+> = {
+  disconnected: { label: "قطع", dot: "bg-[color:var(--color-ink-dim)]", chip: "text-[color:var(--color-ink-dim)]" },
+  connecting: { label: "در حال اتصال…", dot: "bg-[color:var(--color-amber)]", chip: "text-[color:var(--color-amber)]", pulse: true },
+  connected: { label: "متصل", dot: "bg-[color:var(--color-teal)]", chip: "text-[color:var(--color-teal)]", pulse: true },
+  reconnecting: { label: "در حال اتصال دوباره…", dot: "bg-[color:var(--color-amber)]", chip: "text-[color:var(--color-amber)]", pulse: true },
+  failed: { label: "اتصال برقرار نشد", dot: "bg-[color:var(--color-coral)]", chip: "text-[color:var(--color-coral)]" },
+};
+
+/** Microphone is a separate axis from the room connection. */
+const MIC_VIEW: Record<MicStatus, { label: string; className: string } | null> = {
+  ready: { label: "میکروفون روشن", className: "text-[color:var(--color-teal)]" },
+  muted: { label: "بی‌صدا", className: "text-[color:var(--color-ink-dim)]" },
+  blocked: { label: "میکروفون مسدود است", className: "text-[color:var(--color-coral)]" },
+  denied: { label: "اجازه میکروفون داده نشده", className: "text-[color:var(--color-coral)]" },
+  nodevice: { label: "میکروفونی پیدا نشد", className: "text-[color:var(--color-coral)]" },
 };
 
 export function VoicePanel({
@@ -45,20 +71,27 @@ export function VoicePanel({
   const prevParticipantsRef = useRef<{ name: string; avatarUrl: string | null; speaking: boolean }[]>([]);
   const voiceActiveRef = useRef(false);
 
-  const { participants, connected, connecting, error, speakingIdentities } = v;
+  const { participants, connected, connecting, error, speakingIdentities, status } = v;
 
-  // Tell the server when we enter/leave the voice room, so the shared sofa
-  // knows who is actually sitting in it (others shouldn't see me on the
-  // sofa unless I'm in the voice chat).
+  // We are genuinely in the voice room while connected OR reconnecting: during
+  // a reconnect LiveKit is still retrying the same room, so we are still a
+  // member of it. Using the bare `connected` boolean here made every transient
+  // blip emit `voice_left` and made the person vanish from everyone else's
+  // couch for as long as the retry took.
+  const inVoiceRoom = status === "connected" || status === "reconnecting";
+
+  // Tell the server when we enter/leave the voice room, so the shared couches
+  // know who is actually sitting in it (others shouldn't see me there unless
+  // I'm really in the voice chat).
   useEffect(() => {
-    if (connected && !voiceActiveRef.current) {
+    if (inVoiceRoom && !voiceActiveRef.current) {
       voiceActiveRef.current = true;
       onVoiceJoin?.();
-    } else if (!connected && voiceActiveRef.current) {
+    } else if (!inVoiceRoom && voiceActiveRef.current) {
       voiceActiveRef.current = false;
       onVoiceLeave?.();
     }
-  }, [connected, onVoiceJoin, onVoiceLeave]);
+  }, [inVoiceRoom, onVoiceJoin, onVoiceLeave]);
 
   // Report voice-room presence + who is speaking up to the page, so the sofa
   // and online-list can render the "talking" effect on profiles.
@@ -87,21 +120,28 @@ export function VoicePanel({
         <h4 className="flex items-center gap-2 text-[13px] font-bold text-[color:var(--color-ink)]">
           <Mic className="h-3.5 w-3.5 text-[color:var(--color-teal)]" />
           اتاق صوتی
-          {connected && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-[color:var(--color-teal)]/15 px-2 py-0.5 text-[10.5px] font-normal text-[color:var(--color-teal)]">
-              <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--color-teal)]" style={{ animation: "pulse-live 1.6s infinite" }} />
-              متصل ({participants.length})
+          {status !== "disconnected" && (
+            <span
+              data-voice-status={status}
+              className={`inline-flex items-center gap-1 rounded-full bg-white/5 px-2 py-0.5 text-[10.5px] font-normal ${STATUS_VIEW[status].chip}`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${STATUS_VIEW[status].dot}`}
+                style={STATUS_VIEW[status].pulse ? { animation: "pulse-live 1.6s infinite" } : undefined}
+              />
+              {STATUS_VIEW[status].label}
+              {status === "connected" && ` (${participants.length})`}
             </span>
           )}
         </h4>
-        {!connected ? (
+        {!inVoiceRoom ? (
           <button
             onClick={() => v.join()}
             disabled={connecting}
             className="flex h-8 items-center gap-1.5 rounded-xl border border-[color:var(--color-teal)]/40 bg-[color:var(--color-teal)]/10 px-3 text-xs font-bold text-[color:var(--color-teal)] transition-colors hover:bg-[color:var(--color-teal)]/20 disabled:opacity-50"
           >
             {connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
-            {connecting ? "در حال اتصال…" : "ورود به صدا"}
+            {status === "failed" ? "تلاش دوباره" : connecting ? "در حال اتصال…" : "ورود به صدا"}
           </button>
         ) : (
           <button
@@ -114,9 +154,29 @@ export function VoicePanel({
         )}
       </div>
 
-      {error && (
-        <p className="mb-2.5 rounded-xl border border-[color:var(--color-coral)]/30 bg-[color:var(--color-coral)]/10 px-3 py-2 text-[11.5px] leading-relaxed text-[color:var(--color-coral)]">
-          {error}
+      {error && status === "failed" && (
+        <div className="mb-2.5 rounded-xl border border-[color:var(--color-coral)]/30 bg-[color:var(--color-coral)]/10 px-3 py-2">
+          <p className="m-0 text-[11.5px] leading-relaxed text-[color:var(--color-coral)]">{error}</p>
+          {v.diagnostics.signalUrl && (
+            <p className="m-0 mt-1 font-mono text-[10px] opacity-70" dir="ltr">
+              {v.diagnostics.signalUrl}
+            </p>
+          )}
+        </div>
+      )}
+
+      {status === "reconnecting" && (
+        <p className="mb-2.5 rounded-xl border border-[color:var(--color-amber)]/30 bg-[color:var(--color-amber)]/10 px-3 py-2 text-[11.5px] leading-relaxed text-[color:var(--color-ink)]">
+          ارتباط صدا قطع شد و داریم دوباره وصل می‌شویم. تا وقتی برنگردد از اتاق صوتی خارج نمی‌شوی.
+        </p>
+      )}
+
+      {/* Microphone state is independent of the room connection: you can be
+          connected and still have no working mic, and that must not look like a
+          failed connection. */}
+      {inVoiceRoom && MIC_VIEW[v.micStatus] && (
+        <p data-mic-status={v.micStatus} className={`mb-2.5 text-[11.5px] ${MIC_VIEW[v.micStatus]!.className}`}>
+          {MIC_VIEW[v.micStatus]!.label}
         </p>
       )}
 
@@ -195,6 +255,8 @@ function VoiceRow({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.9 }}
       className="flex items-center gap-2 rounded-xl px-2 py-1.5 transition-colors hover:bg-white/5"
+      data-context-kind="voice"
+      data-context-name={p.name}
       onMouseEnter={() => setVolOpen(true)}
       onMouseLeave={() => setVolOpen(false)}
       onTouchStart={() => setVolOpen((o) => !o)}

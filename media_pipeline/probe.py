@@ -303,11 +303,29 @@ def probe(source: str, timeout: int = PROBE_TIMEOUT_S) -> MediaInfo:
     return parse_probe(data, source=source)
 
 
-def parse_probe(data: dict, source: Optional[str] = None) -> MediaInfo:
+#: Sentinel for "work the faststart answer out from ``source`` yourself".
+#: A plain ``None`` cannot be used for this because ``None`` is a meaningful
+#: answer here — "unknowable" — and the caller must be able to say it.
+_FASTSTART_UNSET: Any = object()
+
+
+def parse_probe(
+    data: dict,
+    source: Optional[str] = None,
+    *,
+    has_faststart: Any = _FASTSTART_UNSET,
+) -> MediaInfo:
     """Build :class:`MediaInfo` from an already-parsed ffprobe payload.
 
     Split out from :func:`probe` so it can be exercised against captured JSON in
     tests without spawning ffprobe.
+
+    ``has_faststart`` overrides the one answer that would otherwise require
+    touching the filesystem. By default it is detected from ``source`` exactly
+    as before; pass it explicitly (including ``None`` for "unknowable") when the
+    answer is already known — a caller holding a cached ffprobe payload, or a
+    test replaying a captured fixture, should not have to keep the original file
+    around just to learn where its ``moov`` atom sat.
     """
     streams = data.get("streams") or []
     fmt = data.get("format") or {}
@@ -377,9 +395,12 @@ def parse_probe(data: dict, source: Optional[str] = None) -> MediaInfo:
     # remote URL, or an MKV/WebM, yields None ("unknown") rather than a guess —
     # claiming faststart for a file that does not have it would advertise
     # direct play for something a browser cannot start playing early.
-    faststart: Optional[bool] = None
-    if source and os.path.isfile(source) and _is_mp4_family(container):
-        faststart = _detect_faststart(source)
+    if has_faststart is not _FASTSTART_UNSET:
+        faststart: Optional[bool] = has_faststart
+    else:
+        faststart = None
+        if source and os.path.isfile(source) and _is_mp4_family(container):
+            faststart = _detect_faststart(source)
 
     return MediaInfo(
         container=container,

@@ -8,12 +8,12 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/stream
+Environment="STREAM_ENV=production"
 Environment="STREAM_HOST=127.0.0.1"
 Environment="STREAM_PORT=8801"
-Environment="STREAM_SECRET_KEY=CHANGE_ME_openssl_rand_hex_32"
-Environment="STREAM_JWT_SECRET=CHANGE_ME_openssl_rand_hex_32"
-# STREAM_DATABASE_URL lives here instead of above, so the DB password never
-# appears in this (committed) unit file.
+Environment="PATH=/opt/stream/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="STREAM_SITE_URL=https://vergoboy.ir/stream"
+Environment="STREAM_LIVEKIT_URL=wss://vergoboy.ir/livekit"
 EnvironmentFile=/opt/stream/.stream_db.env
 
 # If your RTMP/HLS layout differs from config.py's defaults, override the

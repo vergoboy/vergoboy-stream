@@ -1,0 +1,13 @@
+ffmpeg
+-y
+-threads
+0
+-i
+/srv/media/uploads/source.mkv
+-c:v
+copy
+-c:a
+copy
+-movflags
++faststart
+/srv/media/hls/item-1/720p/faststart.mp4

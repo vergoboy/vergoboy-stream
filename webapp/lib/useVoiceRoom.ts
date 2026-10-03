@@ -45,9 +45,52 @@ function captureOptions(s: VoiceSettings, deviceId?: string) {
   };
 }
 
+/**
+ * The honest voice connection lifecycle. Every one of these is derived from a
+ * real LiveKit event or a real browser signal — nothing is ever optimistically
+ * reported as connected.
+ *
+ * - `disconnected`  not in the voice room (the only resting state)
+ * - `connecting`    token request / WebSocket handshake in flight
+ * - `connected`     media transport established, audio actually flowing
+ * - `reconnecting`  the transport dropped and LiveKit is retrying; the user is
+ *                   still "in" the room, so the UI must say so rather than
+ *                   pretending a clean disconnect
+ * - `failed`        the attempt gave up; `error` carries the real reason
+ *
+ * Microphone problems are a SEPARATE axis on purpose: a blocked or denied
+ * microphone does not disconnect you from the room, and conflating the two used
+ * to make a working connection look broken (or a broken one look fine).
+ */
+export type VoiceStatus = "disconnected" | "connecting" | "connected" | "reconnecting" | "failed";
+
+/** Why the microphone is not producing audio, when it isn't. */
+export type MicStatus = "ready" | "muted" | "blocked" | "denied" | "nodevice";
+
+export interface VoiceDiagnostics {
+  /** LiveKit signaling websocket actually in use, e.g. ws://127.0.0.1:7880 */
+  signalUrl: string | null;
+  participantIdentity: string | null;
+  localParticipantCount: number;
+  remoteParticipantCount: number;
+  /** Live audio track actually attached locally (null while muted/absent). */
+  micTrackSid: string | null;
+  audioInputDevices: number;
+  audioOutputDevices: number;
+  lastError: string | null;
+  lastErrorAt: number | null;
+  /** True only when we have seen a real Connected event. */
+  everConnected: boolean;
+  reconnectAttempts: number;
+}
+
 export interface UseVoiceRoomResult {
+  /** @deprecated prefer `status === "connected"` — this stays for compatibility. */
   connected: boolean;
   connecting: boolean;
+  status: VoiceStatus;
+  micStatus: MicStatus;
+  diagnostics: VoiceDiagnostics;
   error: string | null;
   audioBlocked: boolean;
   micMuted: boolean;
@@ -90,9 +133,27 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
   const roomRef = useRef<Room | null>(null);
   const micRef = useRef<LocalAudioTrack | null>(null);
   const volumesRef = useRef<Record<string, number>>({});
+  const microphoneUpdateRef = useRef<Promise<void>>(Promise.resolve());
+  const appliedCaptureSettingsRef = useRef<string | null>(null);
+  const connectedOnceRef = useRef(false);
 
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [status, setStatus] = useState<VoiceStatus>("disconnected");
+  const [micStatus, setMicStatus] = useState<MicStatus>("muted");
+  const [diagnostics, setDiagnostics] = useState<VoiceDiagnostics>({
+    signalUrl: null,
+    participantIdentity: null,
+    localParticipantCount: 0,
+    remoteParticipantCount: 0,
+    micTrackSid: null,
+    audioInputDevices: 0,
+    audioOutputDevices: 0,
+    lastError: null,
+    lastErrorAt: null,
+    everConnected: false,
+    reconnectAttempts: 0,
+  });
   const [error, setError] = useState<string | null>(null);
   const [micMuted, setMicMuted] = useState(false);
   const [deafened, setDeafened] = useState(false);
@@ -178,6 +239,9 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
       setDevices(list);
       const found = list.some((d) => d.deviceId === selectedDevice);
       setSelectedDevice(found ? selectedDevice : (list[0]?.deviceId ?? ""));
+      setDiagnostics((d) => ({ ...d, audioInputDevices: list.length }));
+      // No input device at all is a distinct, reportable condition.
+      if (list.length === 0) setMicStatus((s) => (s === "ready" ? s : "nodevice"));
     } catch {
       /* permission not granted yet — devices refresh again after joining */
     }
@@ -187,33 +251,58 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
       const wanted = settingsRef.current.outputDevice;
       const foundOut = outs.some((d) => d.deviceId === wanted);
       setSelectedOutputDevice(foundOut ? wanted : "");
+      setDiagnostics((d) => ({ ...d, audioOutputDevices: outs.length }));
     } catch {
       /* some browsers cannot enumerate output devices */
     }
   }, [selectedDevice]);
 
-  const applySettings = useCallback(async () => {
-    const room = roomRef.current;
-    if (!room || room.state !== ConnectionState.Connected) return;
-    const s = settingsRef.current;
-    const cap = captureOptions(s, selectedDevice);
-    try {
-      const oldPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
-      if (oldPub?.track) {
-        await room.localParticipant.unpublishTrack(oldPub.track);
+  const applySettings = useCallback(() => {
+    const update = microphoneUpdateRef.current.catch(() => {}).then(async () => {
+      const room = roomRef.current;
+      if (!room || room.state !== ConnectionState.Connected) return;
+      const s = settingsRef.current;
+      const cap = captureOptions(s, selectedDevice);
+      const captureKey = JSON.stringify(cap);
+      if (appliedCaptureSettingsRef.current === captureKey) return;
+      try {
+        const oldPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+        if (oldPub?.track) {
+          await room.localParticipant.unpublishTrack(oldPub.track);
+        }
+        micRef.current = null;
+        setMicMuted(false);
+        const track = await room.localParticipant.setMicrophoneEnabled(true, cap);
+        micRef.current = (track?.track as LocalAudioTrack | undefined) ?? null;
+        if (pushToTalkRef.current) {
+          await room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+          setMicMuted(true);
+          setMicStatus("muted");
+        } else {
+          setMicStatus(micRef.current ? "ready" : "nodevice");
+        }
+        setDiagnostics((d) => ({ ...d, micTrackSid: micRef.current?.sid ?? null }));
+        appliedCaptureSettingsRef.current = captureKey;
+      } catch (e) {
+        // A microphone failure is NOT a room failure: you can stay connected and
+        // hear everyone. Classify the real reason so the UI can say
+        // "microphone blocked" instead of a generic connection error.
+        const err = e as { name?: string; message?: string };
+        const name = err?.name ?? "";
+        const denied = name === "NotAllowedError" || name === "PermissionDeniedError" || /permission|denied|notallowed/i.test(err?.message ?? "");
+        const nodevice = name === "NotFoundError" || name === "DevicesNotFoundError" || /not found|no device/i.test(err?.message ?? "");
+        console.warn("[voice] could not (re)create microphone:", e);
+        setMicStatus(denied ? "denied" : nodevice ? "nodevice" : "blocked");
+        setDiagnostics((d) => ({
+          ...d,
+          micTrackSid: null,
+          lastError: err?.message ?? String(e),
+          lastErrorAt: Date.now() / 1000,
+        }));
       }
-      micRef.current = null;
-      setMicMuted(false);
-      const track = await room.localParticipant.setMicrophoneEnabled(true, cap);
-      micRef.current = (track?.track as LocalAudioTrack | undefined) ?? null;
-      // Re-assert the push-to-talk default (muted) after the track is rebuilt.
-      if (pushToTalkRef.current) {
-        await room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
-        setMicMuted(true);
-      }
-    } catch (e) {
-      console.warn("[voice] could not (re)create microphone:", e);
-    }
+    });
+    microphoneUpdateRef.current = update;
+    return update;
   }, [selectedDevice]);
 
   const applySettingsRef = useRef(applySettings);
@@ -276,22 +365,35 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
     }
     micRef.current = null;
     roomRef.current = null;
+    appliedCaptureSettingsRef.current = null;
     gestureCleanupRef.current?.();
     gestureCleanupRef.current = null;
     talkingRef.current = false;
     setTalkingRaw(false);
     setConnected(false);
+    setStatus("disconnected");
+    setMicStatus("muted");
     setParticipants([]);
     setSpeakingIdentities(new Set());
     setMicMuted(false);
     setDeafened(false);
     setNetworkQuality(ConnectionQuality.Unknown);
+    setDiagnostics((d) => ({
+      ...d,
+      signalUrl: null,
+      participantIdentity: null,
+      localParticipantCount: 0,
+      remoteParticipantCount: 0,
+      micTrackSid: null,
+      reconnectAttempts: 0,
+    }));
   }, []);
 
   const join = useCallback(async () => {
     if (roomRef.current) return;
     setError(null);
     setConnecting(true);
+    setStatus("connecting");
     try {
       const { url, token } = await api.voiceToken(myName, myAvatarUrl);
       const room = new Room({
@@ -301,9 +403,45 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
         audioCaptureDefaults: captureOptions(settingsRef.current),
       });
       roomRef.current = room;
+      setDiagnostics((d) => ({
+        ...d,
+        signalUrl: url || null,
+        lastError: null,
+      }));
+      appliedCaptureSettingsRef.current = null;
 
       room
-        .on(RoomEvent.ConnectionStateChanged, (s) => setConnected(s === ConnectionState.Connected))
+        .on(RoomEvent.ConnectionStateChanged, (s) => {
+          setConnected(s === ConnectionState.Connected);
+          // Map LiveKit's real transport state onto our honest status. The old
+          // code only tracked a boolean, so a dropped-and-retrying transport
+          // was indistinguishable from a clean disconnect — the UI showed
+          // "connected" while nothing was flowing, or claimed a failure the
+          // SFU was about to recover from.
+          setStatus(
+            s === ConnectionState.Connected
+              ? "connected"
+              : s === ConnectionState.Reconnecting || s === ConnectionState.SignalReconnecting
+                ? "reconnecting"
+                : s === ConnectionState.Connecting
+                  ? "connecting"
+                  : "disconnected"
+          );
+          if (s === ConnectionState.Connected) {
+            connectedOnceRef.current = true;
+            setDiagnostics((d) => ({ ...d, everConnected: true, reconnectAttempts: 0 }));
+          }
+        })
+        .on(RoomEvent.Reconnecting, () => {
+          setStatus("reconnecting");
+          setDiagnostics((d) => ({ ...d, reconnectAttempts: d.reconnectAttempts + 1 }));
+        })
+        .on(RoomEvent.Reconnected, () => {
+          setStatus("connected");
+          setConnected(true);
+          setDiagnostics((d) => ({ ...d, everConnected: true, reconnectAttempts: 0 }));
+          refreshParticipants(room);
+        })
         .on(RoomEvent.ParticipantConnected, () => refreshParticipants(room))
         .on(RoomEvent.ParticipantDisconnected, () => refreshParticipants(room))
         .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
@@ -367,10 +505,24 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
           console.warn("[voice] could not set audio output:", e);
         }
       }
-      refreshParticipants(room);
+refreshParticipants(room);
       await refreshDevices();
+      // Only claim "connected" if LiveKit actually reports it. `connect()`
+      // resolving is necessary but not sufficient evidence of audio.
+      setStatus((prev) => (prev === "connected" || prev === "reconnecting" ? prev : room.state === ConnectionState.Connected ? "connected" : prev));
+      setDiagnostics((d) => ({
+        ...d,
+        participantIdentity: room.localParticipant.identity ?? null,
+        localParticipantCount: room.localParticipant ? 1 : 0,
+        remoteParticipantCount: room.remoteParticipants.size,
+      }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "اتصال به اتاق صوتی ناموفق بود");
+      const msg = e instanceof Error ? e.message : "اتصال به اتاق صوتی ناموفق بود";
+      setError(msg);
+      // A real failure is a failure — never leave the status at "connecting"
+      // or "connected" after the attempt has already given up.
+      setStatus("failed");
+      setDiagnostics((d) => ({ ...d, lastError: msg, lastErrorAt: Date.now() / 1000 }));
       roomRef.current?.disconnect().catch(() => {});
       roomRef.current = null;
     } finally {
@@ -412,8 +564,25 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
     const room = roomRef.current;
     if (!room || room.state !== ConnectionState.Connected) return;
     const next = !room.localParticipant.isMicrophoneEnabled;
-    room.localParticipant.setMicrophoneEnabled(next).catch(() => {});
+    // Reflect the user's intent immediately, then reconcile with the real
+    // track state once LiveKit confirms it — a mic that silently failed to
+    // enable must not be shown as "ready".
     setMicMuted(!next);
+    setMicStatus(next ? "ready" : "muted");
+    room.localParticipant
+      .setMicrophoneEnabled(next)
+      .then(() => {
+        const pub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+        const sid = pub?.track?.sid ?? null;
+        setDiagnostics((d) => ({ ...d, micTrackSid: sid }));
+        if (next && !sid) setMicStatus("blocked");
+      })
+      .catch((e: unknown) => {
+        const err = e as { name?: string; message?: string };
+        const denied = err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError";
+        setMicStatus(denied ? "denied" : "blocked");
+        setDiagnostics((d) => ({ ...d, lastError: err?.message ?? String(e), lastErrorAt: Date.now() / 1000 }));
+      });
     refreshParticipants(room);
   }, [refreshParticipants]);
 
@@ -440,6 +609,7 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
       if (!room || room.state !== ConnectionState.Connected) return;
       room.localParticipant.setMicrophoneEnabled(on).catch(() => {});
       setMicMuted(!on);
+      setMicStatus(on ? "ready" : "muted");
       refreshParticipants(room);
     },
     [refreshParticipants]
@@ -448,9 +618,18 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
   // Enforce the selected voice mode whenever the room (or mode) changes:
   // PTT keeps the mic muted until the key is held; always-on unmutes it.
   useEffect(() => {
-    if (!connected) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync the live mic state once the room (or voice mode) becomes available
-    setTalking(!appSettings.pushToTalk);
+    if (!connected) {
+      connectedOnceRef.current = false;
+      return;
+    }
+    const shouldTalk = !appSettings.pushToTalk;
+    if (!connectedOnceRef.current) {
+      connectedOnceRef.current = true;
+      talkingRef.current = shouldTalk;
+      setTalkingRaw(shouldTalk);
+      return;
+    }
+    setTalking(shouldTalk);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, appSettings.pushToTalk]);
 
@@ -537,6 +716,9 @@ export function useVoiceRoom(myName: string, myAvatarUrl: string | null): UseVoi
   return {
     connected,
     connecting,
+    status,
+    micStatus,
+    diagnostics,
     error,
     audioBlocked,
     micMuted,

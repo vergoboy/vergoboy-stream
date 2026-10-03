@@ -1,9 +1,9 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { Users, Bell, LogOut, Shield, Gamepad2, Eye } from "lucide-react";
+import { Bell, Shield, Gamepad2, Eye, ImagePlus } from "lucide-react";
 import { Avatar } from "./Avatar";
-import type { NotifyEvent, PlaylistItem, PresenceUser, UserRole } from "@/lib/types";
+import type { NotifyEvent, PlaylistItem, UserRole } from "@/lib/types";
 import { notifyText } from "@/lib/notifyText";
 
 const ROLE_LABELS: Record<UserRole, { label: string; icon: React.ReactNode; color: string }> = {
@@ -17,8 +17,6 @@ export function Sidebar({
   myAvatarUrl,
   role,
   onChangeAvatar,
-  onLogout,
-  onlineUsers,
   notifications,
   playlist,
 }: {
@@ -26,8 +24,6 @@ export function Sidebar({
   myAvatarUrl: string | null;
   role: UserRole;
   onChangeAvatar: (file: File) => void;
-  onLogout: () => void;
-  onlineUsers: PresenceUser[];
   notifications: NotifyEvent[];
   playlist: PlaylistItem[];
 }) {
@@ -43,7 +39,8 @@ export function Sidebar({
               شما: <b className="text-[color:var(--color-ink)]">{myName}</b>
             </div>
             <div className="flex gap-3 text-[11.5px]">
-              <label className="cursor-pointer text-[color:var(--color-amber)] hover:underline">
+              <label className="flex cursor-pointer items-center gap-1 text-[color:var(--color-amber)] hover:underline">
+                <ImagePlus className="h-3 w-3" />
                 تغییر عکس
                 <input
                   type="file"
@@ -55,11 +52,7 @@ export function Sidebar({
                     e.target.value = "";
                   }}
                 />
-              </label>
-              <button onClick={onLogout} className="flex items-center gap-1 text-[color:var(--color-coral)] hover:underline">
-                <LogOut className="h-3 w-3" />
-                خروج
-              </button>
+</label>
             </div>
             <div className={`mt-1 flex items-center gap-1 text-[11px] ${roleInfo.color}`}>
               {roleInfo.icon}
@@ -68,22 +61,6 @@ export function Sidebar({
           </div>
         </div>
 
-        <h4 className="mb-2.5 flex items-center gap-1.5 text-[13px] font-bold text-[color:var(--color-ink)]">
-          <Users className="h-3.5 w-3.5 text-[color:var(--color-teal)]" />
-          آنلاین ({onlineUsers.length})
-        </h4>
-        <ul className="flex flex-wrap gap-1.5">
-          {onlineUsers.map((u) => (
-            <li
-              key={u.name}
-              className="flex items-center gap-1.5 rounded-full border border-[color:var(--color-border)] bg-white/5 py-1 pl-2.5 pr-1 text-xs text-[color:var(--color-ink)]"
-            >
-              <Avatar name={u.name} url={u.avatar_url} size={18} />
-              <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--color-teal)]" />
-              {u.name}
-            </li>
-          ))}
-        </ul>
       </div>
 
       <div>

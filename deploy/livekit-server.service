@@ -1,0 +1,25 @@
+[Unit]
+Description=LiveKit SFU for vergoboy.ir watch rooms
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=livekit
+Group=www-data
+ExecStartPre=/usr/bin/test -r /etc/livekit/config.yaml
+ExecStart=/usr/local/lib/livekit/v1.13.7/livekit-server --config /etc/livekit/config.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

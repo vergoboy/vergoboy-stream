@@ -117,7 +117,10 @@ class Plan:
     audio_action: AudioAction
     subtitle_action: SubtitleAction
 
-    #: Output video codec name for ffmpeg (-c:v). None in COPY mode.
+    #: Output video codec for ffmpeg (-c:v). In COPY/REMUX mode this is the
+    #: literal string "copy" (which is what -c:v copy means to ffmpeg), not
+    #: None — ffmpeg_cmd passes it straight through, and None would be emitted
+    #: as the ffmpeg default and silently re-encode.
     video_codec: Optional[str]
     #: Output pixel format (-pix_fmt). None in COPY mode.
     pix_fmt: Optional[str]
@@ -369,13 +372,31 @@ def plan(
     # Direct play: a faststart MP4 whose video and audio are both browser-safe
     # can bypass HLS entirely. Anything unknown is excluded — serving an
     # unplayable file directly is worse than paying for segments.
-    video_safe = (video.codec or "") in BROWSER_SAFE_VIDEO and not video.is_hdr
+    #
+    # Bit depth belongs in `video_safe`, not just in the mode decision above.
+    # A 10-bit H.264 (High 10 / High 4:2:2 10 / High 4:4:4 Predictive 10) is
+    # "h264", so a codec-name test alone waves it through — but no mainstream
+    # browser ships an H.264 decoder that handles those profiles, so the file
+    # we would hand over is exactly the unplayable one this branch exists to
+    # avoid. _video_decision already transcodes it for the ladder; direct play
+    # has to agree, or the fast path serves a black screen while the slow path
+    # would have worked.
+    video_safe = (
+        (video.codec or "") in BROWSER_SAFE_VIDEO
+        and not video.is_hdr
+        and not video.is_10bit
+    )
     audio_safe = all((a.codec or "") in BROWSER_SAFE_AUDIO for a in info.audio) if info.audio else True
     direct_play = bool(
         video_safe and audio_safe and info.has_faststart and not needs_compat
     )
     if direct_play:
         reasons.append("browser-safe codecs with faststart — eligible for direct play without HLS")
+    elif video.is_10bit and info.has_faststart and (video.codec or "") in BROWSER_SAFE_VIDEO:
+        reasons.append(
+            f"{video.codec} is {video.profile or '10-bit'} — outside what browsers decode, "
+            "so this cannot be served as a direct play even though the container is faststart"
+        )
 
     return Plan(
         mode=mode,

@@ -1,0 +1,9 @@
+-r requirements.txt
+pgserver>=0.1.4,<0.2
+
+# Test suite. pytest collects the existing unittest.TestCase classes unchanged,
+# so the 170 tests already covering the pipeline keep running under `make test`
+# alongside the new parametrised suites.
+pytest>=8.0,<9.0
+# Terminal + --cov for the >=85% coverage floor on media_pipeline/.
+pytest-cov>=5.0,<7.0

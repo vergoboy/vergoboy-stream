@@ -9,16 +9,12 @@ import {
   RotateCcw,
   Film,
   MessageSquare,
-  Palette,
   Keyboard,
   Maximize,
-  Minimize,
   PictureInPicture2,
   Radio,
   Loader2,
   Slash,
-  Check,
-  HelpCircle,
   Settings,
   SkipBack,
   SkipForward,
@@ -26,7 +22,7 @@ import {
   GripVertical,
   X,
   TriangleAlert,
-  MonitorPlay,
+  MoreHorizontal,
   Headphones,
   Plus,
 } from "lucide-react";
@@ -37,11 +33,16 @@ import { useCallback, useEffect, useRef, useState, startTransition } from "react
 import type Hls from "hls.js";
 import { formatTime, isHlsUrl, levelLabelFromUrl, prettyTitle } from "@/lib/format";
 import { api } from "@/lib/api";
-import { useAppSettings, type ShortcutAction } from "@/lib/settings";
+import { mediaUrl } from "@/lib/config";
+import { DEFAULT_SETTINGS, useAppSettings, type ShortcutAction } from "@/lib/settings";
 import type { NotifyEvent, PlaylistItem, Rendition, SubStyle, TranscodeProgress } from "@/lib/types";
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-type MenuName = "speed" | "quality" | "audio" | "subtitle" | null;
+type MenuName = "speed" | "quality" | "audio" | "subtitle" | "more" | null;
+
+/** hls.js doesn't expose a retry budget; we track our own so the fatal-error
+ *  handler can stop recovering and surface a real message to the user. */
+type HlsWithBudget = Hls & { networkRecoveryAttempts: number; mediaRecoveryAttempts: number };
 
 function defaultRendition(item: PlaylistItem | null): Rendition | undefined {
   return item?.renditions?.find((r) => r.is_default) ?? item?.renditions?.[0];
@@ -60,6 +61,8 @@ export function Player({
   canSpeed,
   canPrev,
   canNext,
+  canControl,
+  onPlaybackState,
   shuffle,
   canShuffle,
   onPrev,
@@ -82,6 +85,11 @@ export function Player({
   canSpeed: boolean;
   canPrev: boolean;
   canNext: boolean;
+  /** May change the shared media/playlist (room owner or promoted manager). */
+  canControl: boolean;
+  /** Report real playback state upward so the server can mark this person as
+   *  actually watching (vs merely browsing the room). */
+  onPlaybackState?: (watching: boolean, itemId: string | null) => void;
   shuffle: boolean;
   canShuffle: boolean;
   onPrev: () => void;
@@ -92,7 +100,7 @@ export function Player({
   onOpenShortcuts: () => void;
   onOpenSettings?: () => void;
 }) {
-  const { settings } = useAppSettings();
+  const { settings, setSettings } = useAppSettings();
   const sc = settings.shortcuts;
   const videoRef = useRef<HTMLVideoElement>(null);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
@@ -110,10 +118,35 @@ export function Player({
   const [duration, setDuration] = useState(0);
   const [dragging, setDragging] = useState(false);
   const dragValueRef = useRef(0);
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(false);
+  // Seeded from (and written back to) settings so the room always opens at the
+  // listener's own level. Seeded once; writes only happen from user actions.
+  const [volume, setVolume] = useState(settings.playback?.volume ?? 1);
+  const [muted, setMuted] = useState(settings.playback?.muted ?? false);
+  const changeVolume = useCallback((next: number | ((x: number) => number)) => {
+    setVolume(next);
+    setSettings((s) => {
+      const current = s.playback?.volume ?? DEFAULT_SETTINGS.playback.volume;
+      const volume = Math.min(1, Math.max(0, typeof next === "function" ? next(current) : next));
+      return { ...s, playback: { volume, muted: s.playback?.muted ?? DEFAULT_SETTINGS.playback.muted } };
+    });
+  }, [setSettings]);
+  const changeMuted = useCallback((next: boolean | ((m: boolean) => boolean)) => {
+    setMuted(next);
+    setSettings((s) => {
+      const current = s.playback?.muted ?? DEFAULT_SETTINGS.playback.muted;
+      return {
+        ...s,
+        playback: { volume: s.playback?.volume ?? DEFAULT_SETTINGS.playback.volume, muted: typeof next === "function" ? next(current) : next },
+      };
+    });
+  }, [setSettings]);
   const [buffering, setBuffering] = useState(false);
   const [bigPlay, setBigPlay] = useState(false);
+  // A REAL playback failure reported by the media element or by hls.js.
+  // Never invented: it is only ever set from an actual MediaError /
+  // hls.js fatal error / failed media request, and is cleared as soon as a
+  // source loads and starts playing again.
+  const [playbackError, setPlaybackError] = useState<{ title: string; detail: string; code?: string } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [cursorHidden, setCursorHidden] = useState(false);
   const [currentSubIndex, setCurrentSubIndex] = useState(-1);
@@ -255,6 +288,17 @@ export function Player({
   const isPlayable = Boolean(
     item && item.src && (item.status === "ready" || item.status === "complete" || item.type === "live" || item.status === undefined)
   );
+  const mediaSrc = item?.src ? mediaUrl(item.src) : null;
+  // Bumped by the Retry button to force the source-loading effect to tear the
+  // old player down and attach a brand new one.
+  const [sourceEpoch, setSourceEpoch] = useState(0);
+
+  const retryPlayback = useCallback(() => {
+    setPlaybackError(null);
+    setBuffering(true);
+    setBigPlay(false);
+    setSourceEpoch((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -271,6 +315,11 @@ export function Player({
     needsMenuRefresh.current = false;
     setCurrentSubIndex(-1);
     setCurrentAudioTrackId(null);
+    // A new source gets a fresh error slate and fresh recovery budget, so the
+    // error from the previous item can't linger over a working video.
+    setPlaybackError(null);
+    setBuffering(isPlayable);
+    setBigPlay(false);
 
     if (!isPlayable) {
       v.removeAttribute("src");
@@ -280,7 +329,7 @@ export function Player({
 
     let cancelled = false;
     (async () => {
-      if (isHlsUrl(item!.src)) {
+      if (isHlsUrl(mediaSrc!)) {
         const HlsMod = (await import("hls.js")).default;
         if (cancelled) return;
         if (HlsMod.isSupported()) {
@@ -300,10 +349,15 @@ export function Player({
           manifestLoadingRetryDelay: 1000,
           levelLoadingMaxRetry: 15,
           levelLoadingRetryDelay: 1000,
-          fragLoadingMaxRetry: 15,
+          fragLoadingMaxRetry: 3,
           fragLoadingRetryDelay: 1000,
         });
           hlsRef.current = hls;
+          // Bounded recovery: track how many automatic retries we already
+          // spent so the fatal handler can give up and show a real error
+          // instead of looping silently forever.
+          (hls as HlsWithBudget).networkRecoveryAttempts = 0;
+          (hls as HlsWithBudget).mediaRecoveryAttempts = 0;
           hls.on(HlsMod.Events.MANIFEST_PARSED, () => {
             setLevels(hls.levels.map((l) => ({ height: l.height, label: levelLabelFromUrl(l.url) || `${l.height}p` })));
             setCurrentLevel(hls.currentLevel);
@@ -317,15 +371,43 @@ export function Player({
             if (data.fatal) {
               switch (data.type) {
                 case HlsMod.ErrorTypes.NETWORK_ERROR:
-                  console.warn("[hls.js] Network error, recovering...", data);
-                  hls.startLoad();
+                  // Only ONE recovery attempt: a manifest that 404s will fail
+                  // again immediately, and silently retrying forever is what
+                  // produced the "stuck loading" state with no explanation.
+                  if ((hls as HlsWithBudget).networkRecoveryAttempts < 2) {
+                    (hls as HlsWithBudget).networkRecoveryAttempts++;
+                    console.warn("[hls.js] Network error, recovering...", data);
+                    hls.startLoad();
+                  } else {
+                    setPlaybackError({
+                      title: "Couldn't load this video",
+                      detail: "The streaming server didn't return the video data.",
+                      code: data.details || data.type,
+                    });
+                  }
                   break;
                 case HlsMod.ErrorTypes.MEDIA_ERROR:
-                  console.warn("[hls.js] Media error, recovering...", data);
-                  hls.recoverMediaError();
+                  if ((hls as HlsWithBudget).mediaRecoveryAttempts < 2) {
+                    (hls as HlsWithBudget).mediaRecoveryAttempts++;
+                    console.warn("[hls.js] Media error, recovering...", data);
+                    hls.recoverMediaError();
+                  } else {
+                    setPlaybackError({
+                      title: "This video can't be decoded",
+                      detail: "Your browser couldn't decode the video stream.",
+                      code: data.details || data.type,
+                    });
+                  }
                   break;
                 default:
+                  // Previously this just destroyed the player, leaving a black
+                  // rectangle and an endless spinner with no cause. Surface it.
                   console.error("[hls.js] Unrecoverable error:", data);
+                  setPlaybackError({
+                    title: "Couldn't play this video",
+                    detail: data.details ? String(data.details).replace(/_/g, " ").toLowerCase() : "The stream is broken.",
+                    code: data.details,
+                  });
                   hls.destroy();
                   hlsRef.current = null;
                   break;
@@ -337,21 +419,20 @@ export function Player({
               }
             }
           });
-          hls.loadSource(item!.src!);
+          hls.loadSource(mediaSrc!);
           hls.attachMedia(v);
         } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
-          v.src = item!.src!; // Safari native HLS — ABR is internal, no manual level API
+          v.src = mediaSrc!; // Safari native HLS — ABR is internal, no manual level API
         }
       } else {
-        v.src = item!.src!;
+        v.src = mediaSrc!;
       }
     })();
 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item?.id, item?.src, isPlayable]);
+  }, [item?.id, mediaSrc, isPlayable, sourceEpoch]);
 
   // ---- reload the manifest (without disrupting anyone else) once a new
   // rendition becomes available; auto-switch only if *I* asked for it ----
@@ -375,17 +456,17 @@ export function Player({
           };
           import("hls.js").then(({ default: HlsMod }) => {
             hls.once(HlsMod.Events.MANIFEST_PARSED, onParsed);
-            hls.loadSource(item.src!);
+            hls.loadSource(mediaSrc!);
           });
         }
       } else {
         needsMenuRefresh.current = true;
       }
     }
-  }, [latestNotify, item]);
+  }, [latestNotify, item, mediaSrc]);
 
   function refreshMenuIfStale() {
-    if (needsMenuRefresh.current && hlsRef.current && item?.src) {
+    if (needsMenuRefresh.current && hlsRef.current && mediaSrc) {
       needsMenuRefresh.current = false;
       const hls = hlsRef.current;
       const v = videoRef.current;
@@ -400,7 +481,7 @@ export function Player({
             if (wasPlaying) v.play().catch(() => {});
           }
         });
-        hls.loadSource(item.src!);
+        hls.loadSource(mediaSrc);
       });
     }
   }
@@ -436,6 +517,23 @@ export function Player({
   const expectedPositionRef = useRef(expectedPosition);
   useEffect(() => { expectedPositionRef.current = expectedPosition; }, [expectedPosition]);
 
+  // Refs for the end-of-media handler so its listeners can stay attached for
+  // the life of the media element without re-binding on every state change.
+  const itemRef = useRef(item);
+  const playingRef = useRef(playing);
+  const canNextRef = useRef(canNext);
+  const canControlRef = useRef(canControl);
+  const onNextRef = useRef(onNext);
+  const requestControlRef = useRef(requestControl);
+  const onPlaybackStateRef = useRef(onPlaybackState);
+  useEffect(() => { itemRef.current = item; }, [item]);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+  useEffect(() => { canNextRef.current = canNext; }, [canNext]);
+  useEffect(() => { canControlRef.current = canControl; }, [canControl]);
+  useEffect(() => { onNextRef.current = onNext; }, [onNext]);
+  useEffect(() => { requestControlRef.current = requestControl; }, [requestControl]);
+  useEffect(() => { onPlaybackStateRef.current = onPlaybackState; }, [onPlaybackState]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !item) return;
@@ -463,6 +561,17 @@ export function Player({
             }
             expected = Math.max(0, frontier - MARGIN);
           }
+        }
+        // The shared playhead must NEVER be past the real end of this media.
+        // The server has no idea how long the video is and keeps advancing
+        // position while playing=true, so a position carried over from a
+        // longer item (or from before a re-encode shortened the file) used to
+        // be assigned straight to currentTime. The browser silently clamped
+        // it to the end, fired `ended`, and the player stayed frozen on the
+        // last frame forever — no error, no explanation, no way out.
+        const mediaDuration = v.duration;
+        if (isFinite(mediaDuration) && mediaDuration > 0 && expected >= mediaDuration) {
+          expected = Math.max(0, mediaDuration - 0.05);
         }
         if (!v.seeking && Math.abs((v.currentTime || 0) - expected) > 1.2) {
           try { v.currentTime = expected; } catch {}
@@ -504,22 +613,80 @@ export function Player({
       }
     };
     const onWaiting = () => setBuffering(true);
+    // "watching" is driven by the media element's own play/pause events, so
+    // the lounge couch reflects real playback. `onPause` also fires at end of
+    // media, which is exactly right — a finished video is not "watching".
     const onPlaying = () => {
       setBuffering(false);
       setBigPlay(false);
+      onPlaybackStateRef.current?.(true, itemRef.current?.id ?? null);
+    };
+    const onPause = () => {
+      onPlaybackStateRef.current?.(false, itemRef.current?.id ?? null);
     };
     const onCanPlay = () => setBuffering(false);
+    // A real media-element failure (codec unsupported, demux failure,
+    // src unreachable after a reload). MediaError.code is the browser's own
+    // code, surfaced verbatim so the message is never invented.
+    const onMediaError = () => {
+      const err = v.error;
+      if (!err) return;
+      const names: Record<number, string> = {
+        1: "Loading this video was aborted.",
+        2: "A network error interrupted the video.",
+        3: "This video could not be decoded by your browser.",
+        4: "This video format isn't supported by your browser.",
+      };
+      setPlaybackError({
+        title: "Couldn't play this video",
+        detail: names[err.code] || "The video stopped with an unknown error.",
+        code: `MediaError ${err.code}`,
+      });
+      setBuffering(false);
+    };
+    // THE end-of-media handler. Without this the player had no way to react
+    // to finishing: it just sat on the last frame. Now the room reconciles
+    // itself — advance to the next item when we're allowed to, otherwise
+    // stop the shared playhead at the real end so the server stops counting
+    // position past the end of the file.
+    const onEnded = () => {
+      setBuffering(false);
+      setBigPlay(false);
+      if (!itemRef.current) return;
+      if (itemRef.current.type === "live") return;
+      // Idempotent by construction: the only branch that doesn't flip
+      // playing=false changes the current item, so a repeat `ended` event
+      // finds nothing left to do. No extra bookkeeping needed.
+      if (!playingRef.current) return;
+      if (canControlRef.current && canNextRef.current) {
+        // Shared watch-together playlist: run the room on to the next item.
+        onNextRef.current();
+        return;
+      }
+      // Either we're a viewer (can't change the playlist) or this was the last
+      // item. Nothing left to play, yet the shared clock keeps running because
+      // the server has no idea how long the file is — stop it at the truth so
+      // the playhead can never drift past the end of the media again.
+      const realEnd = v.duration && isFinite(v.duration) ? v.duration : v.currentTime || 0;
+      requestControlRef.current("pause", { at: realEnd });
+    };
     v.addEventListener("loadedmetadata", onLoadedMeta);
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("waiting", onWaiting);
     v.addEventListener("playing", onPlaying);
+    v.addEventListener("pause", onPause);
     v.addEventListener("canplay", onCanPlay);
+    v.addEventListener("error", onMediaError);
+    v.addEventListener("ended", onEnded);
     return () => {
       v.removeEventListener("loadedmetadata", onLoadedMeta);
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("waiting", onWaiting);
       v.removeEventListener("playing", onPlaying);
+      v.removeEventListener("pause", onPause);
       v.removeEventListener("canplay", onCanPlay);
+      v.removeEventListener("error", onMediaError);
+      v.removeEventListener("ended", onEnded);
     };
   }, [dragging, currentSubIndex]);
 
@@ -692,14 +859,14 @@ export function Player({
           return;
         case "volumeUp":
           e.preventDefault();
-          setVolume((x) => Math.min(1, x + 0.05));
+          changeVolume((x) => Math.min(1, x + 0.05));
           return;
         case "volumeDown":
           e.preventDefault();
-          setVolume((x) => Math.max(0, x - 0.05));
+          changeVolume((x) => Math.max(0, x - 0.05));
           return;
         case "mute":
-          setMuted((m) => !m);
+          changeMuted((m) => !m);
           return;
         case "fullscreen":
           toggleFullscreen();
@@ -742,7 +909,7 @@ export function Player({
           setShowDebug((s) => !s);
           break;
         case "M":
-          setMuted((m) => !m);
+          changeMuted((m) => !m);
           break;
         case "F":
           toggleFullscreen();
@@ -776,7 +943,7 @@ export function Player({
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [item, togglePlay, seek, onOpenShortcuts, onOpenSettings, canPrev, canNext, onPrev, onNext, fullscreen, resetCursorTimer, toggleFullscreen, togglePip, sc]);
+  }, [item, togglePlay, seek, onOpenShortcuts, onOpenSettings, canPrev, canNext, onPrev, onNext, fullscreen, resetCursorTimer, toggleFullscreen, togglePip, sc, changeVolume, changeMuted]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -787,6 +954,10 @@ export function Player({
   }, [volume, muted]);
 
   const processing = !item || item.status === "queued" || item.status === "encoding" || item.status === "error";
+  // A third dead-end state the old code had: the item is marked `complete` but
+  // has no playable src. `processing` was false and `isPlayable` was false, so
+  // the player rendered a bare black rectangle with nothing on it at all.
+  const noPlayableSource = Boolean(item) && !processing && !isPlayable;
   const def = defaultRendition(item);
   const defProgress = def ? transcodeProgress[`${item?.id}:${def.label}`] : undefined;
   const totalDuration = defProgress?.duration ?? duration;
@@ -798,6 +969,8 @@ export function Player({
     <>
       <div
         ref={wrapRef}
+        data-context-kind="player"
+        tabIndex={-1}
         onMouseMove={fullscreen ? resetCursorTimer : undefined}
         onMouseDown={fullscreen ? resetCursorTimer : undefined}
         onTouchStart={fullscreen ? () => { resetCursorTimer(); } : undefined}
@@ -853,7 +1026,7 @@ export function Player({
             className="h-full w-full object-contain"
         >
           {item?.subtitles?.map((s) => (
-            <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={s.url} default={false} />
+            <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={mediaUrl(s.url)} default={false} />
           ))}
         </video>
           <audio ref={dubAudioRef} preload="auto" />
@@ -889,13 +1062,13 @@ export function Player({
           </div>
         )}
 
-        {buffering && !processing && (
+        {buffering && !processing && !playbackError && !noPlayableSource && (
           <div className="absolute inset-0 z-[4] flex items-center justify-center">
             <div className="h-11 w-11 rounded-full border-[3px] border-white/15" style={{ borderTopColor: "var(--color-amber)", animation: "spin .9s linear infinite" }} />
           </div>
         )}
 
-        {bigPlay && !processing && (
+        {bigPlay && !processing && !playbackError && !noPlayableSource && (
           <button
             onClick={() => {
               setBigPlay(false);
@@ -944,6 +1117,55 @@ export function Player({
           </div>
         )}
 
+        {noPlayableSource && (
+          <div
+            role="alert"
+            className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)] px-6 text-center"
+          >
+            <Film className="h-11 w-11 text-[color:var(--color-ink-muted)]" />
+            <p className="m-0 text-[15px] text-[color:var(--color-ink)]">این ویدیو فایل پخشی ندارد</p>
+            <p className="m-0 max-w-[420px] text-[13px] text-[color:var(--color-ink-muted)]">
+              «{prettyTitle(item?.title)}» آماده است ولی هیچ فایل قابل پخشی برایش ساخته نشده.
+            </p>
+            <button
+              onClick={onGoToAdd}
+              className="mt-1 rounded-xl border border-[color:var(--color-amber)]/50 bg-white/5 px-4 py-2 text-[13px] text-[color:var(--color-ink)] transition-colors hover:bg-white/10"
+            >
+              افزودن ویدیو
+            </button>
+          </div>
+        )}
+
+        {playbackError && (
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)] px-6 text-center"
+          >
+            <TriangleAlert className="h-11 w-11 text-[color:var(--color-coral)]" />
+            <p className="m-0 text-[15px] font-medium text-[color:var(--color-ink)]">{playbackError.title}</p>
+            <p className="m-0 max-w-[420px] text-[13px] text-[color:var(--color-ink-muted)]">{playbackError.detail}</p>
+            {playbackError.code && (
+              <code className="rounded-md bg-white/5 px-2 py-1 font-mono text-[11px] text-[color:var(--color-ink-muted)]">{playbackError.code}</code>
+            )}
+            <div className="mt-1 flex items-center gap-2">
+              <button
+                onClick={retryPlayback}
+                className="flex items-center gap-1.5 rounded-xl border border-[color:var(--color-amber)]/50 bg-white/5 px-4 py-2 text-[13px] text-[color:var(--color-ink)] transition-colors hover:bg-white/10"
+              >
+                <RotateCcw className="h-4 w-4" />
+                تلاش دوباره
+              </button>
+              <button
+                onClick={onGoToAdd}
+                className="rounded-xl border border-[color:var(--color-border)] px-4 py-2 text-[13px] text-[color:var(--color-ink-muted)] transition-colors hover:text-[color:var(--color-ink)]"
+              >
+                ویدیوی دیگر
+              </button>
+            </div>
+          </div>
+        )}
+
         {toast && (
           <div className="absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-xl border border-[color:var(--color-amber)]/40 bg-black/80 px-4 py-2 text-xs text-[color:var(--color-ink)] backdrop-blur">
             {toast}
@@ -964,10 +1186,10 @@ export function Player({
         >
           <div className="flex items-center justify-between gap-2.5">
             <div className="flex items-center gap-1">
-              <CtrlBtn title="بی‌صدا" onClick={() => setMuted((m) => !m)}>
+              <CtrlBtn title="بی‌صدا" onClick={() => changeMuted((m) => !m)}>
                 {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </CtrlBtn>
-              <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
+              <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => changeVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
             </div>
             <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item ? prettyTitle(item.title) : ""}</div>
             <div className="flex items-center gap-1">
@@ -979,7 +1201,7 @@ export function Player({
         </div>
       )}
 
-        {!processing && !floating && item?.type !== "live" && (
+{!processing && !floating && item?.type !== "live" && (
         <div
           dir="ltr"
           className={`transition-opacity duration-300 ${
@@ -990,6 +1212,7 @@ export function Player({
               : "relative z-10 p-3.5 pb-4 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/90 rounded-b-3xl"
           }`}
         >
+          {/* The timeline is the shared playhead. */}
           <div className="mb-2 flex items-center gap-2.5">
             <span className="min-w-[90px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]" dir="ltr">{formatTime(curTime)}{isFinite(totalDuration) && totalDuration > 0 ? ` / ${formatTime(totalDuration)}` : ""}</span>
             <div className="relative flex-1">
@@ -1028,123 +1251,174 @@ export function Player({
             <span className="min-w-[90px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]" dir="ltr">{isFinite(totalDuration) && totalDuration > 0 ? formatTime(totalDuration) : formatTime(duration)}</span>
           </div>
 
+          {/* Only four things live on the bar by default: play/pause, the
+              timeline above, volume, and fullscreen. Everything else is a
+              secondary option and belongs in a menu — so the controls people
+              actually reach for stay legible instead of drowning in chips. */}
           <div className="flex flex-wrap items-center justify-between gap-2.5">
-            <div className="flex flex-wrap items-center gap-1">
-              <CtrlBtn title="پخش / مکث" main onClick={togglePlay}>
+            <div className="flex items-center gap-1">
+              <CtrlBtn title="پخش / مکث (K)" main onClick={togglePlay}>
                 {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
               </CtrlBtn>
-              <CtrlBtn title="آیتم قبلی (P)" onClick={onPrev} disabled={!canPrev}>
-                <SkipBack className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="آیتم بعدی (N)" onClick={onNext} disabled={!canNext}>
-                <SkipForward className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="پخش تصادفی" onClick={onToggleShuffle} disabled={!canShuffle}>
-                <Shuffle className={`w-4 h-4 ${shuffle ? "text-[color:var(--color-amber)]" : ""}`} />
-              </CtrlBtn>
-              <CtrlBtn title="۱۰ ثانیه عقب (کلید ◄)" onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
-                <RotateCcw className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="۱۰ ثانیه جلو (کلید ►)" onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
-                <RotateCw className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="بی‌صدا" onClick={() => setMuted((m) => !m)}>
-                {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              </CtrlBtn>
-              <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
             </div>
 
-            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item ? prettyTitle(item.title) : ""}</div>
+            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">
+              {item ? prettyTitle(item.title) : ""}
+            </div>
 
-            <div className="flex flex-wrap items-center gap-1">
-              <MenuBtn label={`${rate}x`} open={openMenu === "speed"} onToggle={() => setOpenMenu(openMenu === "speed" ? null : "speed")} disabled={!canSpeed}>
-                {SPEEDS.map((s) => (
-                  <MenuItem key={s} active={rate === s} onClick={() => requestControl("rate", { rate: s })}>
-                    {s}x
-                  </MenuItem>
-                ))}
-              </MenuBtn>
-
-              <MenuBtn
-                icon={<MonitorPlay className="w-4 h-4" />}
-                disabled={!item?.renditions?.length && levels.length === 0}
-                open={openMenu === "quality"}
-                onToggle={() => {
-                  if (openMenu !== "quality") refreshMenuIfStale();
-                  setOpenMenu(openMenu === "quality" ? null : "quality");
+            <div className="flex items-center gap-1">
+              <CtrlBtn title="بی‌صدا (M)" onClick={() => changeMuted((m) => !m)}>
+                {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </CtrlBtn>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={muted ? 0 : volume}
+                onChange={(e) => {
+                  changeVolume(parseFloat(e.target.value));
+                  if (parseFloat(e.target.value) > 0) changeMuted(false);
                 }}
-              >
-                <MenuItem active={currentLevel === -1} onClick={() => hlsRef.current && (hlsRef.current.currentLevel = -1)}>
-                  خودکار
-                </MenuItem>
-                <MenuDivider />
-                {(item?.renditions?.length ? [...item.renditions].sort((a, b) => b.height - a.height) : levels.map((l) => ({ ...l, status: "ready" as const, vbr: "", abr: "" }))).map((r) => {
-                  if (r.status === "ready" || r.status === "complete" || !r.status) {
-                    const idx = levels.findIndex((l) => l.label === r.label);
-                    return (
-                      <MenuItem key={r.label} active={idx !== -1 && currentLevel === idx} onClick={() => idx !== -1 && hlsRef.current && (hlsRef.current.currentLevel = idx)}>
-                        {r.label}
-                      </MenuItem>
-                    );
-                  }
-                  if (r.status === "pending" || r.status === "error") {
-                    return (
-                      <MenuItem key={r.label} onClick={() => setPendingQualityLabel(r.label)}>
-                        {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">{r.status === "error" ? "خطا — دوباره امتحان کن" : "برای آماده‌سازی کلیک کن"}</span>
-                      </MenuItem>
-                    );
-                  }
-                  return (
-                    <MenuItem key={r.label} disabled>
-                      {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">در حال آماده‌سازی…</span>
-                    </MenuItem>
-                  );
-                })}
-              </MenuBtn>
+                aria-label="بلندی صدا"
+                className="w-16 accent-[color:var(--color-amber)] sm:w-20"
+              />
 
-              <MenuBtn icon={<Headphones className="w-4 h-4" />} open={openMenu === "audio"} onToggle={() => setOpenMenu(openMenu === "audio" ? null : "audio")}>
-                <MenuItem active={!currentAudioTrackId} onClick={() => setCurrentAudioTrackId(null)}>
-                  صدای اصلی
-                </MenuItem>
-                {(item?.audio_tracks?.length ?? 0) > 0 && <MenuDivider />}
-                {item?.audio_tracks?.map((t) => (
-                  <MenuItem
-                    key={t.id}
-                    active={currentAudioTrackId === t.id}
-                    onClick={() => {
-                      setCurrentAudioTrackId(t.id);
-                      if (dubAudioRef.current) dubAudioRef.current.src = t.url;
-                    }}
+              <div className="relative">
+                <button
+                  type="button"
+                  aria-label="گزینه‌های بیشتر"
+                  aria-expanded={openMenu === "more"}
+                  onClick={() => {
+                    if (openMenu !== "more") refreshMenuIfStale();
+                    setOpenMenu(openMenu === "more" ? null : "more");
+                  }}
+                  className="flex h-[38px] min-w-[38px] items-center justify-center rounded-xl border border-[color:var(--color-border)] bg-white/5 px-2 text-[color:var(--color-ink)] transition-colors hover:border-[color:var(--color-amber)]/50"
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                </button>
+                {openMenu === "more" && (
+                  <div
+                    role="menu"
+                    aria-label="گزینه‌های بیشتر"
+                    className="absolute bottom-[calc(100%+10px)] right-0 z-50 max-h-[min(70vh,520px)] w-64 overflow-y-auto rounded-2xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/97 p-1.5 shadow-[var(--shadow-soft)] backdrop-blur-md"
+                    style={{ isolation: "isolate" }}
                   >
-                    {t.label}
-                  </MenuItem>
-                ))}
-              </MenuBtn>
+                    <MenuSectionLabel>پخش</MenuSectionLabel>
+                    <MenuItem disabled={!canPrev} onClick={onPrev}>
+                      <span className="flex items-center gap-2"><SkipBack className="w-3.5 h-3.5" />آیتم قبلی <kbd className="ms-auto">P</kbd></span>
+                    </MenuItem>
+                    <MenuItem disabled={!canNext} onClick={onNext}>
+                      <span className="flex items-center gap-2"><SkipForward className="w-3.5 h-3.5" />آیتم بعدی <kbd className="ms-auto">N</kbd></span>
+                    </MenuItem>
+                    <MenuItem onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
+                      <span className="flex items-center gap-2"><RotateCcw className="w-3.5 h-3.5" />۱۰ ثانیه عقب</span>
+                    </MenuItem>
+                    <MenuItem onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
+                      <span className="flex items-center gap-2"><RotateCw className="w-3.5 h-3.5" />۱۰ ثانیه جلو</span>
+                    </MenuItem>
+                    <MenuItem disabled={!canShuffle} onClick={onToggleShuffle} active={shuffle}>
+                      <span className="flex items-center gap-2"><Shuffle className="w-3.5 h-3.5" />پخش تصادفی</span>
+                    </MenuItem>
 
-              <MenuBtn icon={<MessageSquare className="w-4 h-4" />} open={openMenu === "subtitle"} onToggle={() => setOpenMenu(openMenu === "subtitle" ? null : "subtitle")}>
-                <MenuItem active={currentSubIndex === -1} onClick={() => setCurrentSubIndex(-1)}>
-                  <Slash className="w-4 h-4 text-rose-400 inline ml-1.5" /> خاموش
-                </MenuItem>
-                {(item?.subtitles?.length ?? 0) > 0 && <MenuDivider />}
-                {item?.subtitles?.map((s, i) => (
-                  <MenuItem key={s.id} active={currentSubIndex === i} onClick={() => setCurrentSubIndex(i)}>
-                    {s.label}
-                  </MenuItem>
-                ))}
-              </MenuBtn>
+                    <MenuDivider />
+                    <MenuSectionLabel>سرعت</MenuSectionLabel>
+                    <div className="grid grid-cols-4 gap-1 px-1 pb-1">
+                      {SPEEDS.map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          disabled={!canSpeed}
+                          onClick={() => requestControl("rate", { rate: s })}
+                          className={`rounded-lg px-1.5 py-1.5 text-[12px] disabled:opacity-40 ${
+                            rate === s
+                              ? "bg-[color:var(--color-amber)]/15 font-bold text-[color:var(--color-amber)]"
+                              : "text-[color:var(--color-ink)] hover:bg-white/5"
+                          }`}
+                        >
+                          {s}x
+                        </button>
+                      ))}
+                    </div>
 
-              <CtrlBtn title="تصویر در تصویر" onClick={togglePip}>
-                <PictureInPicture2 className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="استایل زیرنویس" onClick={onGoToSubStyle}>
-                <Palette className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="راهنمای کلیدهای میانبر (؟)" onClick={onOpenShortcuts}>
-                <Keyboard className="w-4 h-4" />
-              </CtrlBtn>
-              <CtrlBtn title="تنظیمات (S)" onClick={() => onOpenSettings?.()}>
-                <Settings className="w-4 h-4" />
-              </CtrlBtn>
+                    <MenuDivider />
+                    <MenuSectionLabel>کیفیت</MenuSectionLabel>
+                    <MenuItem active={currentLevel === -1} onClick={() => hlsRef.current && (hlsRef.current.currentLevel = -1)}>
+                      خودکار
+                    </MenuItem>
+                    {(item?.renditions?.length
+                      ? [...item.renditions].sort((a, b) => b.height - a.height)
+                      : levels.map((l) => ({ ...l, status: "ready" as const, vbr: "", abr: "" }))
+                    ).map((r) => {
+                      if (r.status === "ready" || r.status === "complete" || !r.status) {
+                        const idx = levels.findIndex((l) => l.label === r.label);
+                        return (
+                          <MenuItem key={r.label} active={idx !== -1 && currentLevel === idx} onClick={() => idx !== -1 && hlsRef.current && (hlsRef.current.currentLevel = idx)}>
+                            {r.label}
+                          </MenuItem>
+                        );
+                      }
+                      if (r.status === "pending" || r.status === "error") {
+                        return (
+                          <MenuItem key={r.label} onClick={() => setPendingQualityLabel(r.label)}>
+                            {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">{r.status === "error" ? "خطا — دوباره امتحان کن" : "برای آماده‌سازی کلیک کن"}</span>
+                          </MenuItem>
+                        );
+                      }
+                      return (
+                        <MenuItem key={r.label} disabled>
+                          {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">در حال آماده‌سازی…</span>
+                        </MenuItem>
+                      );
+                    })}
+
+                    <MenuDivider />
+                    <MenuSectionLabel>صدا</MenuSectionLabel>
+                    <MenuItem active={!currentAudioTrackId} onClick={() => setCurrentAudioTrackId(null)}>
+                      <span className="flex items-center gap-2"><Headphones className="w-3.5 h-3.5" />صدای اصلی</span>
+                    </MenuItem>
+                    {item?.audio_tracks?.map((t) => (
+                      <MenuItem
+                        key={t.id}
+                        active={currentAudioTrackId === t.id}
+                        onClick={() => {
+                          setCurrentAudioTrackId(t.id);
+                          if (dubAudioRef.current) dubAudioRef.current.src = t.url;
+                        }}
+                      >
+                        {t.label}
+                      </MenuItem>
+                    ))}
+
+                    <MenuDivider />
+                    <MenuSectionLabel>زیرنویس</MenuSectionLabel>
+                    <MenuItem active={currentSubIndex === -1} onClick={() => setCurrentSubIndex(-1)}>
+                      <Slash className="w-3.5 h-3.5 text-rose-400" /> خاموش
+                    </MenuItem>
+                    {item?.subtitles?.map((sub, i) => (
+                      <MenuItem key={sub.id} active={currentSubIndex === i} onClick={() => setCurrentSubIndex(i)}>
+                        {sub.label}
+                      </MenuItem>
+                    ))}
+
+                    <MenuDivider />
+                    <MenuSectionLabel>نمایش</MenuSectionLabel>
+                    <MenuItem onClick={togglePip}>
+                      <span className="flex items-center gap-2"><PictureInPicture2 className="w-3.5 h-3.5" />تصویر در تصویر</span>
+                    </MenuItem>
+                    <MenuItem onClick={onGoToSubStyle}>
+                      <span className="flex items-center gap-2"><MessageSquare className="w-3.5 h-3.5" />استایل زیرنویس</span>
+                    </MenuItem>
+                    <MenuItem onClick={onOpenShortcuts}>
+                      <span className="flex items-center gap-2"><Keyboard className="w-3.5 h-3.5" />کلیدهای میانبر</span>
+                    </MenuItem>
+                    <MenuItem onClick={() => onOpenSettings?.()}>
+                      <span className="flex items-center gap-2"><Settings className="w-3.5 h-3.5" />تنظیمات</span>
+                    </MenuItem>
+                  </div>
+                )}
+              </div>
+
               <CtrlBtn title="تمام‌صفحه (F)" onClick={toggleFullscreen}>
                 <Maximize className="w-4 h-4" />
               </CtrlBtn>
@@ -1230,41 +1504,6 @@ function CtrlBtn({
   );
 }
 
-function MenuBtn({
-  children,
-  label,
-  icon,
-  open,
-  onToggle,
-  disabled,
-}: {
-  children: React.ReactNode;
-  label?: string;
-  icon?: React.ReactNode;
-  open: boolean;
-  onToggle: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="relative">
-      <button
-        disabled={disabled}
-        onClick={onToggle}
-        className="flex h-[38px] min-w-[38px] items-center justify-center rounded-xl border border-[color:var(--color-border)] bg-white/5 px-2 text-[13px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-40"
-      >
-        {label ?? icon}
-      </button>
-      {open && (
-        <div
-          className="absolute bottom-[calc(100%+10px)] left-1/2 z-50 min-w-[170px] -translate-x-1/2 rounded-2xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/97 p-1.5 shadow-[var(--shadow-soft)] backdrop-blur-md"
-          style={{ isolation: "isolate", transform: "translate(-50%, 0) translateZ(0)" }}
-        >
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function MenuItem({ children, active, onClick, disabled }: { children: React.ReactNode; active?: boolean; onClick?: () => void; disabled?: boolean }) {
   return (
@@ -1282,4 +1521,13 @@ function MenuItem({ children, active, onClick, disabled }: { children: React.Rea
 
 function MenuDivider() {
   return <div className="my-1 h-px bg-[color:var(--color-border)]" />;
+}
+
+/** Small non-interactive header that groups items in a long menu. */
+function MenuSectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="px-3 pb-1 pt-2 text-[9.5px] font-semibold tracking-[0.18em] text-[color:var(--color-ink-dim)] uppercase">
+      {children}
+    </p>
+  );
 }

@@ -70,10 +70,10 @@ function BrowserStreamSection({
   const workStreamRef = useRef<MediaStream | null>(null);
   const previewRef = useRef<HTMLVideoElement | null>(null);
   const addedRef = useRef(false);
-  const phaseRef = useRef<BrowserPhase>("idle");
-  phaseRef.current = phase;
+  const sessionRef = useRef(0);
 
   const cleanup = useCallback(() => {
+    sessionRef.current += 1;
     pcRef.current?.getSenders().forEach((s) => s.replaceTrack(null).catch(() => {}));
     pcRef.current?.close();
     pcRef.current = null;
@@ -112,6 +112,7 @@ function BrowserStreamSection({
   }, []);
 
   async function start() {
+    const sessionId = ++sessionRef.current;
     setError(null);
     setAudioNote(null);
     let disp: MediaStream;
@@ -166,7 +167,7 @@ function BrowserStreamSection({
       const whipUrl = `${window.location.origin}/whip/${keyInfo.key}/whip`;
       const pc = await publishWhip(work, whipUrl, {
         onState: (state: WhipState) => {
-          if (phaseRef.current === "idle") return;
+          if (sessionRef.current !== sessionId) return;
           if (state === "connected") {
             setPhase("live");
             setStatusText("در حال پخش زنده");

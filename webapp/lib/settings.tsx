@@ -93,8 +93,15 @@ export const QUALITY_OPTIONS: { id: VoiceSettings["quality"]; label: string }[] 
   { id: "low", label: "کم — مونو 16kHz (پهنای باند کم)" },
 ];
 
+export interface PlaybackSettings {
+  /** Player volume, 0..1 — persisted so the room starts at the listener's level. */
+  volume: number;
+  muted: boolean;
+}
+
 export interface AppSettings {
   theme: ThemeId;
+  playback: PlaybackSettings;
   shortcuts: Record<ShortcutAction, string>;
   voice: VoiceSettings;
   pushToTalk: boolean;
@@ -102,6 +109,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "violet",
+  playback: { volume: 1, muted: false },
   shortcuts: DEFAULT_SHORTCUTS,
   voice: DEFAULT_VOICE_SETTINGS,
   pushToTalk: false,
@@ -149,6 +157,14 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated]);
+
+  // `useLocalStorage` replaces the stored object wholesale instead of merging,
+  // so settings saved before `playback` existed have no `playback` key at all.
+  // Fill it in once; without this the player would read `undefined.volume`.
+  useEffect(() => {
+    if (!hydrated || settings.playback) return;
+    setSettings((s) => ({ ...s, playback: s.playback ?? DEFAULT_SETTINGS.playback }));
+  }, [hydrated, settings.playback, setSettings]);
 
   const setTheme = useCallback((theme: ThemeId) => setSettings((s) => ({ ...s, theme })), [setSettings]);
   const setShortcut = useCallback(

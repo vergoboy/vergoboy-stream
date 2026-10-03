@@ -3,6 +3,8 @@ monkey.patch_all()
 
 import gevent
 import json
+import logging
+import math
 import os
 import re as _re
 import secrets
@@ -454,6 +456,252 @@ def _resolve_media_url(url: str, timeout: int = 15) -> str:
 
 
 MIN_FREE_MB_FOR_TRANSCODE = 500
+
+# ── encoded-frontier bookkeeping ─────────────────────────────────────────────
+# The client keeps its own encoded_frontier (Player.tsx) purely as a courtesy:
+# nothing stopped a hand-crafted `control` event from seeking straight past the
+# encoded timeline into a segment that does not exist yet, which shows up as a
+# black screen for everyone in the room. These make that guard enforceable.
+#
+# Keyed "<item_id>:<rendition label>", matching the client's transcodeProgress
+# key so both sides agree on which rendition a number describes.
+TRANSCODE_PROGRESS: dict = {}
+PROGRESS_LOCK = gevent.lock.Semaphore()
+
+# Kept in step with the client's MARGIN (Player.tsx). A viewer is allowed to
+# scrub right up to the last safely encoded second, minus a little slack, so
+# that a segment boundary a moment behind the reported progress still plays.
+SEEK_FRONTIER_MARGIN = 3.0
+
+# The rendition statuses _rewrite_master_playlist advertises, i.e. the rungs a
+# viewer can actually pick right now. A rung in any other state is invisible in
+# the master playlist, so it must not constrain the room's seek range: one
+# queued-but-unadvertised 1080p rung would otherwise pin everybody at 0s until
+# it came up.
+SELECTABLE_RENDITION_STATUSES = ("ready", "complete")
+
+# A rung that died. It is not selectable *and* it will never become selectable,
+# so including it in the minimum would freeze the whole room's seek range at 0s
+# for the rest of the item's life.
+DEAD_RENDITION_STATUSES = ("error", "failed", "cancelled", "canceled")
+
+# Plan modes that lay the timeline down as fast as the disk allows instead of
+# encoding it over time, so they have no live frontier to clamp against.
+COPY_LIKE_MODES = ("copy", "remux", "direct_play", "directplay")
+
+# A rung this far behind its peers caps the whole room. Logged rather than
+# silently endured, because a permanently slow rung is a transcoding problem
+# the operator has to see, and it changes who can seek where.
+LAG_WARN_THRESHOLD_S = 30.0
+LAG_WARN_INTERVAL_S = 60.0
+
+# Named logger for playback-sync problems. Separate from log_debug's stderr
+# prints because these survive into production logs and must be filterable by
+# name (`journalctl -t stream.sync`) instead of grepping a DEBUG prefix.
+# Propagation is left on so a host that configures logging owns the output and
+# test capture still sees the records; the handler below only exists so the line
+# appears even when nothing has configured the root logger at all.
+SYNC_LOGGER = logging.getLogger("stream.sync")
+if not SYNC_LOGGER.handlers:
+    _sync_handler = logging.StreamHandler(sys.stderr)
+    _sync_handler.setFormatter(logging.Formatter("[%(name)s] %(levelname)s %(message)s"))
+    SYNC_LOGGER.addHandler(_sync_handler)
+SYNC_LOGGER.setLevel(logging.WARNING)
+
+# item_id -> monotonic timestamp of the last lagging-rung warning, so a slow
+# rung produces one line a minute instead of one per seek.
+_LAG_WARNED_AT: dict = {}
+
+
+def _record_encoded_progress(item_id: str, label: str, encoded_seconds: float) -> None:
+    """Remember how far one rendition has encoded, for the seek guard."""
+    if not item_id or not label:
+        return
+    try:
+        value = float(encoded_seconds)
+    except (TypeError, ValueError):
+        return
+    with PROGRESS_LOCK:
+        TRANSCODE_PROGRESS[f"{item_id}:{label}"] = {"encoded_seconds": value}
+
+
+def _clear_encoded_progress(item_id: str) -> None:
+    """Drop every rendition's progress for an item.
+
+    Called when an item finishes or is removed. Without this a completed item
+    keeps a stale frontier forever, and a re-encode of the same id would start
+    clamped to the previous run's numbers.
+    """
+    if not item_id:
+        return
+    prefix = f"{item_id}:"
+    with PROGRESS_LOCK:
+        for key in [k for k in TRANSCODE_PROGRESS if k.startswith(prefix)]:
+            TRANSCODE_PROGRESS.pop(key, None)
+        _LAG_WARNED_AT.pop(item_id, None)
+
+
+def _rendition_mode(item: dict, rendition: dict) -> str:
+    """The plan mode for a rung: its own if recorded, else the item's."""
+    mode = rendition.get("mode") or item.get("mode") or ""
+    return str(mode).strip().lower()
+
+
+def _incomplete_rendition_frontiers(item: dict, progress: dict) -> tuple:
+    """``(frontiers_by_label, unknown_advertised)`` for the live seek guard.
+
+    Walks only the rungs that (a) a viewer can select right now, because they are
+    in the master playlist, and (b) are not finished, because a finished rung
+    imposes no ceiling. Failed and not-yet-advertised rungs are skipped rather
+    than treated as zero: neither can be selected, so neither should be able to
+    hold the whole room at the start of the item.
+
+    ``unknown_advertised`` is True when a selectable rung has no recorded
+    progress at all. That should not happen -- progress is stored on the same
+    tick that marks a rung ready -- and it is genuinely unknowable rather than
+    "slow", so the caller treats the room as unsafe instead of guessing.
+    """
+    frontiers: dict = {}
+    unknown = False
+    item_id = item.get("id")
+    for rendition in item.get("renditions") or []:
+        status = rendition.get("status")
+        if status in DEAD_RENDITION_STATUSES:
+            continue
+        if status not in SELECTABLE_RENDITION_STATUSES:
+            continue
+        if status == "complete":
+            continue
+        info = progress.get(f"{item_id}:{rendition.get('label')}")
+        encoded = (info or {}).get("encoded_seconds")
+        if encoded is None:
+            unknown = True
+            continue
+        frontiers[rendition.get("label")] = float(encoded)
+    return frontiers, unknown
+
+
+def seek_frontier(item: dict, progress: dict) -> float:
+    """How far it is safe to seek in this item, in seconds (``inf`` = no limit).
+
+    Pure: takes the recorded progress as an argument and touches no globals, so
+    the whole policy is unit-testable without touching the encoder or the clock.
+
+    Room-wide rather than per-viewer, because the server cannot know which rung a
+    given viewer happens to be watching. The **minimum** across the live
+    selectable rungs is the only value safe for every viewer at once; clamping
+    against a single rung would still let somebody on the slower one seek into a
+    hole. The client keeps its own per-level guard on top -- this is the safety
+    net for a hand-crafted `control` event, not a replacement.
+
+    No clamp at all applies when there is nothing being encoded right now: a live
+    stream, a finished item, a copy/remux plan that already has the whole
+    timeline, or a set of rungs that are all complete.
+    """
+    if not item or item.get("type") == "live":
+        return math.inf
+    if item.get("status") == "complete":
+        return math.inf
+    if _rendition_mode(item, {}) in COPY_LIKE_MODES:
+        # No live frontier exists at all: the plan is copy/remux/direct-play.
+        return math.inf
+
+    renditions = item.get("renditions") or []
+    if not renditions:
+        # `complete` was handled above, so reaching here means the ladder is not
+        # recorded yet. Nothing is known, so nothing is safe.
+        return 0.0
+
+    if not any(r.get("status") in SELECTABLE_RENDITION_STATUSES for r in renditions):
+        # Every rung is still queued/pending/encoding: none of them is in the
+        # master playlist, so there is nothing for a viewer to select and not a
+        # single encoded second exists yet. Excluding unadvertised rungs from the
+        # *minimum* must not turn this into "no limit" -- it means nothing is
+        # playable, which is the most unsafe state of all.
+        return 0.0
+
+    # A completed copy-like rung means the whole timeline is already on disk and
+    # the master playlist can hand it to anyone, so there is nothing to guard.
+    for rendition in renditions:
+        if rendition.get("status") == "complete" and _rendition_mode(item, rendition) in COPY_LIKE_MODES:
+            return math.inf
+
+    frontiers, unknown = _incomplete_rendition_frontiers(item, progress)
+    if unknown:
+        return 0.0
+    return min(frontiers.values()) if frontiers else math.inf
+
+
+def clamp_seek_target(target: float, frontier: float,
+                      margin: float = SEEK_FRONTIER_MARGIN) -> float:
+    """Pure: where a requested seek should actually land.
+
+    Unchanged when the target is already safe (including exactly at the limit),
+    floored at zero when it is not, and a no-op when the frontier is infinite.
+    """
+    try:
+        value = float(target)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    if not math.isfinite(frontier):
+        return max(0.0, value)
+    limit = frontier - margin
+    if value > limit:
+        return max(0.0, limit)
+    return max(0.0, value)
+
+
+def _warn_if_lagging(item: dict, progress: dict) -> None:
+    """Log a WARNING when one selectable rung is far behind its peers.
+
+    The slowest live rung is what caps the room, so when it stalls everybody
+    feels it -- but nothing in the UI explains why seeking stopped early. One
+    line per item per minute, naming the item, the lagging rung and the gap,
+    is enough to diagnose it without flooding the log with one line per seek.
+    """
+    if not item:
+        return
+    frontiers, _unknown = _incomplete_rendition_frontiers(item, progress)
+    if len(frontiers) < 2:
+        return
+    lagging_label, lagging_value = min(frontiers.items(), key=lambda kv: kv[1])
+    lead = max(frontiers.values())
+    lag = lead - lagging_value
+    if lag < LAG_WARN_THRESHOLD_S:
+        return
+    item_id = item.get("id")
+    now = time.monotonic()
+    last = _LAG_WARNED_AT.get(item_id)
+    if last is not None and (now - last) < LAG_WARN_INTERVAL_S:
+        return
+    _LAG_WARNED_AT[item_id] = now
+    SYNC_LOGGER.warning(
+        "rendition %s lags item %s by %.1fs (frontier %.1fs vs best %.1fs); "
+        "room seeks are capped by the slowest rung",
+        lagging_label, item_id, lag, lagging_value, lead,
+    )
+
+
+def _encoded_frontier(item: dict) -> float:
+    """Snapshot the progress store and apply :func:`seek_frontier` to it."""
+    with PROGRESS_LOCK:
+        snapshot = dict(TRANSCODE_PROGRESS)
+    frontier = seek_frontier(item, snapshot)
+    _warn_if_lagging(item, snapshot)
+    return frontier
+
+
+def _current_item(rs) -> dict:
+    """The item the room is playing right now, or ``{}``."""
+    index = getattr(rs, "current_index", None)
+    playlist = getattr(rs, "playlist", None) or []
+    if index is None or not (0 <= index < len(playlist)):
+        return {}
+    return playlist[index] or {}
+
+
 TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
 LANG_LABELS = {
     "fa": "فارسی", "per": "فارسی", "fas": "فارسی",
@@ -680,6 +928,10 @@ def _run_progressive_ffmpeg(cmd: list, item_id: str, duration_s: float, label: s
             "duration": round(dur, 1) if dur > 0 else None,
             "ready": ready_fired[0],
         })
+        # Record before/with the emit so a rendition that reports ready always
+        # has a recorded frontier behind it; the seek guard treats a missing
+        # entry as "nothing is safe".
+        _record_encoded_progress(item_id, label, elapsed_s)
         last_pct[0] = pct
 
     def on_progress(ev):
@@ -955,6 +1207,9 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
                 item["status"] = "complete"
                 item["src"] = f"/stream/media/hls/{item_id}/master.m3u8"
                 item.pop("error", None)
+                # The whole timeline now exists, so the seek guard has nothing
+                # left to enforce and the recorded progress is dead weight.
+                _clear_encoded_progress(item_id)
             safe_save(rrs)
             title = item["title"]
         broadcast_state(rrs)
@@ -2103,6 +2358,7 @@ def api_remove_item(item_id):
         raw_path = item.get("_raw_path") if item else None
         cur.remove_item(item_id)
         safe_save(cur)
+    _clear_encoded_progress(item_id)
     broadcast_state(cur)
     broadcast_notify("playlist_remove", name, room_code=cur.room_id, title=title)
     shutil.rmtree(os.path.join(Config.HLS_DIR, item_id), ignore_errors=True)
@@ -3463,6 +3719,7 @@ def on_control(data):
         return
     rs = rooms.get(code)
     name = user.username or "ناشناس"
+    clamped_to = None
 
     with LOCK:
         if action == "play":
@@ -3470,7 +3727,17 @@ def on_control(data):
         elif action == "pause":
             rs.set_pause(float(data.get("at", rs.current_position())))
         elif action == "seek":
-            rs.seek(float(data.get("to", 0)))
+            target = float(data.get("to", 0))
+            # Enforce the encoded frontier here rather than trusting the client's
+            # own guard: `control` is a plain socket event, so without this a
+            # hand-crafted seek lands past the encoded timeline and the room
+            # stares at a black screen. See seek_frontier / clamp_seek_target.
+            frontier = _encoded_frontier(_current_item(rs))
+            safe_target = clamp_seek_target(target, frontier)
+            if safe_target != target:
+                clamped_to = safe_target
+            target = safe_target
+            rs.seek(target)
         elif action == "rate":
             rs.set_rate(float(data.get("rate", 1.0)))
         elif action == "select":
@@ -3482,6 +3749,13 @@ def on_control(data):
         safe_save(rs)
         payload = rs.to_public_dict()
 
+    if clamped_to is not None:
+        # Tell the room why the seek landed short, so the client can say so
+        # instead of the position silently disagreeing with the request.
+        socketio.emit("notify", {
+            "type": "seek_clamped", "name": name, "ts": time.time(),
+            "extra": {"requested": float(data.get("to", 0)), "position": clamped_to},
+        }, to=_room_channel(code))
     socketio.emit("state_sync", payload, to=_room_channel(code), include_self=False)
     broadcast_notify(f"ctrl_{action}", name, room_code=code, extra=data)
 

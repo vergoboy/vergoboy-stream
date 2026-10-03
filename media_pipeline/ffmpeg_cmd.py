@@ -485,5 +485,13 @@ def build_direct_play_cmd(plan: Plan, source: str, destination: str) -> list[str
 
 
 def build_subtitle_cmd(source: str, stream_index: int, destination: str) -> list[str]:
-    """Extract one text subtitle stream. Bitmap streams are never sent here."""
+    """Extract one text subtitle stream as SubRip. Bitmap streams are never sent here.
+
+    ``destination`` must be an ``.srt`` path. The codec is pinned to ``srt`` and
+    ffmpeg picks its muxer from the extension, so handing this a ``.vtt`` path
+    selects the WebVTT muxer, which rejects the srt codec outright — the encode
+    dies and leaves a zero-byte file behind rather than raising anything
+    obvious. WebVTT conversion is a separate, deliberate step
+    (``srt_to_vtt.convert_srt_to_vtt``); keep the two apart.
+    """
     return ["ffmpeg", "-y", "-i", source, "-map", f"0:{stream_index}", "-c:s", "srt", destination]

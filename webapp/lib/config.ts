@@ -10,3 +10,8 @@ export const SOCKET_PATH = "/stream/socket.io";
 export function apiUrl(path: string): string {
   return `${API_ORIGIN}${path}`;
 }
+
+export function mediaUrl(path: string): string {
+  if (/^(?:https?:)?\/\//i.test(path) || /^(?:blob|data):/i.test(path)) return path;
+  return apiUrl(path);
+}

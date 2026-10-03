@@ -52,7 +52,7 @@ class RoomState:
             "shuffle": self.shuffle,
             "shuffle_order": list(self.shuffle_order),
             "server_time": time.time(),
-            "online": len(self.users),
+            "online": len(self.users_public_list()),
         }
 
     @staticmethod
@@ -63,22 +63,58 @@ class RoomState:
         return {k: v for k, v in item.items() if not k.startswith("_")}
 
     def users_public_list(self):
-        """List of {name, avatar_url, in_voice, id, can_control, is_owner} for
-        every currently-connected socket. `in_voice` is True only while that
-        user is connected to the voice room; the frontend renders the sofa
-        from voice members. `id`/`can_control`/`is_owner` back the room
-        owner/promoted member-management panel."""
-        return [
-            {
-                "name": u.get("name", "ناشناس"),
-                "avatar_url": u.get("avatar_url"),
-                "in_voice": bool(u.get("in_voice")),
-                "id": u.get("id"),
-                "can_control": bool(u.get("can_control")),
-                "is_owner": bool(u.get("is_owner")),
-            }
-            for u in self.users.values()
-        ]
+        """Deduplicated per-user presence.
+
+        One entry per PERSON (keyed by user id, falling back to the socket sid
+        for guests), never per socket: the same account with three tabs open
+        must appear exactly once in the lounge.
+
+        Each entry carries the full set of simultaneous states that person
+        currently holds, so the UI can render "watching while in voice" as
+        one person instead of two unrelated entries:
+          - `watching`: actively playing the shared media right now
+          - `browsing`: connected to the room but not playing
+          - `in_voice`: connected to the LiveKit voice room
+          - `idle`:     connected, but not watching and not in voice
+          - `last_seen`: unix time of the most recent activity, used for idle
+        `id`/`can_control`/`is_owner` back the member-management panel.
+        """
+        public = {}
+        for sid, user in self.users.items():
+            identity = str(user.get("id") or sid)
+            entry = public.get(identity)
+            if entry is None:
+                entry = public[identity] = {
+                    "name": user.get("name", "ناشناس"),
+                    "avatar_url": user.get("avatar_url"),
+                    "in_voice": False,
+                    "watching": False,
+                    "idle": True,
+                    "last_seen": 0,
+                    "watching_item": None,
+                    "id": user.get("id"),
+                    "can_control": False,
+                    "is_owner": False,
+                    "sockets": 0,
+                }
+            # OR-merge: a person counts as present/active if ANY of their
+            # sockets reports that state.
+            entry["in_voice"] = entry["in_voice"] or bool(user.get("in_voice"))
+            entry["watching"] = entry["watching"] or bool(user.get("watching"))
+            entry["can_control"] = entry["can_control"] or bool(user.get("can_control"))
+            entry["is_owner"] = entry["is_owner"] or bool(user.get("is_owner"))
+            entry["avatar_url"] = entry["avatar_url"] or user.get("avatar_url")
+            entry["last_seen"] = max(entry["last_seen"], float(user.get("last_seen") or 0))
+            entry["sockets"] += 1
+            if user.get("watching_item"):
+                entry["watching_item"] = user["watching_item"]
+
+        for entry in public.values():
+            # A person is idle only when they are neither watching nor talking.
+            entry["idle"] = not entry["watching"] and not entry["in_voice"]
+            # Browsing = connected to the room, not currently watching.
+            entry["browsing"] = not entry["watching"]
+        return list(public.values())
 
     # ---------- تغییر وضعیت پخش ----------
     def set_play(self, at):
