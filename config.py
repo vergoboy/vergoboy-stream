@@ -1,35 +1,54 @@
 import os
+import ipaddress
+from urllib.parse import urlsplit
+
+from media_pipeline.runner import RunnerConfig
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _livekit_creds():
-    """API key/secret for the LiveKit server. Prefers env vars, otherwise
-    parses /etc/livekit/config.yaml (so the secret never has to be committed
-    to this repo). Returns (api_key, api_secret) or (None, None)."""
+    """Read LiveKit credentials from the environment or its root-managed config."""
     key = os.environ.get("STREAM_LIVEKIT_API_KEY") or ""
     secret = os.environ.get("STREAM_LIVEKIT_API_SECRET") or ""
     if key and secret:
         return key, secret
-    cfg = os.environ.get("STREAM_LIVEKIT_CONFIG", "/etc/livekit/config.yaml")
+    default_cfg = (
+        "/etc/livekit/config.yaml"
+        if os.environ.get("STREAM_ENV", "development").strip().lower() == "production"
+        else os.path.expanduser("~/.local/share/vergoboy-stream-dev/livekit/config.yaml")
+    )
+    cfg = os.environ.get("STREAM_LIVEKIT_CONFIG", default_cfg)
     try:
+        import yaml
+
         with open(cfg, encoding="utf-8") as f:
-            content = f.read()
-        keys_block = content.split("keys:", 1)[1].split("\n", 1)[1]
-        for line in keys_block.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" in line:
-                k, v = line.split(":", 1)
-                return k.strip(), v.strip()
+            keys = (yaml.safe_load(f) or {}).get("keys", {})
+        if isinstance(keys, dict) and keys:
+            key, secret = next(iter(keys.items()))
+            return str(key), str(secret)
     except Exception:
         pass
     return None, None
 
 
+def _is_dummy_livekit_value(value: str | None) -> bool:
+    if not value:
+        return True
+    text = value.strip().lower()
+    return any(token in text for token in ("dummy", "placeholder", "example", "not-used", "dev-key", "dev-secret"))
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Required environment variable {name} is missing")
+    return value
+
+
 class Config:
-    SECRET_KEY = os.environ.get("STREAM_SECRET_KEY", "change-this-secret-please")
+    ENVIRONMENT = os.environ.get("STREAM_ENV", "development").strip().lower()
+    SECRET_KEY = _required_env("STREAM_SECRET_KEY")
 
     HOST = os.environ.get("STREAM_HOST", "127.0.0.1")
     PORT = int(os.environ.get("STREAM_PORT", "8801"))
@@ -37,15 +56,8 @@ class Config:
     # ---------------------------------------------------------------
     # Accounts, rooms & admin (PostgreSQL, same stack as arman-music)
     # ---------------------------------------------------------------
-    DATABASE_URL = os.environ.get(
-        "STREAM_DATABASE_URL", "postgresql+psycopg2://stream:stream@127.0.0.1:5432/stream"
-    )
-    # JWT signing secret (access + refresh tokens). Set via env; falls back
-    # to SECRET_KEY so a missing env var still produces working (if not
-    # perfectly unique) signatures.
-    JWT_SECRET = os.environ.get("STREAM_JWT_SECRET", "") or os.environ.get(
-        "STREAM_SECRET_KEY", "change-this-secret-please"
-    )
+    DATABASE_URL = _required_env("STREAM_DATABASE_URL")
+    JWT_SECRET = _required_env("STREAM_JWT_SECRET")
     JWT_ALGORITHM = "HS256"
     JWT_ACCESS_TTL_MINUTES = int(os.environ.get("STREAM_JWT_ACCESS_TTL_MINUTES", "4320"))  # 3 days
     JWT_REFRESH_TTL_DAYS = int(os.environ.get("STREAM_JWT_REFRESH_TTL_DAYS", "30"))
@@ -60,18 +72,24 @@ class Config:
     # Public base URL of the frontend (used in verification links and
     # OAuth redirect URIs).
     SITE_BASE_URL = os.environ.get("STREAM_SITE_URL", "https://vergoboy.ir/stream")
+    SITE_ORIGIN = f"{urlsplit(SITE_BASE_URL).scheme}://{urlsplit(SITE_BASE_URL).netloc}"
+    CORS_ORIGINS = tuple(
+        origin.strip()
+        for origin in os.environ.get(
+            "STREAM_CORS_ORIGINS",
+            ",".join(
+                (SITE_ORIGIN, "tauri://localhost")
+                if ENVIRONMENT == "production"
+                else ("http://localhost:3000", "http://127.0.0.1:3000", "tauri://localhost")
+            ),
+        ).split(",")
+        if origin.strip()
+    )
     # Envelope/From address for outgoing verification mail (the server's
     # own mailbox on the local postfix).
     MAIL_FROM = os.environ.get("STREAM_MAIL_FROM", "info@vergoboy.ir")
     # The site owner's account — the only one that skips email verification.
-    SPECIAL_ADMIN_EMAIL = os.environ.get("STREAM_ADMIN_EMAIL", "very.good.booyy@gmail.com")
-    # Other addresses that should never receive verification mail (accounts
-    # registered with these are auto-verified). Comma-separated env override.
-    EXEMPT_EMAILS = {
-        e.strip().lower()
-        for e in os.environ.get("STREAM_EXEMPT_EMAILS", "very.good.booyy@gmail.com,the.arman.hosseini@gmail.com").split(",")
-        if e.strip()
-    }
+    ADMIN_EMAIL = os.environ.get("STREAM_ADMIN_EMAIL", "").strip().lower()
     VERIFY_TOKEN_TTL_HOURS = int(os.environ.get("STREAM_VERIFY_TTL_HOURS", "72"))
     RESET_TOKEN_TTL_MINUTES = int(os.environ.get("STREAM_RESET_TTL_MINUTES", "30"))
 
@@ -120,18 +138,47 @@ class Config:
     ]
     HLS_MAX_RENDITIONS = 3
     HLS_SEGMENT_SECONDS = 4
-    HLS_PRESET = os.environ.get("STREAM_HLS_PRESET", "ultrafast")  # was "ultrafast"
+
+    # NOTE: the x264 speed preset is NOT configured here. It is resolved by
+    # media_pipeline.ffmpeg_cmd.resolve_preset() from STREAM_HLS_PRESET, falling
+    # back to "veryfast". It used to live here with a default of "ultrafast",
+    # which nothing read — a setting that looks real but changes nothing, and
+    # that disagrees with what the encoder actually does.
 
     # Max number of ffmpeg transcode jobs allowed to run at the same time.
     # Extra items go to status "queued" until a slot frees up. Protects the
     # server's CPU from being overwhelmed by simultaneous heavy encodes.
     MAX_CONCURRENT_ENCODES = int(os.environ.get("STREAM_MAX_CONCURRENT_ENCODES", "2"))
 
+    # Copy-only jobs ("remuxes") cost almost no CPU, so they get their own,
+    # larger pool. Sharing the transcode pool would let a queue of trivial jobs
+    # block a long transcode, while a long transcode would in turn stall every
+    # remux behind it.
+    MAX_CONCURRENT_REMUX = int(os.environ.get("STREAM_MAX_CONCURRENT_REMUX", "4"))
+
     # Once this many seconds of every rendition are encoded, the item flips
     # to status "ready" and playback can start, even though encoding of the
     # rest of the file continues in the background. Kept low so first
     # playback is available well inside the ~2 minute target.
     HLS_READY_AFTER_SECONDS = int(os.environ.get("STREAM_HLS_READY_AFTER_SECONDS", "20"))
+
+    # ---------------------------------------------------------------
+    # Encode supervision
+    #
+    # These are re-exported from media_pipeline.runner.RunnerConfig rather
+    # than re-declared, because that class is the code that actually reads
+    # them and it already validates them. Declaring a second copy here is how
+    # a deployment ends up disagreeing with itself about how many retries a
+    # job gets.
+    # ---------------------------------------------------------------
+    ENCODE_STALL_SECONDS = RunnerConfig.STALL_SECONDS
+    ENCODE_MAX_RETRIES = RunnerConfig.MAX_RETRIES
+    ENCODE_RETRY_BASE_DELAY = RunnerConfig.RETRY_BASE_DELAY
+    ENCODE_TIMEOUT_BASE_SECONDS = RunnerConfig.TIMEOUT_BASE
+    ENCODE_TIMEOUT_PER_MEDIA_SECOND = RunnerConfig.TIMEOUT_PER_SECOND
+    ENCODE_MAX_TIMEOUT_SECONDS = RunnerConfig.MAX_TIMEOUT
+    ENCODE_HW_FAILURE_THRESHOLD = RunnerConfig.HW_FAILURES_BEFORE_DISABLE
+    ENCODE_HW_DISABLE_SECONDS = RunnerConfig.HW_DISABLE_SECONDS
 
     # ---------------------------------------------------------------
     # Chat (in-memory only, never written to state.json / disk)
@@ -162,8 +209,8 @@ class Config:
     )
 
     # yt-dlp settings for YouTube and other supported sites.
-    YTDLP_PROXY = os.environ.get("STREAM_YTDLP_PROXY", "socks5://127.0.0.1:1080")
-    YTDLP_COOKIES = os.environ.get("STREAM_YTDLP_COOKIES", "/opt/stream/cookies.txt")
+    YTDLP_PROXY = os.environ.get("STREAM_YTDLP_PROXY", "").strip()
+    YTDLP_COOKIES = os.environ.get("STREAM_YTDLP_COOKIES", "").strip()
     YTDLP_FORMAT = os.environ.get(
         "STREAM_YTDLP_FORMAT",
         "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
@@ -175,10 +222,40 @@ class Config:
     _LK_KEY, _LK_SECRET = _livekit_creds()
     LIVEKIT_API_KEY = _LK_KEY or ""
     LIVEKIT_API_SECRET = _LK_SECRET or ""
-    # Clients connect over TLS through nginx (location /livekit/rtc -> 7880).
-    LIVEKIT_URL = os.environ.get("STREAM_LIVEKIT_URL", "wss://vergoboy.ir/livekit")
+    LIVEKIT_URL = os.environ.get("STREAM_LIVEKIT_URL", "").strip()
+    LIVEKIT_CONFIGURED = bool(
+        LIVEKIT_API_KEY
+        and LIVEKIT_API_SECRET
+        and LIVEKIT_URL
+        and not _is_dummy_livekit_value(LIVEKIT_API_KEY)
+        and not _is_dummy_livekit_value(LIVEKIT_API_SECRET)
+    )
     LIVEKIT_ROOM = os.environ.get("STREAM_LIVEKIT_ROOM", "stream-voice")
     LIVEKIT_TOKEN_TTL = int(os.environ.get("STREAM_LIVEKIT_TOKEN_TTL", "14400"))
+
+    @classmethod
+    def validate(cls):
+        if cls.ENVIRONMENT not in {"development", "production"}:
+            raise RuntimeError("STREAM_ENV must be 'development' or 'production'")
+        if len(cls.SECRET_KEY) < 32 or len(cls.JWT_SECRET) < 32:
+            raise RuntimeError("STREAM_SECRET_KEY and STREAM_JWT_SECRET must each contain at least 32 characters")
+        if not cls.DATABASE_URL.startswith("postgresql"):
+            raise RuntimeError("STREAM_DATABASE_URL must point to a persistent PostgreSQL database")
+        if cls.ENVIRONMENT == "production":
+            if not os.environ.get("STREAM_SITE_URL") or not cls.ADMIN_EMAIL:
+                raise RuntimeError("Production requires explicit STREAM_SITE_URL and STREAM_ADMIN_EMAIL values")
+            if not cls.LIVEKIT_CONFIGURED:
+                raise RuntimeError("Production requires real LiveKit credentials and STREAM_LIVEKIT_URL")
+            site = urlsplit(cls.SITE_BASE_URL)
+            voice = urlsplit(cls.LIVEKIT_URL)
+            try:
+                loopback_voice = bool(voice.hostname and ipaddress.ip_address(voice.hostname).is_loopback)
+            except ValueError:
+                loopback_voice = bool(voice.hostname and voice.hostname.endswith(".localhost"))
+            if site.scheme != "https" or not site.hostname:
+                raise RuntimeError("Production STREAM_SITE_URL must use HTTPS")
+            if voice.scheme != "wss" or not voice.hostname or voice.hostname == "localhost" or loopback_voice:
+                raise RuntimeError("Production STREAM_LIVEKIT_URL must be a reachable WSS endpoint")
 
 
 os.makedirs(Config.UPLOAD_DIR, exist_ok=True)
