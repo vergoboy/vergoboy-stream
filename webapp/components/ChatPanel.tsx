@@ -4,7 +4,7 @@ import { Send, Image, Trash2, X } from "lucide-react";
 
 
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "./anim";
 import { Avatar } from "./Avatar";
 import { mediaUrl } from "@/lib/config";
 import { api } from "@/lib/api";
@@ -168,7 +168,7 @@ export function ChatPanel({
         <button
           type="submit"
           className="shrink-0 rounded-xl px-4 py-2.5 text-[13.5px] font-bold text-white"
-          style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}
+          style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}
         >
           ارسال
         </button>

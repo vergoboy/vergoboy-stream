@@ -235,7 +235,19 @@ export interface VoiceParticipant {
 // Search archive (DonyayeSerial / Animex)
 // ────────────────────────────────────────────────────────────────────────────
 
-export type ArchiveSource = "donyayeserial" | "animex";
+export type ArchiveSource = "digimoviez";
+
+export interface ArchiveSearchFilters {
+  query?: string; type?: "post" | "series"; director?: string; actors?: string;
+  country?: string; age_rating?: string; quality?: string; sort?: string;
+  year_min: number; year_max: number; rating_min: number; rating_max: number;
+}
+
+export interface ArchiveFilterOptions {
+  types: { value: "post" | "series"; label: string }[];
+  countries: string[]; age_ratings: string[]; qualities: string[]; sorts: string[];
+  year_min: number; year_max: number; rating_min: number; rating_max: number; rating_step: number;
+}
 
 export interface ArchiveResult {
   source: ArchiveSource;

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { api } from "@/lib/api";
-import type { ArchiveResult, ArchiveTitle, ArchiveGroup, ArchiveEpisode, ArchiveFile } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "./anim";
+import { api, type ArchiveAuthStatus } from "@/lib/api";
+import type { ArchiveResult, ArchiveTitle, ArchiveGroup, ArchiveEpisode, ArchiveFile, ArchiveFilterOptions, ArchiveSearchFilters } from "@/lib/types";
 import {
   Search,
   ArrowRight,
@@ -16,7 +16,6 @@ import {
   Tv,
   Clapperboard,
   DownloadCloud,
-  Link2,
   FolderOpen,
   ChevronDown,
 } from "lucide-react";
@@ -24,7 +23,7 @@ import {
 const inputClass =
   "w-full rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3.5 py-2.5 text-[13.5px] text-[color:var(--color-ink)] outline-none focus:border-[color:var(--color-amber)]";
 
-const SOURCE_LABEL: Record<string, string> = { donyayeserial: "دنیای سریال", animex: "انیمکس" };
+const SOURCE_LABEL: Record<string, string> = { digimoviez: "دیجی موویز" };
 
 const KIND_LABEL: Record<string, string> = {
   movie: "فیلم",
@@ -50,9 +49,10 @@ function episodeFromName(name: string): string {
   return name.replace(/\.(mkv|mp4|m4v|webm|avi|mov)$/i, "").slice(0, 60);
 }
 
-export function ArchivePanel({ myName }: { myName: string }) {
+export function ArchivePanel({ myName, initialLink }: { myName: string; initialLink?: string | null }) {
   const [q, setQ] = useState("");
-  const [sources, setSources] = useState<Record<string, boolean>>({ donyayeserial: true, animex: true });
+  const [options, setOptions] = useState<ArchiveFilterOptions | null>(null);
+  const [filters, setFilters] = useState<ArchiveSearchFilters>({ year_min: 1888, year_max: new Date().getFullYear(), rating_min: 0, rating_max: 10 });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [results, setResults] = useState<ArchiveResult[] | null>(null);
@@ -63,27 +63,69 @@ export function ArchivePanel({ myName }: { myName: string }) {
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
   const [animexFiles, setAnimexFiles] = useState<Record<string, ArchiveFile[]>>({});
   const [animexOpen, setAnimexOpen] = useState<Record<string, boolean>>({});
+  const [auth, setAuth] = useState<ArchiveAuthStatus | null>(null);
+  const [authCheckBusy, setAuthCheckBusy] = useState(false);
+  const [authBlocked, setAuthBlocked] = useState(false);
+  const importedRef = useRef<string | null>(null);
 
-  const activeSources = Object.entries(sources)
-    .filter(([, on]) => on)
-    .map(([id]) => id);
+  useEffect(() => {
+    api.archiveAuthStatus().then(setAuth).catch(() => setAuth(null));
+    api.archiveFilters()
+      .then((data) => {
+        setOptions(data);
+        setFilters((f) => ({ ...f, year_min: data.year_min, year_max: data.year_max, rating_min: data.rating_min, rating_max: data.rating_max }));
+      })
+      .catch((cause) => setErr(cause instanceof Error ? cause.message : "اتصال به API آرشیو برقرار نشد"));
+  }, []);
+
+  async function checkArchiveAuthentication() {
+    setAuthCheckBusy(true);
+    setErr(null);
+    try {
+      const next = await api.archiveAuthCheck();
+      setAuth(next);
+      setAuthBlocked(next.state === "AUTH_MANUAL_INTERVENTION_REQUIRED");
+      if (next.state === "AUTHENTICATED") {
+        setMsg({ text: "نشست بک‌اند دیجی‌موویز تأیید شد؛ اکنون می‌توانید جستجو کنید." });
+      }
+    } catch (cause) {
+      setErr(cause instanceof Error ? cause.message : "بررسی نشست دیجی‌موویز ناموفق بود");
+    } finally {
+      setAuthCheckBusy(false);
+    }
+  }
 
   async function doSearch(e?: React.FormEvent) {
     e?.preventDefault();
     const query = q.trim();
-    if (!query || busy) return;
-    if (activeSources.length === 0) {
-      setErr("حداقل یک منبع را انتخاب کن");
+    if ((!query && !filters.director && !filters.actors) || busy) return;
+    if (/^https?:\/\//i.test(query)) {
+      void importUrl(query);
+      return;
+    }
+    if (auth?.state === "AUTH_MANUAL_INTERVENTION_REQUIRED" || authBlocked) {
+      setAuthBlocked(true);
+      setErr("ورود بک‌اند دیجی‌موویز هنوز تأیید نشده است. ابتدا وضعیت نشست را بررسی کنید.");
       return;
     }
     setBusy(true);
     setErr(null);
     setResults(null);
     try {
-      const data = await api.archiveSearch(query, activeSources);
+      const data = await api.archiveSearch({ ...filters, query });
       setResults(data.results);
-    } catch (err2) {
-      setErr(err2 instanceof Error ? err2.message : "خطا در جستجو");
+    } catch (err2: unknown) {
+      const e = err2 as { kind?: string; message?: string };
+      if (e?.kind === "manual_challenge_required") {
+        setAuthBlocked(true);
+        setAuth((current) => current ? {
+          ...current,
+          state: "AUTH_MANUAL_INTERVENTION_REQUIRED",
+          kind: e.kind ?? "manual_challenge_required",
+          message: e.message ?? "ورود دیجی‌موویز به تکمیل دستی نیاز دارد.",
+        } : current);
+      }
+      setErr(e?.message || (e instanceof Error?e.message:"خطا در جستجو"));
     }
     setBusy(false);
   }
@@ -96,8 +138,10 @@ export function ArchivePanel({ myName }: { myName: string }) {
     try {
       const info = await api.archiveTitle(r.source, r.url);
       setDetail(info);
-    } catch (err2) {
-      setErr(err2 instanceof Error ? err2.message : "خطا در دریافت صفحه");
+    } catch (err2: unknown) {
+      const e = err2 as { kind?: string; message?: string };
+      if (e?.kind === "manual_challenge_required") setAuthBlocked(true);
+      setErr(e?.message || (e instanceof Error?e.message:"خطا در دریافت صفحه"));
     }
     setDetailBusy(false);
   }
@@ -105,9 +149,8 @@ export function ArchivePanel({ myName }: { myName: string }) {
   async function importUrl(rawUrl: string) {
     const url = rawUrl.trim();
     if (!url || detailBusy) return;
-    const source = url.includes("animex.click") ? "animex" : url.includes("donyayeserial") ? "donyayeserial" : null;
-    if (!source) {
-      setMsg({ text: "فقط لینک صفحه از دنیای سریال یا انیمکس پشتیبانی می‌شود", error: true });
+    if (!/^https?:\/\/([^/]+\.)?digimoviez\.com\//i.test(url)) {
+      setErr("این لینک مربوط به آرشیو دیجی‌موویز نیست.");
       return;
     }
     setDetailBusy(true);
@@ -115,13 +158,25 @@ export function ArchivePanel({ myName }: { myName: string }) {
     setErr(null);
     setMsg(null);
     try {
-      const info = await api.archiveTitle(source, url);
+      const info = await api.archiveTitle("digimoviez", url);
       setDetail(info);
-    } catch (err2) {
-      setErr(err2 instanceof Error ? err2.message : "خطا در دریافت صفحه");
+    } catch (cause: unknown) {
+      const error = cause as { kind?: string; message?: string };
+      if (error.kind === "manual_challenge_required") setAuthBlocked(true);
+      setErr(error.message || "دریافت صفحهٔ آرشیو ناموفق بود");
+    } finally {
+      setDetailBusy(false);
     }
-    setDetailBusy(false);
   }
+
+  useEffect(() => {
+    if (initialLink && importedRef.current !== initialLink) {
+      importedRef.current = initialLink;
+      void importUrl(initialLink);
+    }
+    // Import each handed-off link once, including when AddHub changes it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialLink]);
 
   async function runAdd(items: { title: string; url: string }[]) {
     if (!items.length) {
@@ -226,18 +281,25 @@ export function ArchivePanel({ myName }: { myName: string }) {
 
   return (
     <div>
+      {(auth?.state === "AUTH_MANUAL_INTERVENTION_REQUIRED" || authBlocked) && (
+        <ArchiveAuthenticationPanel
+          status={auth}
+          busy={authCheckBusy}
+          onCheck={checkArchiveAuthentication}
+        />
+      )}
       {!detail ? (
         <SearchView
           q={q}
           setQ={setQ}
-          sources={sources}
-          setSources={setSources}
+          filters={filters}
+          setFilters={setFilters}
+          options={options}
           busy={busy}
           err={err}
           results={results}
           onSearch={doSearch}
           onOpen={openDetail}
-          onImport={importUrl}
         />
       ) : (
         <DetailView
@@ -269,34 +331,80 @@ export function ArchivePanel({ myName }: { myName: string }) {
   );
 }
 
+function ArchiveAuthenticationPanel({
+  status,
+  busy,
+  onCheck,
+}: {
+  status: ArchiveAuthStatus | null;
+  busy: boolean;
+  onCheck: () => void;
+}) {
+  return (
+    <section className="mb-4 rounded-2xl border border-[color:var(--color-amber)]/50 bg-[color:var(--color-amber)]/10 p-4 text-right">
+      <div className="flex items-start gap-3">
+        <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-[color:var(--color-amber)]" />
+        <div className="min-w-0">
+          <h2 className="text-sm font-bold text-[color:var(--color-ink)]">ورود به دیجی‌موویز لازم است</h2>
+          <p className="mt-1 text-[13px] leading-6 text-[color:var(--color-ink-muted)]">
+            دیجی‌موویز در صفحهٔ ورود سؤال امنیتی نمایش می‌دهد. ورود عادی و پاسخ سؤال را در مرورگر خود کامل کنید، سپس نشست مستقلِ بک‌اند را بررسی کنید.
+          </p>
+          <p className="mt-1 text-[12px] leading-5 text-[color:var(--color-ink-dim)]">
+            ورود مرورگر به‌خودی‌خود به معنی ورود بک‌اند نیست؛ هیچ کوکی یا اطلاعات محرمانه‌ای از مرورگر دریافت نمی‌شود.
+          </p>
+          {status?.message && <p className="mt-2 text-[12px] text-[color:var(--color-ink-muted)]">وضعیت: {status.message}</p>}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <a
+              href="https://digimoviez.com/account/login/"
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-xl bg-[color:var(--color-amber)] px-3.5 py-2 text-[13px] font-bold text-black transition-opacity hover:opacity-90"
+            >
+              ورود به دیجی‌موویز را باز کن
+            </a>
+            <button
+              type="button"
+              onClick={onCheck}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-xl border border-[color:var(--color-border)] px-3.5 py-2 text-[13px] font-bold text-[color:var(--color-ink)] disabled:opacity-50"
+            >
+              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              ورود را کامل کردم — بررسی نشست
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SearchView({
   q,
   setQ,
-  sources,
-  setSources,
+  filters,
+  setFilters,
+  options,
   busy,
   err,
   results,
   onSearch,
   onOpen,
-  onImport,
 }: {
   q: string;
   setQ: (s: string) => void;
-  sources: Record<string, boolean>;
-  setSources: (s: Record<string, boolean>) => void;
+  filters: ArchiveSearchFilters;
+  setFilters: (s: ArchiveSearchFilters) => void;
+  options: ArchiveFilterOptions | null;
   busy: boolean;
   err: string | null;
   results: ArchiveResult[] | null;
   onSearch: (e?: React.FormEvent) => void;
   onOpen: (r: ArchiveResult) => void;
-  onImport: (url: string) => void;
 }) {
-  const [link, setLink] = useState("");
   return (
     <div>
       <form onSubmit={onSearch} className="flex flex-col gap-2.5">
-        <label className="text-xs text-[color:var(--color-ink-muted)]">جستجو در آرشیو فیلم و سریال</label>
+        <label className="text-xs text-[color:var(--color-ink-muted)]">جستجو در آرشیو دیجی موویز</label>
         <div className="flex gap-2">
           <input
             className={`${inputClass} flex-1`}
@@ -314,44 +422,9 @@ function SearchView({
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
           </button>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {Object.entries(SOURCE_LABEL).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setSources({ ...sources, [id]: !sources[id] })}
-              className={`rounded-full px-3.5 py-1.5 text-[12px] font-semibold transition-colors ${
-                sources[id] ? "border border-[color:var(--color-plum)]/40 bg-[color:var(--color-plum)]/20 text-white" : "border border-[color:var(--color-border)] bg-white/5 text-[color:var(--color-ink-muted)]"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <FilterControls filters={filters} setFilters={setFilters} options={options} />
       </form>
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          onImport(link);
-        }}
-        className="mt-3 flex items-center gap-2"
-      >
-        <Link2 className="h-4 w-4 shrink-0 text-[color:var(--color-ink-dim)]" />
-        <input
-          className={`${inputClass} flex-1`}
-          value={link}
-          onChange={(e) => setLink(e.target.value)}
-          placeholder="یا لینک صفحه سریال/انیمه را مستقیم وارد کن (دنیای سریال / انیمکس)"
-          dir="ltr"
-        />
-        <button
-          type="submit"
-          className="shrink-0 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3.5 py-2.5 text-[13px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50"
-        >
-          دریافت
-        </button>
-      </form>
 
       {err && (
         <div className="mt-3 flex items-center gap-2 rounded-xl border border-[color:var(--color-coral)]/40 bg-[color:var(--color-coral)]/10 px-3.5 py-2.5 text-[13px] text-[color:var(--color-coral)]">
@@ -400,6 +473,32 @@ function SearchView({
       )}
     </div>
   );
+}
+
+function FilterControls({ filters, setFilters, options }: { filters: ArchiveSearchFilters; setFilters: (s: ArchiveSearchFilters) => void; options: ArchiveFilterOptions | null }) {
+  const set = <K extends keyof ArchiveSearchFilters>(key: K, value: ArchiveSearchFilters[K]) => setFilters({ ...filters, [key]: value });
+  const select = (label: string, key: "type" | "country" | "age_rating" | "quality" | "sort", values: { value: string; label: string }[]) => (
+    <label className="flex min-w-32 flex-1 flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">{label}
+      <select className={inputClass} value={(filters[key] as string | undefined) ?? ""} onChange={(e) => set(key, (e.target.value || undefined) as ArchiveSearchFilters[typeof key])}>
+        <option value="">همه</option>{values.map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
+      </select>
+    </label>
+  );
+  return <div className="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-4">
+    {select("نوع", "type", options?.types ?? [])}
+    <label className="flex flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">کارگردان<input className={inputClass} value={filters.director ?? ""} onChange={(e) => set("director", e.target.value || undefined)} /></label>
+    <label className="flex flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">بازیگران<input className={inputClass} value={filters.actors ?? ""} onChange={(e) => set("actors", e.target.value || undefined)} /></label>
+    {select("کشور", "country", (options?.countries ?? []).map((x) => ({ value: x, label: x })))}
+    {select("رده سنی", "age_rating", (options?.age_ratings ?? []).map((x) => ({ value: x, label: x })))}
+    {select("کیفیت", "quality", (options?.qualities ?? []).map((x) => ({ value: x, label: x })))}
+    {select("ترتیب", "sort", (options?.sorts ?? []).map((x) => ({ value: x, label: x })))}
+    <Range label="سال ساخت" min={options?.year_min ?? 1888} max={options?.year_max ?? new Date().getFullYear()} step={1} lower={filters.year_min} upper={filters.year_max} onLower={(v) => set("year_min", v)} onUpper={(v) => set("year_max", v)} />
+    <Range label="امتیاز" min={0} max={10} step={options?.rating_step ?? 0.1} lower={filters.rating_min} upper={filters.rating_max} onLower={(v) => set("rating_min", v)} onUpper={(v) => set("rating_max", v)} />
+  </div>;
+}
+
+function Range({ label, min, max, step, lower, upper, onLower, onUpper }: { label: string; min: number; max: number; step: number; lower: number; upper: number; onLower: (v: number) => void; onUpper: (v: number) => void }) {
+  return <div className="col-span-2 flex flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]"><span>{label}: {lower} — {upper}</span><div className="flex gap-2"><input className="w-full" type="range" min={min} max={upper} step={step} value={lower} onChange={(e) => onLower(Number(e.target.value))} /><input className="w-full" type="range" min={lower} max={max} step={step} value={upper} onChange={(e) => onUpper(Number(e.target.value))} /></div></div>;
 }
 
 function DetailView({
@@ -467,9 +566,7 @@ function DetailView({
           </div>
           <h3 className="mt-1.5 line-clamp-3 text-[15px] font-bold leading-snug text-[color:var(--color-ink)]">{detail.title}</h3>
           <p className="mt-1 text-[11.5px] leading-relaxed text-[color:var(--color-ink-dim)]">
-            {detail.source === "animex"
-              ? "هر کیفیت یک ردیف است؛ «افزودن همه» تمام قسمت‌های آن کیفیت را اضافه می‌کند و با باز کردن هر ردیف می‌توانی تک‌قسمت اضافه کنی."
-              : "هر ردیف یک فصل و کیفیت است؛ «افزودن همه» تمام قسمت‌های همان ردیف را به پلی‌لیست اضافه می‌کند."}
+            هر ردیف کیفیت و لینک‌های دانلود همان مورد را نشان می‌دهد.
           </p>
         </div>
       </div>

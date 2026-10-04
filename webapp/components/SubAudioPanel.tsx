@@ -198,7 +198,7 @@ export function SubAudioPanel({ playlist, myName, canUpload = true }: { playlist
             <form onSubmit={uploadSub} className="flex flex-col gap-2.5">
               <input className={inputClass} value={subLabel} onChange={(e) => setSubLabel(e.target.value)} placeholder="برچسب (مثلا: فارسی)" />
               <SubtitleDropZone file={subFile} onFile={setSubFile} disabled={subBusy} />
-              <button type="submit" disabled={!subFile || subBusy} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}>
+              <button type="submit" disabled={!subFile || subBusy} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}>
                 {subBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
                 {subBusy ? "در حال آپلود…" : "آپلود زیرنویس"}
               </button>
@@ -207,7 +207,7 @@ export function SubAudioPanel({ playlist, myName, canUpload = true }: { playlist
             <form onSubmit={addSubUrl} className="flex flex-col gap-2.5">
               <input className={inputClass} value={subLabel} onChange={(e) => setSubLabel(e.target.value)} placeholder="برچسب (مثلا: فارسی)" />
               <input className={inputClass} dir="ltr" value={subUrl} onChange={(e) => setSubUrl(e.target.value)} placeholder="https://example.com/sub.srt" />
-              <button type="submit" disabled={!subUrl.trim() || subBusy} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}>
+              <button type="submit" disabled={!subUrl.trim() || subBusy} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}>
                 {subBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
                 افزودن زیرنویس
               </button>
@@ -228,7 +228,7 @@ export function SubAudioPanel({ playlist, myName, canUpload = true }: { playlist
           <form onSubmit={addAudio} className="flex flex-col gap-2.5">
             <input className={inputClass} value={audioLabel} onChange={(e) => setAudioLabel(e.target.value)} placeholder="برچسب (مثلا: دوبله فارسی)" />
             <input className={inputClass} dir="ltr" value={audioUrl} onChange={(e) => setAudioUrl(e.target.value)} placeholder="https://example.com/dub-fa.mp3" />
-            <button type="submit" disabled={!audioUrl.trim() || audioBusy} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}>
+            <button type="submit" disabled={!audioUrl.trim() || audioBusy} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}>
               {audioBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Headphones className="h-4 w-4" />}
               افزودن کانال صدا
             </button>

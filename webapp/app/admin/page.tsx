@@ -73,7 +73,7 @@ export default function AdminPage() {
       <main className="flex min-h-screen items-center justify-center p-5">
         <div className="rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 p-8 text-center backdrop-blur-md">
           <p className="mb-4 text-[14.5px] text-[color:var(--color-ink-muted)]">برای ورود به پنل ادمین اول وارد حساب شو</p>
-          <a href={`${basePath}/`} className="inline-flex items-center gap-2 rounded-2xl px-6 py-3 text-[14px] font-bold text-white" style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}>
+          <a href={`${basePath}/`} className="inline-flex items-center gap-2 rounded-2xl px-6 py-3 text-[14px] font-bold text-white" style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}>
             <ArrowRight className="h-4 w-4" />
             بازگشت به استریم
           </a>
@@ -87,7 +87,7 @@ export default function AdminPage() {
       <main className="flex min-h-screen items-center justify-center p-5">
         <div className="rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 p-8 text-center backdrop-blur-md">
           <p className="mb-4 text-[14.5px] text-[color:var(--color-coral)]">این صفحه فقط برای ادمین است.</p>
-          <a href={`${basePath}/`} className="inline-flex items-center gap-2 rounded-2xl px-6 py-3 text-[14px] font-bold text-white" style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}>
+          <a href={`${basePath}/`} className="inline-flex items-center gap-2 rounded-2xl px-6 py-3 text-[14px] font-bold text-white" style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}>
             <ArrowRight className="h-4 w-4" />
             بازگشت به استریم
           </a>
@@ -162,7 +162,7 @@ export default function AdminPage() {
       <header className="sticky top-0 z-[100] border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/85 backdrop-blur-xl">
         <div className="mx-auto flex h-[64px] max-w-[1120px] items-center justify-between px-5 md:px-7">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl text-lg font-black text-white" style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}>
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl text-lg font-black text-white" style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}>
               V
             </div>
             <span className="text-[15px] font-bold text-[color:var(--color-ink)]">پنل مدیریت استریم</span>

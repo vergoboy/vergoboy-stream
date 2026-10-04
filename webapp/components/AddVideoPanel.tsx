@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 
 import { Upload, Video, Radio, Plus, CheckCircle, AlertCircle, Loader2, UploadCloud, FileUp, Link2, CirclePlay, Search } from "lucide-react";
@@ -10,7 +10,7 @@ import { useState } from "react";
 import { api, uploadVideo } from "@/lib/api";
 import type { YoutubeScanVideo, YoutubeScanPlaylist } from "@/lib/api";
 
-type Mode = "file" | "url" | "youtube";
+type Mode = "link" | "file";
 
 const inputClass =
   "w-full rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3.5 py-2.5 text-[13.5px] text-[color:var(--color-ink)] outline-none focus:border-[color:var(--color-amber)]";
@@ -18,22 +18,20 @@ const labelClass = "mt-1 text-xs text-[color:var(--color-ink-muted)]";
 const primaryBtn =
   "mt-1.5 rounded-xl px-5 py-2.5 text-[14px] font-bold text-white transition-transform active:scale-[0.98] disabled:opacity-50";
 
-export function AddVideoPanel({ myName }: { myName: string }) {
-  const [mode, setMode] = useState<Mode>("file");
-
+export function AddVideoPanel({ myName, onArchiveLink }: { myName: string; onArchiveLink?: (url: string) => void }) {
+  const [mode, setMode] = useState<Mode>("link");
   return (
     <div>
-      <div className="mb-4 flex gap-1.5">
+      <div className="mb-4 grid grid-cols-2 gap-1 rounded-2xl bg-white/6 p-1">
         {([
-          ["file", <FileUp key="file" className="h-4 w-4" />, "آپلود فایل"],
-          ["url", <Link2 key="url" className="h-4 w-4" />, "لینک مستقیم"],
-          ["youtube", <CirclePlay key="youtube" className="h-4 w-4" />, "یوتیوب"],
+          ["link", <Link2 key="l" className="h-4 w-4" />, "لینک"],
+          ["file", <FileUp key="f" className="h-4 w-4" />, "فایل از گوشی/کامپیوتر"],
         ] as [Mode, React.ReactNode, string][]).map(([m, icon, label]) => (
           <button
             key={m}
             onClick={() => setMode(m)}
-            className={`flex items-center gap-1.5 rounded-xl px-4 py-2 text-[13px] font-semibold transition-colors ${
-              mode === m ? "bg-[color:var(--color-plum)]/25 text-white" : "bg-white/5 text-[color:var(--color-ink-muted)] hover:text-white"
+            className={`flex items-center justify-center gap-1.5 rounded-xl py-2 text-[13px] font-semibold transition-colors ${
+              mode === m ? "bg-white/15 text-white" : "text-white/55 hover:text-white"
             }`}
           >
             {icon}
@@ -41,11 +39,68 @@ export function AddVideoPanel({ myName }: { myName: string }) {
           </button>
         ))}
       </div>
-
+      {mode === "link" && <LinkForm myName={myName} onArchiveLink={onArchiveLink} />}
       {mode === "file" && <FileForm myName={myName} />}
-      {mode === "url" && <UrlForm myName={myName} />}
-      {mode === "youtube" && <VideoForm myName={myName} />}
     </div>
+  );
+}
+
+/** One box for every kind of link — we work out what it is so you don't have to. */
+function LinkForm({ myName, onArchiveLink }: { myName: string; onArchiveLink?: (url: string) => void }) {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [scanUrl, setScanUrl] = useState<string | null>(null);
+  const [note, setNote] = useState<{ msg: string; error?: boolean } | null>(null);
+
+  async function go(e: React.FormEvent) {
+    e.preventDefault();
+    const u = url.trim();
+    if (!u) return;
+    setNote(null);
+    if (!/^https?:\/\//i.test(u)) {
+      setNote({ msg: "لینک باید با http یا https شروع بشه", error: true });
+      return;
+    }
+    if (/(^|\.)digimoviez\.com\//i.test(new URL(u).hostname + "/") && onArchiveLink) {
+      onArchiveLink(u);
+      return;
+    }
+    if (/\.(mp4|webm|ogv|mov|m4v|mkv|m3u8)(\?|#|$)/i.test(u)) {
+      setBusy(true);
+      try {
+        await api.addUrl(u, "", myName);
+        setUrl("");
+        setNote({ msg: "اضافه شد به صف ✓" });
+      } catch (err) {
+        setNote({ msg: err instanceof Error ? err.message : "نشد", error: true });
+      }
+      setBusy(false);
+      return;
+    }
+    // YouTube and anything else yt-dlp understands
+    setScanUrl(u);
+  }
+
+  if (scanUrl) {
+    return (
+      <div>
+        <button type="button" onClick={() => { setScanUrl(null); setUrl(""); }} className="mb-3 text-[12.5px] text-white/60 hover:text-white">
+          ← لینک دیگه
+        </button>
+        <VideoForm myName={myName} initialUrl={scanUrl} autoScan />
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={go} className="flex flex-col gap-2.5">
+      <label className={labelClass}>لینک یوتیوب، ویدیو یا m3u8 مستقیم، یا صفحهٔ دیجی‌موویز</label>
+      <input className={inputClass} dir="ltr" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://" inputMode="url" />
+      <button type="submit" disabled={busy || !url.trim()} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}>
+        {busy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : "بریم جلو"}
+      </button>
+      {note && <p className={`text-[12.5px] ${note.error ? "text-[color:var(--color-coral)]" : "text-[color:var(--color-teal)]"}`}>{note.msg}</p>}
+    </form>
   );
 }
 
@@ -144,7 +199,7 @@ function FileForm({ myName }: { myName: string }) {
         type="submit"
         disabled={!file || progress !== null}
         className={primaryBtn}
-        style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+        style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}
       >
         آپلود و افزودن به پلی‌لیست
       </button>
@@ -155,46 +210,8 @@ function FileForm({ myName }: { myName: string }) {
   );
 }
 
-function UrlForm({ myName }: { myName: string }) {
-  const [title, setTitle] = useState("");
-  const [url, setUrl] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!url.trim()) return;
-    setBusy(true);
-    try {
-      await api.addUrl(url.trim(), title, myName);
-      setTitle("");
-      setUrl("");
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "خطا");
-    }
-    setBusy(false);
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-col gap-2.5">
-      <label className={labelClass}>عنوان (اختیاری)</label>
-      <input className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="مثلا: تریلر فیلم" />
-      <label className={labelClass}>لینک مستقیم ویدیو یا HLS (m3u8)</label>
-      <input className={inputClass} dir="ltr" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/movie.mp4" />
-      <button
-        type="submit"
-        disabled={busy}
-        className={primaryBtn}
-        style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
-      >
-        افزودن به پلی‌لیست
-      </button>
-      <p className="text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">پخش از همین ابتدا ممکنه شروع بشه در حالی که بقیه‌ی فیلم هنوز در حال آماده‌سازیه.</p>
-    </form>
-  );
-}
-
-function VideoForm({ myName }: { myName: string }) {
-  const [url, setUrl] = useState("");
+function VideoForm({ myName, initialUrl = "", autoScan = false }: { myName: string; initialUrl?: string; autoScan?: boolean }) {
+  const [url, setUrl] = useState(initialUrl);
   const [loading, setLoading] = useState(false);
   const [addingAll, setAddingAll] = useState(false);
   const [preview, setPreview] = useState<YoutubeScanVideo | null>(null);
@@ -231,10 +248,16 @@ function VideoForm({ myName }: { myName: string }) {
         setStatus(null);
       }
     } catch (err) {
-      setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
+      setStatus({ msg: `${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
     }
     setLoading(false);
   }
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot scan of the link we were handed
+    if (autoScan && initialUrl) void loadFormats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -242,13 +265,13 @@ function VideoForm({ myName }: { myName: string }) {
     setStatus({ msg: "در حال دریافت لینک مستقیم با کیفیت انتخابی… (۱۵–۳۰ ثانیه)" });
     try {
       const data = await api.addYoutube(url.trim(), formatId, customTitle || preview?.title || "", myName, subLang);
-      setStatus({ msg: `<CheckCircle className="w-4 h-4 text-emerald-400" /> «${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });
+      setStatus({ msg: `«${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });
       setPreview(null);
       setUrl("");
       setCustomTitle("");
       setTimeout(() => setStatus(null), 4000);
     } catch (err) {
-      setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
+      setStatus({ msg: `${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
     }
   }
 
@@ -258,12 +281,12 @@ function VideoForm({ myName }: { myName: string }) {
     setStatus({ msg: `در حال افزودن ${playlist.entries.length} ویدیوی پلی‌لیست… (چند دقیقه صبر کن)` });
     try {
       const data = await api.addYoutubePlaylist(url.trim(), playlist.playlist_title, myName);
-      setStatus({ msg: `<CheckCircle className="w-4 h-4 text-emerald-400" /> ${data.added} ویدیو از پلی‌لیست اضافه شد — دانلودها در پس‌زمینه ادامه داره` });
+      setStatus({ msg: `${data.added} ویدیو از پلی‌لیست اضافه شد — دانلودها در پس‌زمینه ادامه داره` });
       setPlaylist(null);
       setUrl("");
       setTimeout(() => setStatus(null), 5000);
     } catch (err) {
-      setStatus({ msg: `<AlertCircle className="w-4 h-4 text-rose-400" /> ${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
+      setStatus({ msg: `${err instanceof Error ? err.message : "خطای نامشخص"}`, error: true });
     }
     setAddingAll(false);
   }
@@ -335,7 +358,7 @@ function VideoForm({ myName }: { myName: string }) {
         <button
           type="submit"
           className="mt-1.5 self-end rounded-xl px-4 py-2 text-[12.5px] font-bold text-white transition-transform active:scale-[0.98] disabled:opacity-50"
-          style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+          style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}
         >
           <Plus className="h-4 w-4" /> افزودن
         </button>
@@ -372,7 +395,7 @@ function VideoForm({ myName }: { myName: string }) {
             onClick={addAllPlaylist}
             disabled={addingAll}
             className={primaryBtn}
-            style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+            style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}
           >
             {addingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="w-4 h-4" />} افزودن کل پلی‌لیست
           </button>
@@ -385,6 +408,7 @@ function VideoForm({ myName }: { myName: string }) {
             status.error ? "border-[color:var(--color-coral)]/40 bg-[color:var(--color-coral)]/10 text-[color:var(--color-coral)]" : "border-[color:var(--color-plum)]/40 bg-[color:var(--color-plum)]/10 text-[color:var(--color-ink)]"
           }`}
         >
+          {status.error ? <AlertCircle className="ml-1.5 inline h-4 w-4" /> : <Loader2 className="ml-1.5 inline h-4 w-4 animate-spin" />}
           {status.msg}
         </div>
       )}

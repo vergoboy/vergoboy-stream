@@ -24,3 +24,12 @@ export const jetbrainsMono = localFont({
   display: "optional",
   fallback: ["ui-monospace", "SFMono-Regular"],
 });
+
+// Chunky, friendly Persian display face — used only for the marquee/logo and
+// playful empty states, never for body text.
+export const lalezar = localFont({
+  src: [{ path: "./_fonts/Lalezar-Regular.woff2", weight: "400", style: "normal" }],
+  variable: "--font-lalezar",
+  display: "swap",
+  fallback: ["Vazirmatn", "Tahoma"],
+});

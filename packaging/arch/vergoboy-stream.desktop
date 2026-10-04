@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vergoboy Stream
+Comment=تماشای گروهی در سینمای خصوصی
+Exec=vergoboy-stream
+Icon=vergoboy-stream
+Terminal=false
+Categories=AudioVideo;Video;Network;
+StartupWMClass=vergoboy-stream

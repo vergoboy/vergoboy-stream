@@ -1,23 +1,20 @@
 "use client";
+/* eslint-disable react-hooks/refs */
 
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
 import { useLocalStorage } from "@/lib/useLocalStorage";
 import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
 import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
 import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, mayManage, finishOAuthLogin } from "@/lib/auth";
+import { useViewport, useIdle } from "@/lib/useIdle";
+import { guardNativeClose, isTauri } from "@/lib/tauri";
 
-import { Header } from "@/components/Header";
-import { Footer } from "@/components/Footer";
-import { Sofa } from "@/components/Sofa";
+import { Audience } from "@/components/Sofa";
 import { Player } from "@/components/Player";
-import { Tabs } from "@/components/Tabs";
 import { Playlist } from "@/components/Playlist";
-import { AddVideoPanel } from "@/components/AddVideoPanel";
-import { ArchivePanel } from "@/components/ArchivePanel";
-import { LivePanel } from "@/components/LivePanel";
+import { AddHub } from "@/components/AddHub";
 import { SubAudioPanel } from "@/components/SubAudioPanel";
 import { SubStylePanel } from "@/components/SubStylePanel";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -30,10 +27,18 @@ import { RoomBar } from "@/components/RoomBar";
 import { OnboardingModal } from "@/components/OnboardingModal";
 import { ShortcutsModal } from "@/components/ShortcutsModal";
 import { SettingsModal } from "@/components/SettingsModal";
+import { Scene, Marquee } from "@/components/Scene";
+import { Dock, type PanelId } from "@/components/Dock";
+import { Drawer } from "@/components/Drawer";
+import { ContextMenu, type MenuEntry } from "@/components/ContextMenu";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsProvider } from "@/lib/settings";
 import { useVoiceRoom } from "@/lib/useVoiceRoom";
 import { notifyText } from "@/lib/notifyText";
-import { ListVideo, Plus, Archive, Radio, Captions, Palette, MessageSquare, Users } from "lucide-react";
+import {
+  ListVideo, Plus, MessageCircle, Users, Captions, CircleUserRound, Play, Pause, Undo2, Redo2, SkipBack, SkipForward, Shuffle, Gauge, Maximize,
+  PictureInPicture2, Settings, Keyboard, Copy, VolumeX, LayoutDashboard, LogOut, Ticket,
+} from "lucide-react";
 
 let toastSeq = 0;
 
@@ -41,6 +46,15 @@ type ContextTarget = "player" | "user" | "voice" | "page";
 type ContextMenuState = { x: number; y: number; kind: ContextTarget; name: string | null };
 
 const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
+
+const PANEL_META: Record<PanelId, { title: string; icon: React.ReactNode }> = {
+  queue: { title: "صف پخش", icon: <ListVideo className="h-6 w-6" /> },
+  add: { title: "چی ببینیم؟", icon: <Plus className="h-6 w-6" /> },
+  chat: { title: "چت", icon: <MessageCircle className="h-6 w-6" /> },
+  people: { title: "حاضرین", icon: <Users className="h-6 w-6" /> },
+  subs: { title: "زیرنویس و صدا", icon: <Captions className="h-6 w-6" /> },
+  me: { title: "من", icon: <CircleUserRound className="h-6 w-6" /> },
+};
 
 export default function Page() {
   return (
@@ -55,7 +69,7 @@ function PageInner() {
   const [myAvatarUrl, setMyAvatarUrl] = useLocalStorage<string | null>("stream_user_avatar", null);
   const [subStyle, setSubStyle] = useLocalStorage<SubStyle>("stream_sub_style", DEFAULT_SUB_STYLE);
   const [roomCode, setRoomCode] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState("playlist");
+  const [panel, setPanel] = useState<PanelId | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -64,7 +78,6 @@ function PageInner() {
   const [voiceProfiles, setVoiceProfiles] = useState<{ name: string; avatarUrl: string | null; speaking: boolean }[]>([]);
   const [joinCode, setJoinCode] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const contextMenuRef = useRef<HTMLDivElement>(null);
 
   const myName = user?.username ?? "";
   const isAdm = isAdmin(user);
@@ -205,31 +218,27 @@ function PageInner() {
   const prevChatLenRef = useRef(0);
   useEffect(() => {
     const grew = chatMessages.length - prevChatLenRef.current;
-    if (grew > 0 && activeTab !== "chat") {
+    if (grew > 0 && panel !== "chat") {
       const newOnes = chatMessages.slice(-grew);
       const fromOthers = newOnes.filter((m) => m.name !== myName).length;
       if (fromOthers > 0) setUnreadChat((n) => n + fromOthers);
     }
     prevChatLenRef.current = chatMessages.length;
-  }, [chatMessages, activeTab, myName]);
+  }, [chatMessages, panel, myName]);
 
-  function handleTabChange(id: string) {
-    setActiveTab(id);
+  function openPanel(id: PanelId | null) {
+    setPanel(id);
     if (id === "chat") setUnreadChat(0);
+  }
+  function togglePanel(id: PanelId) {
+    openPanel(panel === id ? null : id);
   }
 
   function showContextMenu(target: EventTarget | null, x: number, y: number) {
     const element = target instanceof Element ? target : null;
     const contextTarget = element?.closest<HTMLElement>("[data-context-kind]");
     const kind = contextTarget?.dataset.contextKind as ContextTarget | undefined;
-    const menuWidth = 224;
-    const menuHeight = 240;
-    setContextMenu({
-      x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
-      y: Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8)),
-      kind: kind ?? "page",
-      name: contextTarget?.dataset.contextName ?? null,
-    });
+    setContextMenu({ x, y, kind: kind ?? "page", name: contextTarget?.dataset.contextName ?? null });
   }
 
   function handleContextMenu(event: React.MouseEvent<HTMLElement>) {
@@ -245,21 +254,6 @@ function PageInner() {
     const target = event.target as HTMLElement;
     const bounds = target.getBoundingClientRect();
     showContextMenu(target, bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
-  }
-
-  function handleContextMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setContextMenu(null);
-      return;
-    }
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const items = Array.from(contextMenuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
-    if (!items.length) return;
-    event.preventDefault();
-    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
-    const step = event.key === "ArrowDown" ? 1 : -1;
-    items[(currentIndex + step + items.length) % items.length]?.focus();
   }
 
   async function runContextAction(action: string) {
@@ -291,14 +285,21 @@ function PageInner() {
       case "shuffle":
         if (canManage) requestControl("shuffle", { on: !room.shuffle });
         break;
-      case "rate-1":
-        if (canManage) requestControl("rate", { rate: 1 });
+      case "fullscreen":
+      case "pip":
+        window.dispatchEvent(new CustomEvent("player:cmd", { detail: action }));
         break;
-      case "rate-1.5":
-        if (canManage) requestControl("rate", { rate: 1.5 });
+      case "queue":
+      case "people":
+      case "subs":
+      case "me":
+        openPanel(action);
         break;
-      case "rate-2":
-        if (canManage) requestControl("rate", { rate: 2 });
+      case "admin":
+        window.location.href = `${basePath}/admin/`;
+        break;
+      default:
+        if (action.startsWith("rate:") && canManage) requestControl("rate", { rate: parseFloat(action.slice(5)) });
         break;
       case "copy-name":
         if (target.name) {
@@ -317,10 +318,10 @@ function PageInner() {
         break;
       }
       case "chat":
-        handleTabChange("chat");
+        openPanel("chat");
         break;
       case "add-media":
-        if (canAdd) setActiveTab("add");
+        if (canAdd) openPanel("add");
         break;
       case "settings":
         setSettingsOpen(true);
@@ -331,144 +332,185 @@ function PageInner() {
     }
   }
 
-  const contextActions = contextMenu?.kind === "player"
-    ? [
-        ...(currentItem && currentItem.type !== "live" ? [
-          { id: "play-pause", label: room.playing ? "توقف" : "پخش" },
-          { id: "seek-back", label: "۱۰ ثانیه عقب" },
-          { id: "seek-forward", label: "۱۰ ثانیه جلو" },
-          { id: "prev", label: "آیتم قبلی" },
-          { id: "next", label: "آیتم بعدی" },
-          { id: "shuffle", label: room.shuffle ? "پخش ترتیبی" : "پخش تصادفی" },
-          { id: "rate-1", label: "سرعت ۱x" },
-          { id: "rate-1.5", label: "سرعت ۱.۵x" },
-          { id: "rate-2", label: "سرعت ۲x" },
-        ] : []),
-        { id: "shortcuts", label: "میانبرها" },
-        { id: "settings", label: "تنظیمات" },
-      ]
-    : contextMenu?.kind === "user"
+  const speedChips = [0.75, 1, 1.25, 1.5, 1.75, 2];
+  const hasPlayable = Boolean(currentItem && currentItem.type !== "live");
+
+  const contextEntries: MenuEntry[] = !contextMenu
+    ? []
+    : contextMenu.kind === "player"
       ? [
-          ...(contextMenu.name ? [{ id: "copy-name", label: `کپی نام ${contextMenu.name}` }] : []),
-          { id: "chat", label: "رفتن به چت" },
+          ...(currentItem ? [{ type: "title", label: currentItem.title.slice(0, 40) } as MenuEntry] : []),
+          ...(hasPlayable
+            ? ([
+                { type: "item", id: "play-pause", label: room.playing ? "توقف" : "پخش", icon: room.playing ? Pause : Play, hint: "K" },
+                { type: "item", id: "seek-back", label: "۱۰ ثانیه عقب", icon: Undo2, hint: "J" },
+                { type: "item", id: "seek-forward", label: "۱۰ ثانیه جلو", icon: Redo2, hint: "L" },
+                { type: "sep" },
+                { type: "item", id: "prev", label: "قبلی", icon: SkipBack, disabled: !canManage, hint: "P" },
+                { type: "item", id: "next", label: "بعدی", icon: SkipForward, disabled: !canManage, hint: "N" },
+                { type: "item", id: "shuffle", label: "پخش تصادفی", icon: Shuffle, active: room.shuffle, disabled: !canManage },
+                { type: "chips", label: "سرعت", icon: Gauge, disabled: !canManage, options: speedChips.map((r) => ({ id: `rate:${r}`, label: `${r}x`, active: room.rate === r })) },
+                { type: "sep" },
+              ] as MenuEntry[])
+            : []),
+          { type: "item", id: "fullscreen", label: "تمام‌صفحه", icon: Maximize, hint: "F" },
+          { type: "item", id: "pip", label: "پخش شناور", icon: PictureInPicture2 },
+          { type: "item", id: "subs", label: "زیرنویس و صدا", icon: Captions },
+          { type: "sep" },
+          { type: "item", id: "shortcuts", label: "میانبرها", icon: Keyboard, hint: "?" },
+          { type: "item", id: "settings", label: "تنظیمات", icon: Settings },
         ]
-      : contextMenu?.kind === "voice"
+      : contextMenu.kind === "user" || contextMenu.kind === "voice"
         ? [
-            ...(contextMenu.name ? [{ id: "copy-name", label: `کپی نام ${contextMenu.name}` }] : []),
-            ...(voice.participants.some((entry) => entry.name === contextMenu.name && !entry.isLocal)
-              ? [{ id: "mute-participant", label: "بی‌صدا کردن این کاربر برای من" }]
+            ...(contextMenu.name ? ([{ type: "title", label: contextMenu.name }, { type: "item", id: "copy-name", label: "کپی نام", icon: Copy }] as MenuEntry[]) : []),
+            ...(contextMenu.kind === "voice" && voice.participants.some((p) => p.name === contextMenu.name && !p.isLocal)
+              ? ([{ type: "item", id: "mute-participant", label: "بی‌صدا کردن (فقط برای من)", icon: VolumeX }] as MenuEntry[])
               : []),
-            { id: "settings", label: "تنظیمات صدا" },
+            { type: "item", id: "chat", label: "برو به چت", icon: MessageCircle },
+            ...(contextMenu.kind === "voice" ? ([{ type: "item", id: "settings", label: "تنظیمات صدا", icon: Settings }] as MenuEntry[]) : []),
           ]
         : [
-            { id: "chat", label: "رفتن به چت" },
-            ...(canAdd ? [{ id: "add-media", label: "افزودن ویدیو" }] : []),
-            { id: "shortcuts", label: "میانبرها" },
-            { id: "settings", label: "تنظیمات" },
+            { type: "item", id: "queue", label: "صف پخش", icon: ListVideo },
+            ...(canAdd ? ([{ type: "item", id: "add-media", label: "فیلم اضافه کن", icon: Plus }] as MenuEntry[]) : []),
+            { type: "item", id: "chat", label: "چت", icon: MessageCircle },
+            { type: "item", id: "people", label: "حاضرین", icon: Users },
+            { type: "sep" },
+            { type: "item", id: "shortcuts", label: "میانبرها", icon: Keyboard, hint: "?" },
+            { type: "item", id: "settings", label: "تنظیمات", icon: Settings },
+            ...(isAdm ? ([{ type: "sep" }, { type: "item", id: "admin", label: "پنل مدیریت", icon: LayoutDashboard }] as MenuEntry[]) : []),
           ];
 
+  // ---- layout ----
+  const vp = useViewport();
+  const phonePortrait = vp.phone && vp.portrait;
+  const sheet = phonePortrait;
+  const shortScreen = vp.h < 560;
+  const shiftForDrawer = Boolean(panel) && !sheet && vp.w >= 1020;
+  const watchingNow = room.playing && !!currentItem && currentItem.type !== "live";
+  const idle = useIdle(4500, watchingNow && !panel && !contextMenu);
+
+  // ---- never let someone drift out of the cinema by accident ----
+  const activeRef = useRef(false);
+  activeRef.current = room.playing || voice.connected;
+  const panelRef = useRef<PanelId | null>(null);
+  panelRef.current = panel;
+  const [leaveAsk, setLeaveAsk] = useState(false);
+  const leaveResolver = useRef<((leave: boolean) => void) | null>(null);
+  const leavingRef = useRef(false);
+
   useEffect(() => {
-    if (!contextMenu) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!(event.target instanceof Element) || !event.target.closest("[data-context-menu-root]")) {
-        setContextMenu(null);
-      }
+    const warn = (e: BeforeUnloadEvent) => {
+      if (leavingRef.current || !activeRef.current) return;
+      e.preventDefault();
+      e.returnValue = "";
     };
-    window.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => window.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [contextMenu]);
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
+
+  useEffect(() => {
+    // Back button / back swipe: first close whatever is open, then ask before leaving.
+    if (isTauri() && !/android|iphone|ipad/i.test(navigator.userAgent)) return;
+    history.pushState({ cinema: true }, "");
+    const onPop = () => {
+      if (leavingRef.current) return;
+      history.pushState({ cinema: true }, "");
+      if (panelRef.current) {
+        setPanel(null);
+        return;
+      }
+      leaveResolver.current = (leave) => {
+        if (!leave) return;
+        leavingRef.current = true;
+        history.go(-2);
+      };
+      setLeaveAsk(true);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  useEffect(() => {
+    // Desktop app: closing the window while a film is playing asks first.
+    if (!isTauri()) return;
+    let off: (() => void) | undefined;
+    guardNativeClose(
+      () => activeRef.current,
+      () =>
+        new Promise<boolean>((resolve) => {
+          leaveResolver.current = resolve;
+          setLeaveAsk(true);
+        })
+    ).then((u) => (off = u));
+    return () => off?.();
+  }, []);
+
+  const answerLeave = (leave: boolean) => {
+    setLeaveAsk(false);
+    const r = leaveResolver.current;
+    leaveResolver.current = null;
+    r?.(leave);
+  };
+
+  const [logoutAsk, setLogoutAsk] = useState(false);
+  const [chipCopied, setChipCopied] = useState(false);
 
   if (!hydrated) return null;
+  if (!user) return <AuthGate />;
 
-  if (!user) {
-    return <AuthGate />;
-  }
+  const voiceLive = voice.connected;
+  const compactAudience = shortScreen || vp.w < 760;
+  const stageStyle: React.CSSProperties = {
+    paddingLeft: phonePortrait ? 0 : 24,
+    paddingRight: phonePortrait ? 0 : shiftForDrawer ? "calc(76px + min(400px, calc(100vw - 100px)) + 24px)" : "76px",
+    paddingBottom: phonePortrait ? "calc(76px + env(safe-area-inset-bottom, 0px))" : 0,
+    transition: "padding 480ms cubic-bezier(.2,.8,.2,1)",
+  };
+  const screenWidth = phonePortrait
+    ? "100%"
+    : `min(100%, calc((100dvh - ${shortScreen ? 90 : 250}px) * 16 / 9))`;
+
+  const copyInvite = () => {
+    const origin = process.env.NEXT_PUBLIC_API_ORIGIN || window.location.origin;
+    navigator.clipboard
+      ?.writeText(`${origin}${basePath}/?join=${roomCode}`)
+      .then(() => {
+        setChipCopied(true);
+        window.setTimeout(() => setChipCopied(false), 1800);
+      })
+      .catch(() => {});
+  };
+
+  const pushToast = (text: string) => {
+    const id = `t${toastSeq++}`;
+    setToasts((prev) => [...prev, { id, text }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  };
+
+  const meta = panel ? PANEL_META[panel] : null;
 
   return (
     <main
-      className="page relative z-[1]"
+      className={`cinema-root ${idle ? "lights-down" : ""}`}
       onContextMenu={handleContextMenu}
       onKeyDown={handleContextKeyDown}
-      onClick={(event) => {
-        if (!(event.target as HTMLElement).closest("[data-context-menu-root]")) setContextMenu(null);
-      }}
     >
-      <Header user={user} onLogout={() => logout()} />
+      <Scene />
       <Toasts toasts={toasts} />
       <OnboardingModal />
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} voice={voice} />
-      {contextMenu && (
-        <div
-          ref={contextMenuRef}
-          data-context-menu-root
-          role="menu"
-          aria-label="عملیات"
-          dir="rtl"
-          onContextMenu={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={handleContextMenuKeyDown}
-          className="fixed z-[10000] min-w-56 overflow-hidden rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/95 p-1.5 shadow-2xl backdrop-blur-xl"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          {contextActions.map((action, index) => (
-            <button
-              key={action.id}
-              type="button"
-              role="menuitem"
-              autoFocus={index === 0}
-              onClick={() => void runContextAction(action.id)}
-              className="flex min-h-9 w-full items-center rounded-lg px-3 text-right text-[13px] text-[color:var(--color-ink)] outline-none transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:ring-2 focus-visible:ring-[color:var(--color-amber)]"
-            >
-              {action.label}
-            </button>
-          ))}
-        </div>
-      )}
 
-      <div className="mx-auto max-w-[1120px] px-4 pt-8 md:px-7">
-        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-5">
-          <h1
-            className="mb-1.5 text-2xl font-extrabold md:text-3xl"
-            style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum-soft))", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}
-          >
-            تماشای مشترک
-          </h1>
-          <p className="flex flex-wrap items-center gap-2.5 text-[14.5px] text-[color:var(--color-ink-muted)]">
-            فیلم رو هم‌زمان با بقیه تماشا کن — پخش، توقف و زمان برای همه یکی‌ست.
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--color-border)] bg-white/5 px-3 py-1 text-xs">
-              <Users className="h-3.5 w-3.5 text-[color:var(--color-amber)]" />
-              <span className="font-mono text-[color:var(--color-amber)]">{room.online}</span> آنلاین
-              {!connected && <span className="text-[color:var(--color-coral)]">· در حال اتصال…</span>}
-            </span>
-          </p>
-        </motion.div>
+      {/* the stage */}
+      <div className={`absolute inset-0 flex flex-col items-center ${phonePortrait ? "justify-start pt-2" : "justify-center"}`} style={{ ...stageStyle, paddingTop: phonePortrait ? "calc(8px + env(safe-area-inset-top, 0px))" : undefined }}>
+        {!phonePortrait && !shortScreen && (
+          <div className="mb-3">
+            <Marquee pulseKey={presenceUsers.length} compact={vp.w < 900} />
+          </div>
+        )}
 
-        {roomCode && <RoomBar roomCode={roomCode} online={room.online} onRoomChange={setRoomCode} />}
-
-        {/* Exactly two couches. They are a metaphor for doing something together,
-            not a capacity limit — any number of people can be on either one,
-            and the same person can be on both at once (watching while talking). */}
-        <div className="grid gap-4 mb-6 md:grid-cols-2">
-          <Sofa
-            title="WATCHING"
-            description="کسانی که همین حالا دارند ویدیوی مشترک را تماشا می‌کنند."
-            users={watchingUsers}
-            voiceSpeaking={voiceProfiles}
-            kind="watching"
-            emptyLabel="هنوز کسی در حال تماشا نیست — پخش را شروع کنید."
-          />
-          <Sofa
-            title="VOICE"
-            description="در اتاق صدا با هم کنار هم هستیم؛ کسی که صحبت می‌کند، روشن می‌شود."
-            users={voiceUsers}
-            voiceSpeaking={voiceProfiles}
-            kind="voice"
-            emptyLabel="هنوز کسی وارد اتاق صدا نشده."
-          />
-        </div>
-
-        <Player
+        <div className={phonePortrait ? "w-full px-2" : "relative z-10"} style={phonePortrait ? undefined : { width: screenWidth }}>
+          <Player
             item={currentItem}
             playing={room.playing}
             rate={room.rate}
@@ -488,59 +530,78 @@ function PageInner() {
             shuffle={room.shuffle}
             canShuffle={canManage && room.playlist.length > 1}
             onToggleShuffle={() => requestControl("shuffle", { on: !room.shuffle })}
-            onGoToAdd={() => setActiveTab("add")}
-            onGoToSubStyle={() => setActiveTab("substyle")}
+            onGoToAdd={canAdd ? () => openPanel("add") : undefined}
+            onGoToSubStyle={() => openPanel("subs")}
             onOpenShortcuts={() => setShortcutsOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)}
           />
+        </div>
 
-        <section className="my-6 grid gap-5 lg:grid-cols-[1fr_300px]">
-          <div className="rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 p-5 backdrop-blur-md">
-            <Tabs
-              active={activeTab}
-              onChange={handleTabChange}
-              tabs={[
-                { id: "playlist", label: (<span className="flex items-center gap-1.5"><ListVideo className="w-4 h-4" /> پلی‌لیست</span>) },
-                ...(canAdd
-                  ? [
-                      { id: "add", label: (<span className="flex items-center gap-1.5"><Plus className="w-4 h-4" /> افزودن ویدیو</span>) } as const,
-                      { id: "archive", label: (<span className="flex items-center gap-1.5"><Archive className="w-4 h-4" /> آرشیو جستجو</span>) } as const,
-                    ]
-                  : []),
-                ...(canAdd ? [{ id: "live", label: (<span className="flex items-center gap-1.5"><Radio className="w-4 h-4" /> استریم خارجی</span>) } as const] : []),
-                { id: "subaudio", label: (<span className="flex items-center gap-1.5"><Captions className="w-4 h-4" /> زیرنویس و صدا</span>) },
-                { id: "substyle", label: (<span className="flex items-center gap-1.5"><Palette className="w-4 h-4" /> استایل زیرنویس</span>) },
-                { id: "chat", label: (<span className="flex items-center gap-1.5"><MessageSquare className="w-4 h-4" /> چت</span>), badge: unreadChat },
-              ]}
-            />
-
-            <motion.div key={activeTab} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
-              {activeTab === "playlist" && (
-                <Playlist
-                  playlist={room.playlist}
-                  currentIndex={room.current_index}
-                  transcodeProgress={transcodeProgress}
-                  myName={myName}
-                  onSelect={(index) => canManage && requestControl("select", { index })}
-                />
-              )}
-              {activeTab === "add" && <AddVideoPanel myName={myName} />}
-              {activeTab === "archive" && <ArchivePanel myName={myName} />}
-              {activeTab === "live" && (
-                <LivePanel
-                  myName={myName}
-                  canAdd={canAdd}
-                  canManage={canManage}
-                  onLiveStarted={() => requestControl("select", { index: room.playlist.length })}
-                />
-              )}
-              {activeTab === "subaudio" && <SubAudioPanel playlist={room.playlist} myName={myName} canUpload={canManage} />}
-              {activeTab === "substyle" && <SubStylePanel value={subStyle} onChange={setSubStyle} />}
-              {activeTab === "chat" && <ChatPanel messages={chatMessages} myName={myName} onSend={sendChat} />}
-            </motion.div>
+        {!phonePortrait && !shortScreen && (
+          <div className="room-dim relative z-0 mt-5 w-full max-w-[760px]">
+            <Audience users={presenceUsers} voiceSpeaking={voiceProfiles} compact={compactAudience} />
           </div>
+        )}
+        {phonePortrait && (
+          <div className="room-dim mt-4 w-full px-2">
+            <Audience users={presenceUsers} voiceSpeaking={voiceProfiles} compact max={8} />
+          </div>
+        )}
+      </div>
 
-          <div className="flex flex-col gap-5">
+      {/* your ticket: code + one-tap invite, top corner */}
+      <button
+        type="button"
+        onClick={copyInvite}
+        aria-label="کپی لینک دعوت"
+        className={`room-dim glass absolute left-3 z-30 flex items-center gap-2 rounded-full py-1.5 pl-3.5 pr-2.5 text-[12px] text-white transition-opacity hover:bg-white/10`}
+        style={{ top: "calc(10px + env(safe-area-inset-top, 0px))" }}
+      >
+        <span className={`h-2 w-2 rounded-full ${connected ? "bg-[color:var(--color-teal)]" : "animate-pulse bg-[color:var(--color-coral)]"}`} />
+        {roomCode ? (
+          <>
+            <Ticket className="h-3.5 w-3.5 text-[color:var(--color-amber)]" />
+            <span className="font-mono tracking-widest" dir="ltr">{roomCode}</span>
+            <span className="text-white/55">{chipCopied ? "کپی شد ✓" : connected ? `${room.online} نفر` : "در حال اتصال…"}</span>
+          </>
+        ) : (
+          <span>در حال اتصال…</span>
+        )}
+      </button>
+
+      <Dock
+        active={panel}
+        onPick={togglePanel}
+        canAdd={canAdd}
+        unreadChat={unreadChat}
+        online={room.online}
+        voiceLive={voiceLive}
+        layout={phonePortrait ? "bar" : "rail"}
+        chromeHidden={idle}
+      />
+
+      <Drawer open={!!panel} title={meta?.title ?? ""} icon={meta?.icon} sheet={sheet} onClose={() => openPanel(null)}>
+        {panel === "queue" && (
+          <Playlist
+            playlist={room.playlist}
+            currentIndex={room.current_index}
+            transcodeProgress={transcodeProgress}
+            myName={myName}
+            onSelect={(index) => {
+              if (canManage) {
+                requestControl("select", { index });
+                if (sheet) openPanel(null);
+              } else pushToast("فقط مدیر اتاق می‌تونه فیلم رو عوض کنه");
+            }}
+          />
+        )}
+        {panel === "add" && canAdd && (
+          <AddHub myName={myName} canAdd={canAdd} canManage={canManage} onLiveStarted={() => requestControl("select", { index: room.playlist.length })} />
+        )}
+        {panel === "chat" && <ChatPanel messages={chatMessages} myName={myName} onSend={sendChat} />}
+        {panel === "people" && (
+          <div className="flex flex-col gap-6">
+            {roomCode && <RoomBar roomCode={roomCode} online={room.online} onRoomChange={setRoomCode} />}
             <VoicePanel
               myName={myName}
               myAvatarUrl={myAvatarUrl}
@@ -550,6 +611,20 @@ function PageInner() {
               onVoiceLeave={() => setVoiceActive(false)}
               onOpenSettings={() => setSettingsOpen(true)}
             />
+            <MembersPanel myName={myName} canManage={canManage} onToast={pushToast} />
+          </div>
+        )}
+        {panel === "subs" && (
+          <div className="flex flex-col gap-8">
+            <SubAudioPanel playlist={room.playlist} myName={myName} canUpload={canManage} />
+            <div>
+              <h3 className="display mb-3 text-[18px] text-white">ظاهر زیرنویس</h3>
+              <SubStylePanel value={subStyle} onChange={setSubStyle} />
+            </div>
+          </div>
+        )}
+        {panel === "me" && (
+          <div className="flex flex-col gap-4">
             <Sidebar
               myName={myName}
               myAvatarUrl={myAvatarUrl}
@@ -559,34 +634,46 @@ function PageInner() {
                   const { url } = await api.avatarUpload(file, myName);
                   setMyAvatarUrl(url);
                 } catch (e) {
-                  alert(e instanceof Error ? e.message : "خطا در آپلود عکس");
+                  pushToast(e instanceof Error ? e.message : "خطا در آپلود عکس");
                 }
               }}
               notifications={notifications}
               playlist={room.playlist}
             />
-            <MembersPanel
-              myName={myName}
-              canManage={canManage}
-              onToast={(msg) => {
-                const id = `t${toastSeq++}`;
-                setToasts((prev) => [...prev, { id, text: msg }]);
-                setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
-              }}
-            />
-            {isAdm && (
-              <a
-                href={`${basePath}/admin/`}
-                className="rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 p-5 text-center text-[14px] font-bold text-[color:var(--color-amber)] backdrop-blur-md hover:border-[color:var(--color-amber)]/50"
-              >
-                پنل مدیریت کاربران
-              </a>
-            )}
+            <button onClick={() => setSettingsOpen(true)} className="flex items-center justify-center gap-2 rounded-2xl bg-white/8 py-3 text-[14px] font-semibold text-white hover:bg-white/14">
+              <Settings className="h-4 w-4" /> تنظیمات
+            </button>
+            <button
+              onClick={() => (logoutAsk ? logout() : (setLogoutAsk(true), window.setTimeout(() => setLogoutAsk(false), 3000)))}
+              className={`flex items-center justify-center gap-2 rounded-2xl py-3 text-[14px] font-semibold transition-colors ${
+                logoutAsk ? "bg-[color:var(--color-coral)] text-white" : "text-[color:var(--color-coral)] hover:bg-white/8"
+              }`}
+            >
+              <LogOut className="h-4 w-4" /> {logoutAsk ? "مطمئنی؟ دوباره بزن" : "خروج از حساب"}
+            </button>
           </div>
-        </section>
-      </div>
+        )}
+      </Drawer>
 
-      <Footer />
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          entries={contextEntries}
+          onPick={(id) => void runContextAction(id)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      <ConfirmDialog
+        open={leaveAsk}
+        title="وسط فیلمی!"
+        body={room.playing || voice.connected ? "اگه بری بیرون، پخش و صدات قطع می‌شه و بقیه بدون تو ادامه می‌دن." : "مطمئنی می‌خوای از سالن بری بیرون؟"}
+        stay="می‌مونم 🍿"
+        leave="آره، برم"
+        onStay={() => answerLeave(false)}
+        onLeave={() => answerLeave(true)}
+      />
     </main>
   );
 }

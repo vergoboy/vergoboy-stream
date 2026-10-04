@@ -215,7 +215,7 @@ function BrowserStreamSection({
             disabled={!canAdd}
             title={canAdd ? undefined : "اجازه‌ی افزودن پخش زنده نداری"}
             className="rounded-xl px-5 py-2.5 text-[14px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
-            style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}
+            style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}
           >
             <span className="flex items-center gap-1.5">
               <MonitorUp className="h-4 w-4" />
@@ -296,7 +296,7 @@ export function LivePanel({ myName, canAdd, canManage, onLiveStarted }: { myName
                   setKey(null);
                 }}
                 className="mt-1 rounded-xl px-5 py-2.5 text-[14px] font-bold text-white"
-                style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}
+                style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}
               >
                 <span className="flex items-center gap-1.5">
                   <Plus className="h-4 w-4" />
@@ -327,7 +327,7 @@ export function LivePanel({ myName, canAdd, canManage, onLiveStarted }: { myName
             <button
               type="submit"
               className="mt-1 rounded-xl px-5 py-2.5 text-[14px] font-bold text-white"
-              style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}
+              style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}
             >
               افزودن به پلی‌لیست
             </button>
