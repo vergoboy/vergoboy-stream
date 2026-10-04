@@ -1,6 +1,6 @@
 "use client";
 
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "./anim";
 import { Bell, Shield, Gamepad2, Eye, ImagePlus } from "lucide-react";
 import { Avatar } from "./Avatar";
 import type { NotifyEvent, PlaylistItem, UserRole } from "@/lib/types";

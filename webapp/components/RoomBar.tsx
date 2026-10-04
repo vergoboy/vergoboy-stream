@@ -1,28 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { Copy, Check, DoorOpen, Home, Users } from "lucide-react";
+import { Copy, Check, DoorOpen, Home, Ticket } from "lucide-react";
 import { api } from "@/lib/api";
 import { updateUser } from "@/lib/auth";
 
 const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
 
-export function RoomBar({
-  roomCode,
-  online,
-  onRoomChange,
-}: {
-  roomCode: string;
-  online: number;
-  onRoomChange: (code: string) => void;
-}) {
+/** Your ticket: the room code, a one-tap invite, and the way into someone else's room. */
+export function RoomBar({ roomCode, online, onRoomChange }: { roomCode: string; online: number; onRoomChange: (code: string) => void }) {
   const [joinCode, setJoinCode] = useState("");
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
 
-  const inviteLink = `${window.location.origin}${basePath}/?join=${roomCode}`;
+  const origin = process.env.NEXT_PUBLIC_API_ORIGIN || window.location.origin;
+  const inviteLink = `${origin}${basePath}/?join=${roomCode}`;
 
   function copyInvite() {
     navigator.clipboard
@@ -31,110 +24,76 @@ export function RoomBar({
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch(() => setError("کپی کردن با خطا مواجه شد"));
+      .catch(() => setMsg({ text: "کپی نشد؛ لینک رو دستی کپی کن", error: true }));
   }
 
-  async function join(code: string) {
-    const c = code.trim().toUpperCase();
-    if (!c) return;
+  async function go(fn: () => Promise<{ user: Parameters<typeof updateUser>[0]; room: { id: string } }>, ok: string) {
     setBusy(true);
-    setError(null);
-    setNotice(null);
+    setMsg(null);
     try {
-      const res = await api.roomJoin(c);
+      const res = await fn();
       updateUser(res.user);
       setJoinCode("");
-      setNotice(`وارد اتاق ${c} شدی`);
+      setMsg({ text: ok });
       onRoomChange(res.room.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "ورود به اتاق ناموفق بود");
-    } finally {
-      setBusy(false);
+      setMsg({ text: e instanceof Error ? e.message : "نشد", error: true });
     }
-  }
-
-  async function backToMine() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await api.roomMine();
-      updateUser(res.user);
-      setNotice("به اتاق خودت برگشتی");
-      onRoomChange(res.room.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "بازگشت به اتاق ناموفق بود");
-    } finally {
-      setBusy(false);
-    }
+    setBusy(false);
   }
 
   return (
-    <div className="mb-4 flex flex-wrap items-center gap-2.5 rounded-3xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-soft)]/70 px-4 py-3 backdrop-blur-md">
-      <div className="flex items-center gap-2">
-        <span className="text-[12.5px] text-[color:var(--color-ink-muted)]">کد اتاق:</span>
-        <span className="rounded-lg border border-[color:var(--color-amber)]/40 bg-white/5 px-2.5 py-1 font-mono text-sm font-bold tracking-widest text-[color:var(--color-amber)]" dir="ltr">
+    <div className="flex flex-col gap-3">
+      <div className="ticket relative overflow-hidden rounded-2xl bg-[color:var(--color-amber)] p-4 text-[#1b1005]">
+        <div className="flex items-center gap-2 text-[12px] font-bold opacity-70">
+          <Ticket className="h-4 w-4" /> بلیت اتاق تو · {online} نفر آنلاین
+        </div>
+        <div className="my-2 border-y-2 border-dashed border-black/25 py-2 text-center font-mono text-[34px] font-black tracking-[0.3em]" dir="ltr">
           {roomCode}
-        </span>
-      </div>
-
-      <button
-        onClick={copyInvite}
-        title="کپی لینک دعوت"
-        className="flex items-center gap-1.5 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-[12.5px] text-[color:var(--color-ink)] transition-colors hover:border-[color:var(--color-amber)]/50"
-      >
-        {copied ? <Check className="h-3.5 w-3.5 text-[color:var(--color-teal)]" /> : <Copy className="h-3.5 w-3.5" />}
-        {copied ? "کپی شد!" : "کپی لینک دعوت"}
-      </button>
-
-      <div className="flex items-center gap-1.5 text-[12px] text-[color:var(--color-ink-muted)]">
-        <Users className="h-3.5 w-3.5 text-[color:var(--color-teal)]" />
-        {online} آنلاین
-      </div>
-
-      <div className="flex flex-1 items-center justify-end gap-2">
-        <form
-          className="flex items-center gap-1.5"
-          onSubmit={(e) => {
-            e.preventDefault();
-            join(joinCode);
-          }}
-        >
-          <input
-            value={joinCode}
-            onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-            maxLength={6}
-            placeholder="کد اتاق…"
-            className="w-24 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-center font-mono text-[12.5px] tracking-widest text-[color:var(--color-ink)] outline-none focus:border-[color:var(--color-amber)]"
-            dir="ltr"
-          />
-          <button
-            type="submit"
-            disabled={busy || !joinCode.trim()}
-            title="ورود با کد"
-            className="flex items-center gap-1.5 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-[12.5px] text-[color:var(--color-ink)] transition-colors hover:border-[color:var(--color-amber)]/50 disabled:opacity-40"
-          >
-            <DoorOpen className="h-3.5 w-3.5" />
-            ورود
-          </button>
-        </form>
-
+        </div>
         <button
-          onClick={backToMine}
-          disabled={busy}
-          title="بازگشت به اتاق خودت"
-          className="flex items-center gap-1.5 rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3 py-1.5 text-[12.5px] text-[color:var(--color-ink)] transition-colors hover:border-[color:var(--color-amber)]/50 disabled:opacity-40"
+          onClick={copyInvite}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#1b1005] py-2.5 text-[13.5px] font-bold text-[color:var(--color-amber)] active:scale-[0.98]"
         >
-          <Home className="h-3.5 w-3.5" />
-          اتاق من
+          {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+          {copied ? "لینک دعوت کپی شد!" : "کپی لینک دعوت"}
         </button>
       </div>
 
-      {(error || notice) && (
-        <p className={`w-full text-[12px] ${error ? "text-[color:var(--color-coral)]" : "text-[color:var(--color-teal)]"}`}>
-          {error ?? notice}
-        </p>
-      )}
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const c = joinCode.trim().toUpperCase();
+          if (c) void go(() => api.roomJoin(c), `وارد اتاق ${c} شدی 🎉`);
+        }}
+      >
+        <input
+          value={joinCode}
+          onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+          maxLength={6}
+          placeholder="کد اتاق دوستت"
+          dir="ltr"
+          className="min-w-0 flex-1 rounded-xl border border-white/12 bg-white/5 px-3 py-2.5 text-center font-mono text-[14px] tracking-widest text-white outline-none focus:border-[color:var(--color-amber)]"
+        />
+        <button
+          type="submit"
+          disabled={busy || !joinCode.trim()}
+          className="flex shrink-0 items-center gap-1.5 rounded-xl bg-white/10 px-4 py-2.5 text-[13px] font-bold text-white hover:bg-white/15 disabled:opacity-40"
+        >
+          <DoorOpen className="h-4 w-4" />
+          ورود
+        </button>
+      </form>
+      <button
+        onClick={() => void go(() => api.roomMine(), "برگشتی تو اتاق خودت")}
+        disabled={busy}
+        className="flex items-center justify-center gap-2 rounded-xl border border-white/12 py-2.5 text-[13px] text-white/75 hover:bg-white/8 disabled:opacity-40"
+      >
+        <Home className="h-4 w-4" />
+        برگشت به اتاق خودم
+      </button>
+      {msg && <p className={`text-[12.5px] ${msg.error ? "text-[color:var(--color-coral)]" : "text-[color:var(--color-teal)]"}`}>{msg.text}</p>}
     </div>
   );
 }

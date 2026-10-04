@@ -12,7 +12,7 @@ import {
   Loader2,
   Signal,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "./anim";
 import { Avatar } from "./Avatar";
 import type { VoiceParticipant } from "@/lib/types";
 import type { useVoiceRoom, VoiceStatus, MicStatus } from "@/lib/useVoiceRoom";

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "./anim";
 import { KeyRound, Users, UserRoundCog, X } from "lucide-react";
 
 const ONBOARD_KEY = "stream_onboarded_v2";
@@ -89,7 +89,7 @@ export function OnboardingModal() {
             <button
               onClick={close}
               className="mt-4 w-full rounded-2xl px-6 py-3 text-[14.5px] font-bold text-white transition-transform active:scale-[0.98]"
-              style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+              style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}
             >
               متوجه شدم، شروع کن
             </button>

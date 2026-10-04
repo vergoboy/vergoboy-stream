@@ -102,6 +102,35 @@ class Config:
     # Default per-user limits for a fresh signup (watcher).
     DEFAULT_UPLOAD_QUOTA = int(os.environ.get("STREAM_DEFAULT_UPLOAD_QUOTA", "50"))
 
+    # ---------------------------------------------------------------
+    # Digimoviez movie archive. Credentials remain environment-only.
+    # The archive is intentionally movie-only; legacy series/anime parsers are
+    # retained for compatibility but are never registered as collectors.
+    # ---------------------------------------------------------------
+    ARCHIVE_MOVIES_ENABLED = os.environ.get("STREAM_ARCHIVE_MOVIES_ENABLED", "true").lower() == "true"
+    ARCHIVE_SERIES_ENABLED = False
+    ARCHIVE_ANIME_ENABLED = False
+    ARCHIVE_ANIMATION_ENABLED = False
+    ARCHIVE_BASE_URL = os.environ.get("STREAM_ARCHIVE_BASE_URL", "https://digimoviez.com").rstrip("/")
+    ARCHIVE_HTTP_PROXY = os.environ.get("STREAM_ARCHIVE_HTTP_PROXY", "http://127.0.0.1:10808").strip()
+    ARCHIVE_LOG_LEVEL = os.environ.get("STREAM_ARCHIVE_LOG_LEVEL", "INFO").upper()
+    ARCHIVE_AUTH_ENABLED = os.environ.get("STREAM_ARCHIVE_AUTH_ENABLED", "false").lower() == "true"
+    ARCHIVE_LOGIN_URL = os.environ.get("STREAM_ARCHIVE_LOGIN_URL", f"{ARCHIVE_BASE_URL}/account/login/")
+    ARCHIVE_AUTH_CHECK_URL = os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_URL", f"{ARCHIVE_BASE_URL}/account/")
+    ARCHIVE_USERNAME = os.environ.get("DIGIMOVIEZ_USERNAME", "")
+    ARCHIVE_PASSWORD = os.environ.get("DIGIMOVIEZ_PASSWORD", "")
+    # Target form names are explicitly configured rather than guessed.
+    ARCHIVE_LOGIN_USERNAME_FIELD = os.environ.get("STREAM_ARCHIVE_LOGIN_USERNAME_FIELD", "")
+    ARCHIVE_LOGIN_PASSWORD_FIELD = os.environ.get("STREAM_ARCHIVE_LOGIN_PASSWORD_FIELD", "")
+    ARCHIVE_SESSION_FILE = os.environ.get("STREAM_ARCHIVE_SESSION_FILE", os.path.join(BASE_DIR, "data", "digimoviez-session.json"))
+    ARCHIVE_AUTH_CHECK_INTERVAL = float(os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_INTERVAL", "120"))
+    ARCHIVE_REQUEST_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_REQUEST_TIMEOUT", "30"))
+    ARCHIVE_LOGIN_RETRY_COUNT = int(os.environ.get("STREAM_ARCHIVE_LOGIN_RETRY_COUNT", "3"))
+    ARCHIVE_CONNECT_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_CONNECT_TIMEOUT", "10"))
+    ARCHIVE_READ_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_READ_TIMEOUT", "30"))
+    ARCHIVE_TOTAL_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_TOTAL_TIMEOUT", "60"))
+    ARCHIVE_REQUEST_RETRY_COUNT = int(os.environ.get("STREAM_ARCHIVE_REQUEST_RETRY_COUNT", "3"))
+
     MEDIA_DIR = os.path.join(BASE_DIR, "media")
     UPLOAD_DIR = os.path.join(MEDIA_DIR, "uploads")   # raw/original uploads before encode
     SUBS_DIR = os.path.join(MEDIA_DIR, "subs")

@@ -1,0 +1,38 @@
+# Maintainer: vergoboy-stream local build
+pkgname=vergoboy-stream
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Private cinema watch-party desktop client'
+arch=('x86_64')
+url='https://vergoboy.ir'
+license=('custom')
+depends=('webkit2gtk-4.1' 'gtk3' 'librsvg' 'openssl' 'libayatana-appindicator')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file' 'patchelf')
+source=("${pkgname}::git+file://${startdir}/../..")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/${pkgname}/webapp"
+  npm ci
+  npx tsc --noEmit
+  # Next 16 cannot read its TypeScript child's stdout in makepkg's isolated
+  # Git worktree. Use this checkout's freshly built, independently typechecked
+  # static export, while Tauri/Rust is still built from the source worktree.
+  cp -a "${startdir}/../../webapp/out" ./out
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+    npm run tauri -- build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
+}
+
+package() {
+  cd "${srcdir}/${pkgname}"
+  install -Dm755 "webapp/src-tauri/target/release/vergoboy-stream" \
+    "${pkgdir}/usr/bin/vergoboy-stream"
+  install -Dm644 "packaging/arch/vergoboy-stream.desktop" \
+    "${pkgdir}/usr/share/applications/vergoboy-stream.desktop"
+  install -Dm644 "webapp/src-tauri/icons/32x32.png" \
+    "${pkgdir}/usr/share/icons/hicolor/32x32/apps/vergoboy-stream.png"
+  install -Dm644 "webapp/src-tauri/icons/128x128.png" \
+    "${pkgdir}/usr/share/icons/hicolor/128x128/apps/vergoboy-stream.png"
+  install -Dm644 "webapp/src-tauri/icons/128x128@2x.png" \
+    "${pkgdir}/usr/share/icons/hicolor/256x256/apps/vergoboy-stream.png"
+}

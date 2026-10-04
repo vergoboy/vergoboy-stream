@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence } from "./anim";
 
 export function NameGate({
   initialName,
@@ -28,7 +28,7 @@ export function NameGate({
         >
           <div
             className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl text-xl font-black text-white"
-            style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" }}
+            style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))" }}
           >
             V
           </div>
@@ -48,7 +48,7 @@ export function NameGate({
           <button
             onClick={() => value.trim() && onJoin(value)}
             className="w-full rounded-2xl px-6 py-3 text-[14.5px] font-bold text-white transition-transform active:scale-[0.98]"
-            style={{ background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))", boxShadow: "var(--shadow-lamp)" }}
+            style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}
           >
             ورود به اتاق
           </button>

@@ -1,9 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { Play, Trash2, Clock, CheckCircle2, AlertTriangle, Loader2, Radio, Video, Link, FileVideo } from "lucide-react";
 
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "./anim";
 import { api } from "@/lib/api";
 import { prettyTitle } from "@/lib/format";
 import type { PlaylistItem, TranscodeProgress } from "@/lib/types";
@@ -27,20 +28,28 @@ export function Playlist({
   myName: string;
   onSelect: (index: number) => void;
 }) {
+  const [confirmId, setConfirmId] = useState<string | null>(null);
   if (!playlist.length) {
-    return <p className="py-5 text-center text-[13.5px] text-[color:var(--color-ink-dim)]">پلی‌لیست خالی‌ست. از تب «افزودن ویدیو» یکی اضافه کن.</p>;
+    return (
+      <div className="py-10 text-center">
+        <div className="mb-2 text-[44px]" aria-hidden>🍿</div>
+        <p className="display text-[22px] text-white">صف خالیه</p>
+        <p className="mt-1 text-[13px] text-white/55">از «افزودن» یه فیلم بیار.</p>
+      </div>
+    );
   }
 
   return (
     <>
-      <ul className="flex max-h-[460px] flex-col gap-2 overflow-y-auto">
+      <ul className="flex flex-col gap-2">
         <AnimatePresence initial={false}>
           {playlist.map((item, idx) => {
             const def = defaultRendition(item);
             const prog = def ? transcodeProgress[`${item.id}:${def.label}`] : undefined;
             const pct = prog?.pct ?? 0;
             const processing = item.status === "queued" || item.status === "encoding";
-            const icon = processing ? <Loader2 className="w-4 h-4 animate-spin text-amber-400" /> : item.status === "error" ? <AlertTriangle className="w-4 h-4 text-rose-400" /> : item.status === "ready" ? <Play className="w-3.5 h-3.5 fill-current text-emerald-400" /> : (ICONS[item.type] ?? <FileVideo className="w-3.5 h-3.5 text-amber-400" />);
+            const isNow = idx === currentIndex;
+            const icon = isNow ? <span className="flex h-4 items-end gap-[2px]"><i className="eq-bar" /><i className="eq-bar" /><i className="eq-bar" /></span> : processing ? <Loader2 className="w-4 h-4 animate-spin text-amber-400" /> : item.status === "error" ? <AlertTriangle className="w-4 h-4 text-rose-400" /> : item.status === "ready" ? <Play className="w-3.5 h-3.5 fill-current text-emerald-400" /> : (ICONS[item.type] ?? <FileVideo className="w-3.5 h-3.5 text-amber-400" />);
 
             return (
               <motion.li
@@ -89,11 +98,20 @@ export function Playlist({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (confirm("این آیتم از پلی‌لیست حذف شود؟")) api.removeItem(item.id, myName);
+                    if (confirmId === item.id) {
+                      void api.removeItem(item.id, myName);
+                      setConfirmId(null);
+                    } else {
+                      setConfirmId(item.id);
+                      window.setTimeout(() => setConfirmId((c) => (c === item.id ? null : c)), 3000);
+                    }
                   }}
-                  className="shrink-0 rounded-lg px-1.5 py-1 text-[color:var(--color-ink-dim)] hover:bg-[color:var(--color-coral)]/10 hover:text-[color:var(--color-coral)]"
+                  aria-label="حذف از صف"
+                  className={`hit shrink-0 rounded-xl px-2 py-1.5 text-[12px] font-bold transition-colors ${
+                    confirmId === item.id ? "bg-[color:var(--color-coral)] text-white" : "text-white/40 hover:bg-white/10 hover:text-[color:var(--color-coral)]"
+                  }`}
                 >
-                  <Trash2 className="w-4 h-4" />
+                  {confirmId === item.id ? "حذف؟" : <Trash2 className="h-4 w-4" />}
                 </button>
               </motion.li>
             );
@@ -125,7 +143,7 @@ function CleanupButton() {
           btn.disabled = false;
         }, 3000);
       }}
-      className="rounded-xl border border-[color:var(--color-border)] bg-white/5 px-3.5 py-2 text-xs text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50 disabled:opacity-60"
+      className="flex items-center gap-2 rounded-xl bg-white/6 px-3.5 py-2 text-xs text-white/70 hover:bg-white/12 disabled:opacity-60"
       title="حذف فایل‌هایی که در پلی‌لیست نیستند از سرور"
     >
       <Trash2 className="w-4 h-4" /> پاکسازی فایل‌های یتیم

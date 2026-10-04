@@ -4,6 +4,27 @@ import type { AdminUser, AuthRoom, AuthUser } from "./types";
 
 const FETCH_TIMEOUT_MS = 45000;
 
+export class ArchiveApiError extends Error {
+  kind?: string;
+  manualSessionHelpful?: boolean;
+  detail?: string;
+  constructor(message: string, kind?: string, manualSessionHelpful?: boolean, detail?: string) {
+    super(message);
+    this.name = "ArchiveApiError";
+    this.kind = kind;
+    this.manualSessionHelpful = manualSessionHelpful;
+    this.detail = detail;
+  }
+}
+
+export type ArchiveAuthStatus = {
+  enabled: boolean;
+  state: string;
+  kind: string;
+  message: string;
+  proxy_configured?: boolean;
+};
+
 async function postJson<T>(path: string, body: unknown, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -14,10 +35,11 @@ async function postJson<T>(path: string, body: unknown, timeoutMs: number = FETC
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-    if (!res.ok) throw new Error(data.error || `${path} failed (${res.status})`);
+    const data = (await res.json().catch(() => ({}))) as T & { error?: string; kind?: string; manual_session_helpful?: boolean; detail?: string };
+    if (!res.ok) throw new ArchiveApiError(data.error || `${path} failed (${res.status})`, data.kind, data.manual_session_helpful, data.detail);
     return data;
   } catch (e) {
+    if (e instanceof ArchiveApiError) throw e;
     throw friendlyError(e);
   } finally {
     clearTimeout(timer);
@@ -196,8 +218,23 @@ export const api = {
       { name, avatar_url: avatarUrl }
     ),
 
-  archiveSearch: (q: string, sources: string[]) =>
-    postJson<{ results: import("./types").ArchiveResult[] }>("/stream/api/archive/search", { q, sources }),
+  archiveAuthStatus: () =>
+    authFetch("/stream/api/archive/auth/status").then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new ArchiveApiError(data.error || `archive/auth/status failed (${r.status})`, data.kind, data.manual_session_helpful, data.detail);
+      return data as ArchiveAuthStatus;
+    }),
+  archiveAuthCheck: () =>
+    postJson<ArchiveAuthStatus>("/stream/api/archive/auth/check", {}),
+  archiveSearch: (filters: import("./types").ArchiveSearchFilters) =>
+    postJson<{ results: import("./types").ArchiveResult[] }>("/stream/api/archive/search", { filters }),
+
+  archiveFilters: () =>
+    authFetch("/stream/api/archive/filters").then(async (r) => {
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "خطا در دریافت فیلترها");
+      return data as import("./types").ArchiveFilterOptions;
+    }),
 
   archiveTitle: (source: string, url: string) =>
     postJson<import("./types").ArchiveTitle>("/stream/api/archive/title", { source, url }),

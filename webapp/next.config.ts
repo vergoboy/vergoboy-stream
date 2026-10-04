@@ -11,6 +11,12 @@ const isTauriBuild = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri";
 
 const nextConfig: NextConfig = {
   output: "export",
+  // makepkg's isolated Git worktree can prevent Next 16 from consuming the
+  // stdout of its own TypeScript child process. PKGBUILD runs `tsc --noEmit`
+  // explicitly first, then opts out of this duplicate Next check only there.
+  typescript: {
+    ignoreBuildErrors: process.env.NEXT_SKIP_TYPECHECK === "1",
+  },
   basePath: isTauriBuild ? "" : "/stream",
   trailingSlash: true,
   images: {

@@ -3,31 +3,19 @@
 import {
   Play,
   Pause,
-  Volume2,
-  VolumeX,
-  RotateCw,
-  RotateCcw,
   Film,
-  MessageSquare,
-  Keyboard,
-  Maximize,
-  PictureInPicture2,
   Radio,
   Loader2,
-  Slash,
-  Settings,
-  SkipBack,
-  SkipForward,
-  Shuffle,
-  GripVertical,
-  X,
   TriangleAlert,
-  MoreHorizontal,
-  Headphones,
   Plus,
+  X,
+  GripVertical,
+  Maximize2,
+  RotateCcw,
+  Popcorn,
+  Clapperboard,
 } from "lucide-react";
 /* eslint-disable react-hooks/refs */
-
 
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 import type Hls from "hls.js";
@@ -36,9 +24,13 @@ import { api } from "@/lib/api";
 import { mediaUrl } from "@/lib/config";
 import { DEFAULT_SETTINGS, useAppSettings, type ShortcutAction } from "@/lib/settings";
 import type { NotifyEvent, PlaylistItem, Rendition, SubStyle, TranscodeProgress } from "@/lib/types";
+import { PlayerControls, type QualityOption } from "./PlayerControls";
+import { run, ripple, popIn, spring } from "@/lib/anim";
+import { useIdle, useViewport } from "@/lib/useIdle";
+import { canNativeFloat, enterNativeMini, setNativeFullscreen, isTauri, isMobileOS } from "@/lib/tauri";
+import { localPoint } from "@/lib/geometry";
 
-const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-type MenuName = "speed" | "quality" | "audio" | "subtitle" | "more" | null;
+
 
 /** hls.js doesn't expose a retry budget; we track our own so the fatal-error
  *  handler can stop recovering and surface a real message to the user. */
@@ -95,7 +87,7 @@ export function Player({
   onPrev: () => void;
   onNext: () => void;
   onToggleShuffle: () => void;
-  onGoToAdd: () => void;
+  onGoToAdd?: () => void;
   onGoToSubStyle: () => void;
   onOpenShortcuts: () => void;
   onOpenSettings?: () => void;
@@ -106,14 +98,12 @@ export function Player({
   const dubAudioRef = useRef<HTMLAudioElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const cursorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const myRequestedLabels = useRef<Set<string>>(new Set());
   const needsMenuRefresh = useRef(false);
   const lastFrontierWarn = useRef(0);
   const [activeLevelLabel, setActiveLevelLabel] = useState<string | null>(null);
   const [levels, setLevels] = useState<{ height: number; label: string }[]>([]);
   const [currentLevel, setCurrentLevel] = useState(-1);
-  const [openMenu, setOpenMenu] = useState<MenuName>(null);
   const [curTime, setCurTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [dragging, setDragging] = useState(false);
@@ -148,55 +138,131 @@ export function Player({
   // source loads and starts playing again.
   const [playbackError, setPlaybackError] = useState<{ title: string; detail: string; code?: string } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const [cursorHidden, setCursorHidden] = useState(false);
   const [currentSubIndex, setCurrentSubIndex] = useState(-1);
   const [activeCueText, setActiveCueText] = useState<string[]>([]);
   const [currentAudioTrackId, setCurrentAudioTrackId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [showDebug, setShowDebug] = useState(false);
-  const [floating, setFloating] = useState(false);
-  const [floatPos, setFloatPos] = useState({ x: 20, y: 20 });
+  // ---- floating / mini player -------------------------------------------
+  // "native": the Tauri desktop window itself shrinks into a frameless,
+  //   always-on-top mini player (real floating over other apps).
+  // "dom": a draggable mini window inside the page (phones, and browsers
+  //   without Picture-in-Picture). Browsers that have PiP use that instead.
+  const [floatMode, setFloatMode] = useState<"none" | "dom" | "native">("none");
+  const floating = floatMode === "dom";
+  const nativeMini = floatMode === "native";
+  const [floatPos, setFloatPos] = useState({ x: 16, y: 16 });
+  const restoreNativeRef = useRef<null | (() => Promise<void>)>(null);
+  const [inPip, setInPip] = useState(false);
+  const vp = useViewport();
+  const touch = vp.touch;
+  const [forceLandscape, setForceLandscape] = useState(false);
+  const rotated = fullscreen && forceLandscape && vp.portrait;
+  const domFsRef = useRef(false);
+  const floatDrag = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const floatBoxRef = useRef<HTMLDivElement>(null);
 
-  const togglePip = useCallback(() => {
+  const exitNative = useCallback(async () => {
+    const restore = restoreNativeRef.current;
+    restoreNativeRef.current = null;
+    setFloatMode("none");
+    try {
+      await restore?.();
+    } catch {
+      /* window state is best-effort */
+    }
+  }, []);
+
+  const togglePip = useCallback(async () => {
     const v = videoRef.current;
     if (!v) return;
+    if (floatMode === "native") return void exitNative();
+    if (floatMode === "dom") return setFloatMode("none");
     if (document.pictureInPictureElement) {
       document.exitPictureInPicture().catch(() => {});
       return;
     }
-    if (typeof v.requestPictureInPicture === "function" && document.pictureInPictureEnabled) {
-      v.requestPictureInPicture().catch(() => {});
+    if (canNativeFloat()) {
+      try {
+        if (fullscreen) {
+          setFullscreen(false);
+          setForceLandscape(false);
+        }
+        restoreNativeRef.current = await enterNativeMini();
+        setFloatMode("native");
+      } catch (err) {
+        console.warn("[player] native mini window unavailable, using in-page float", err);
+        setFloatMode("dom");
+      }
       return;
     }
-    // Firefox / browsers without the PiP API: fall back to a custom floating
-    // mini-player (same <video> element, just re-positioned fixed on screen).
-    setFloating((f) => !f);
+    if (!isTauri() && typeof v.requestPictureInPicture === "function" && document.pictureInPictureEnabled) {
+      v.requestPictureInPicture().catch(() => setFloatMode("dom"));
+      return;
+    }
+    setFloatMode("dom");
+  }, [floatMode, exitNative, fullscreen]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const on = () => setInPip(true);
+    const off = () => setInPip(false);
+    v.addEventListener("enterpictureinpicture", on);
+    v.addEventListener("leavepictureinpicture", off);
+    return () => {
+      v.removeEventListener("enterpictureinpicture", on);
+      v.removeEventListener("leavepictureinpicture", off);
+    };
   }, []);
 
-  // Drag the floating window by listening on `window` (not pointer capture)
-  // — capture retargets pointer events and can corrupt their coordinates.
-  const onFloatDragStart = useCallback(
+  // Never leave the OS window shrunk if this component goes away.
+  useEffect(() => {
+    return () => {
+      const restore = restoreNativeRef.current;
+      restoreNativeRef.current = null;
+      void restore?.();
+    };
+  }, []);
+
+  // Dragging the in-page float: pointer capture on the handle, then a springy
+  // snap to the nearest side so it never ends up half off-screen.
+  const onFloatDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!floating || e.button !== 0) return;
-      e.preventDefault();
-      const start = { x: e.clientX, y: e.clientY, right: floatPos.x, bottom: floatPos.y };
-      const onMove = (ev: PointerEvent) => {
-        setFloatPos({
-          x: Math.max(8, start.right - (ev.clientX - start.x)),
-          y: Math.max(8, start.bottom - (ev.clientY - start.y)),
-        });
-      };
-      const onUp = () => {
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        window.removeEventListener("pointercancel", onUp);
-      };
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
-      window.addEventListener("pointercancel", onUp);
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      floatDrag.current = { sx: e.clientX, sy: e.clientY, ox: floatPos.x, oy: floatPos.y };
     },
-    [floating, floatPos]
+    [floatPos]
   );
+  const onFloatMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = floatDrag.current;
+    const box = floatBoxRef.current;
+    if (!d || !box) return;
+    const x = Math.min(window.innerWidth - box.offsetWidth - 4, Math.max(4, d.ox - (e.clientX - d.sx)));
+    const y = Math.min(window.innerHeight - box.offsetHeight - 4, Math.max(4, d.oy - (e.clientY - d.sy)));
+    setFloatPos({ x, y });
+  }, []);
+  const floatPosRef = useRef(floatPos);
+  floatPosRef.current = floatPos;
+  const onFloatUp = useCallback(() => {
+    const box = floatBoxRef.current;
+    if (!floatDrag.current || !box) return;
+    floatDrag.current = null;
+    const p = floatPosRef.current;
+    const w = box.offsetWidth;
+    const margin = 12;
+    const centerX = window.innerWidth - p.x - w / 2;
+    const snapX = centerX < window.innerWidth / 2 ? window.innerWidth - w - margin : margin;
+    const target = { x: snapX, y: Math.max(margin, p.y) };
+    run(box, {
+      right: [p.x, target.x],
+      bottom: [p.y, target.y],
+      duration: 520,
+      ease: spring({ stiffness: 260, damping: 24 }),
+      onComplete: () => setFloatPos(target),
+    });
+  }, []);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -380,8 +446,8 @@ export function Player({
                     hls.startLoad();
                   } else {
                     setPlaybackError({
-                      title: "Couldn't load this video",
-                      detail: "The streaming server didn't return the video data.",
+                      title: "این ویدیو لود نشد",
+                      detail: "سرور پخش، داده‌ی ویدیو رو نفرستاد.",
                       code: data.details || data.type,
                     });
                   }
@@ -393,8 +459,8 @@ export function Player({
                     hls.recoverMediaError();
                   } else {
                     setPlaybackError({
-                      title: "This video can't be decoded",
-                      detail: "Your browser couldn't decode the video stream.",
+                      title: "این ویدیو قابل پخش نیست",
+                      detail: "مرورگرت نتونست جریان ویدیو رو رمزگشایی کنه.",
                       code: data.details || data.type,
                     });
                   }
@@ -404,8 +470,8 @@ export function Player({
                   // rectangle and an endless spinner with no cause. Surface it.
                   console.error("[hls.js] Unrecoverable error:", data);
                   setPlaybackError({
-                    title: "Couldn't play this video",
-                    detail: data.details ? String(data.details).replace(/_/g, " ").toLowerCase() : "The stream is broken.",
+                    title: "این ویدیو پخش نشد",
+                    detail: data.details ? String(data.details).replace(/_/g, " ").toLowerCase() : "جریان پخش خراب است.",
                     code: data.details,
                   });
                   hls.destroy();
@@ -632,14 +698,14 @@ export function Player({
       const err = v.error;
       if (!err) return;
       const names: Record<number, string> = {
-        1: "Loading this video was aborted.",
-        2: "A network error interrupted the video.",
-        3: "This video could not be decoded by your browser.",
-        4: "This video format isn't supported by your browser.",
+        1: "بارگذاری ویدیو متوقف شد.",
+        2: "قطعی شبکه پخش رو قطع کرد.",
+        3: "مرورگرت نتونست این ویدیو رو رمزگشایی کنه.",
+        4: "مرورگرت این فرمت ویدیو رو پشتیبانی نمی‌کنه.",
       };
       setPlaybackError({
-        title: "Couldn't play this video",
-        detail: names[err.code] || "The video stopped with an unknown error.",
+        title: "این ویدیو پخش نشد",
+        detail: names[err.code] || "ویدیو با یه خطای ناشناخته متوقف شد.",
         code: `MediaError ${err.code}`,
       });
       setBuffering(false);
@@ -732,9 +798,9 @@ export function Player({
     const v = videoRef.current;
     if (!v) return;
     for (let i = 0; i < v.textTracks.length; i++) {
-      v.textTracks[i].mode = i === currentSubIndex ? "hidden" : "disabled";
+      v.textTracks[i].mode = i === currentSubIndex ? (inPip ? "showing" : "hidden") : "disabled";
     }
-  }, [currentSubIndex, item?.subtitles]);
+  }, [currentSubIndex, item?.subtitles, inPip]);
 
   // ---- dub audio track sync ----
   useEffect(() => {
@@ -770,65 +836,119 @@ export function Player({
     };
   }, [currentAudioTrackId, volume]);
 
-  // ---- fullscreen: we use a React Portal rather than the Fullscreen API
-  // so the fullscreen UI is a child of document.body — escaping *all*
-  // ancestor transform/stacking contexts (including any framer-motion
-  // motion.div wrappers higher up the tree). This is the only way to
-  // guarantee correct fixed-position coverage on *all* browsers,
-  // including Firefox's stricter video compositing behaviour.
-  // We still call requestFullscreen() on the portal root itself so the OS
-  // hides the browser chrome on desktop. On mobile, the portal covers the
-  // whole screen via dvh/dvw without needing the Fullscreen API at all.
-  const toggleFullscreen = useCallback(() => {
-    type ScreenOrientExt = ScreenOrientation & { lock?: (o: "landscape") => Promise<void>; unlock?: () => void };
-    const orient = window.screen?.orientation as ScreenOrientExt | undefined;
+
+  // ---- fullscreen ---------------------------------------------------------
+  // The player is always the same DOM node; fullscreen just re-styles it to
+  // cover the viewport (fixed, no transformed ancestors anywhere above it) and
+  // *also* asks the platform for real fullscreen when it can:
+  //   • browsers / Android webview → Fullscreen API, then lock to landscape
+  //   • Tauri desktop              → OS window fullscreen
+  //   • iOS & anything that refuses → CSS-only; on a phone held upright we turn
+  //     the player 90° ("forced landscape") so it still fills the screen.
+  const toggleFullscreen = useCallback(async () => {
+    type Lockable = ScreenOrientation & { lock?: (o: string) => Promise<void> };
+    const orient = window.screen?.orientation as Lockable | undefined;
+    const el = wrapRef.current as (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> }) | null;
+
     if (fullscreen) {
       setFullscreen(false);
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      setForceLandscape(false);
+      domFsRef.current = false;
       try {
-        if (orient?.unlock) orient.unlock();
+        if (document.fullscreenElement) await document.exitFullscreen();
       } catch {}
-    } else {
-      setFullscreen(true);
-      setTimeout(() => {
-        wrapRef.current?.requestFullscreen().catch(() => {});
-        try {
-          if (orient?.lock) orient.lock("landscape").catch(() => {});
-        } catch {}
-      }, 30);
+      try {
+        orient?.unlock?.();
+      } catch {}
+      void setNativeFullscreen(false).catch(() => {});
+      return;
     }
-  }, [fullscreen]);
+
+    if (floatMode === "native") await exitNative();
+    setFloatMode((m) => (m === "dom" ? "none" : m));
+    setFullscreen(true);
+    // let React commit the fixed layout first so the browser fullscreens the final box
+    requestAnimationFrame(async () => {
+      try {
+        if (isTauri() && !isMobileOS()) {
+          await setNativeFullscreen(true);
+        } else if (el?.requestFullscreen) {
+          await el.requestFullscreen({ navigationUI: "hide" });
+          domFsRef.current = true;
+        } else if (el?.webkitRequestFullscreen) {
+          await el.webkitRequestFullscreen();
+          domFsRef.current = true;
+        }
+      } catch {
+        /* CSS fullscreen still works */
+      }
+      if (touch) {
+        // lock() can reject, resolve without turning anything, or (on some
+        // webviews) never settle at all — so race it against a timer, then
+        // trust what the viewport actually looks like.
+        try {
+          if (orient?.lock) await Promise.race([orient.lock("landscape"), new Promise((r) => setTimeout(r, 500))]);
+        } catch {}
+        await new Promise((r) => setTimeout(r, 150));
+        if (window.innerHeight > window.innerWidth) setForceLandscape(true);
+      }
+    });
+  }, [fullscreen, floatMode, exitNative, touch]);
+
+  const rotateScreen = useCallback(async () => {
+    type Lockable = ScreenOrientation & { lock?: (o: string) => Promise<void> };
+    const orient = window.screen?.orientation as Lockable | undefined;
+    if (orient?.lock && document.fullscreenElement) {
+      try {
+        await orient.lock(orient.type.startsWith("landscape") ? "portrait" : "landscape");
+        setForceLandscape(false);
+        return;
+      } catch {}
+    }
+    setForceLandscape((f) => !f);
+  }, []);
 
   useEffect(() => {
     function onFsChange() {
-      // Sync our state if the user pressed Escape to exit native fullscreen.
-      if (!document.fullscreenElement && fullscreen) {
+      // Escape (or the system back gesture) left browser fullscreen: follow it.
+      if (!document.fullscreenElement && domFsRef.current) {
+        domFsRef.current = false;
         setFullscreen(false);
+        setForceLandscape(false);
+        try {
+          (window.screen?.orientation as ScreenOrientation & { unlock?: () => void })?.unlock?.();
+        } catch {}
       }
     }
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [fullscreen]);
+  }, []);
 
-  // ---- keyboard shortcuts ----
-  // resetCursorTimer must be declared before this effect.
-  const resetCursorTimer = useCallback(() => {
-    if (!fullscreen) return;
-    setCursorHidden(false);
-    if (cursorTimerRef.current) clearTimeout(cursorTimerRef.current);
-    cursorTimerRef.current = setTimeout(() => setCursorHidden(true), 3000);
-  }, [fullscreen]);
-
-  // Auto-hide: hide immediately on fullscreen entry, show on interaction
+  // keep the screen awake while a video is actually playing
   useEffect(() => {
-    if (fullscreen) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- reacting to an external fullscreen change is intentional (sync with the browser UI)
-      setCursorHidden(true);
-    } else {
-      setCursorHidden(false);
-      if (cursorTimerRef.current) clearTimeout(cursorTimerRef.current);
-    }
-  }, [fullscreen]);
+    if (!playing || !item) return;
+    type WL = { request: (t: "screen") => Promise<{ release: () => Promise<void> }> };
+    const wl = (navigator as Navigator & { wakeLock?: WL }).wakeLock;
+    if (!wl) return;
+    let lock: { release: () => Promise<void> } | null = null;
+    let cancelled = false;
+    const acquire = () =>
+      wl
+        .request("screen")
+        .then((l) => {
+          if (cancelled) void l.release();
+          else lock = l;
+        })
+        .catch(() => {});
+    void acquire();
+    const onVis = () => document.visibilityState === "visible" && !lock && void acquire();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      void lock?.release();
+    };
+  }, [playing, item]);
 
   useEffect(() => {
     // Map each configured key to its action (rebindable in Settings).
@@ -892,6 +1012,15 @@ export function Player({
 
       // Legacy aliases kept for muscle memory (not rebindable).
       switch (e.key) {
+        case "Escape":
+          if (fullscreen) {
+            e.preventDefault();
+            void toggleFullscreen();
+          } else if (floatMode === "native") {
+            e.preventDefault();
+            void exitNative();
+          }
+          break;
         case "k":
           e.preventDefault();
           if (item && item.type !== "live") togglePlay();
@@ -939,11 +1068,10 @@ export function Player({
           }
           break;
       }
-      if (fullscreen) resetCursorTimer();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [item, togglePlay, seek, onOpenShortcuts, onOpenSettings, canPrev, canNext, onPrev, onNext, fullscreen, resetCursorTimer, toggleFullscreen, togglePip, sc, changeVolume, changeMuted]);
+  }, [item, togglePlay, seek, onOpenShortcuts, onOpenSettings, canPrev, canNext, onPrev, onNext, fullscreen, floatMode, exitNative, toggleFullscreen, togglePip, sc, changeVolume, changeMuted]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -953,480 +1081,592 @@ export function Player({
     }
   }, [volume, muted]);
 
+  // commands from the right-click menu (fullscreen / floating live in this component)
+  const cmdRef = useRef({ toggleFullscreen, togglePip });
+  cmdRef.current = { toggleFullscreen, togglePip };
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<string>).detail;
+      if (d === "fullscreen") void cmdRef.current.toggleFullscreen();
+      if (d === "pip") void cmdRef.current.togglePip();
+    };
+    window.addEventListener("player:cmd", on);
+    return () => window.removeEventListener("player:cmd", on);
+  }, []);
+
   const processing = !item || item.status === "queued" || item.status === "encoding" || item.status === "error";
-  // A third dead-end state the old code had: the item is marked `complete` but
-  // has no playable src. `processing` was false and `isPlayable` was false, so
-  // the player rendered a bare black rectangle with nothing on it at all.
+  // The item can be marked `complete` yet have no playable src: without an
+  // explicit state the player used to render a bare black rectangle.
   const noPlayableSource = Boolean(item) && !processing && !isPlayable;
   const def = defaultRendition(item);
   const defProgress = def ? transcodeProgress[`${item?.id}:${def.label}`] : undefined;
   const totalDuration = defProgress?.duration ?? duration;
   const encodedSeconds = defProgress?.encoded_seconds ?? 0;
+  const isLive = item?.type === "live";
+  const blocked = processing || !!playbackError || noPlayableSource;
+
+  // ---- "lights down": controls fade away while a film plays and nobody touches anything
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [touchHide, setTouchHide] = useState(false);
+  const idle = useIdle(3000, playing && !blocked && !menuOpen && !dragging);
+  const chromeShown = !(idle || touchHide) || !playing || blocked || menuOpen;
+  const chromeShownRef = useRef(chromeShown);
+  chromeShownRef.current = chromeShown;
+  const placement: "overlay" | "below" = vp.phone && vp.portrait && !fullscreen && floatMode === "none" ? "below" : "overlay";
+  const mini = floating || nativeMini;
+
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const topBarRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const show = chromeShown;
+    if (controlsRef.current) {
+      run(controlsRef.current, { opacity: show ? 1 : 0, translateY: show ? 0 : 14, duration: show ? 320 : 420, ease: "outQuart" });
+      controlsRef.current.style.pointerEvents = show ? "auto" : "none";
+    }
+    if (topBarRef.current) {
+      run(topBarRef.current, { opacity: show ? 1 : 0, translateY: show ? 0 : -10, duration: show ? 320 : 420, ease: "outQuart" });
+      topBarRef.current.style.pointerEvents = show ? "auto" : "none";
+    }
+  }, [chromeShown, placement, fullscreen, mini]);
+
+  // pop the floating window in when it opens
+  useEffect(() => {
+    if (floating) popIn(floatBoxRef.current, { from: "100% 100%", y: 20 });
+  }, [floating]);
+
+  // ---- ambient light: the screen's own colours spill onto the room ----
+  const glowRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (fullscreen || mini) return;
+    const v = videoRef.current;
+    const c = glowRef.current;
+    if (!v || !c) return;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
+    const W = 48;
+    const H = 27;
+    c.width = W;
+    c.height = H;
+    let raf = 0;
+    let last = 0;
+    let lastColor = 0;
+    let tainted = false;
+    const tick = (t: number) => {
+      raf = requestAnimationFrame(tick);
+      if (t - last < 130) return;
+      last = t;
+      if (v.readyState < 2 || v.paused) return;
+      try {
+        ctx.drawImage(v, 0, 0, W, H);
+      } catch {
+        return;
+      }
+      if (tainted || t - lastColor < 1200) return;
+      lastColor = t;
+      try {
+        const d = ctx.getImageData(0, 0, W, H).data;
+        let r = 0, g = 0, b = 0;
+        const n = d.length / 4;
+        for (let i = 0; i < d.length; i += 4) {
+          r += d[i];
+          g += d[i + 1];
+          b += d[i + 2];
+        }
+        r /= n; g /= n; b /= n;
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (lum > 24) {
+          const boost = 1.25;
+          document.documentElement.style.setProperty(
+            "--screen-glow",
+            `rgb(${Math.min(255, r * boost) | 0}, ${Math.min(255, g * boost) | 0}, ${Math.min(255, b * boost) | 0})`
+          );
+        }
+      } catch {
+        tainted = true; // cross-origin media without CORS: the blurred canvas still works, colour sampling doesn't
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      document.documentElement.style.removeProperty("--screen-glow");
+    };
+  }, [fullscreen, mini, item?.id]);
+
+  // ---- touch gestures: tap = lights, double-tap sides = ±10s, double-tap middle = play/pause ----
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const lastPointerType = useRef<string>("mouse");
+  const wasShownAtDown = useRef(true);
+  const lastTap = useRef<{ t: number; side: number } | null>(null);
+  const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [skipFlash, setSkipFlash] = useState<{ key: number; side: -1 | 1 } | null>(null);
+
+  const skip = useCallback(
+    (delta: number) => {
+      const v = videoRef.current;
+      if (!v || !item || item.type === "live") return;
+      seek(Math.min(v.duration || 1e9, Math.max(0, v.currentTime + delta)));
+    },
+    [seek, item]
+  );
+
+  const onSurfaceDown = (e: React.PointerEvent) => {
+    lastPointerType.current = e.pointerType;
+    wasShownAtDown.current = chromeShownRef.current;
+    setTouchHide(false);
+  };
+  const onSurfaceUp = (e: React.PointerEvent) => {
+    if (e.pointerType === "mouse" || blocked || !surfaceRef.current) return;
+    const p = localPoint(e, surfaceRef.current, rotated);
+    const frac = p.w ? p.x / p.w : 0.5;
+    const side = frac < 0.33 ? -1 : frac > 0.66 ? 1 : 0;
+    const now = Date.now();
+    const lt = lastTap.current;
+    if (lt && now - lt.t < 320 && lt.side === side) {
+      lastTap.current = null;
+      if (tapTimer.current) clearTimeout(tapTimer.current);
+      if (isLive) return;
+      if (side === 0) {
+        togglePlay();
+        ripple(surfaceRef.current, p.x, p.y);
+      } else {
+        skip(side * 10);
+        setSkipFlash({ key: now, side: side as -1 | 1 });
+        ripple(surfaceRef.current, p.x, p.y);
+      }
+      return;
+    }
+    lastTap.current = { t: now, side };
+    if (tapTimer.current) clearTimeout(tapTimer.current);
+    // a single tap only toggles the lights once we know it isn't half of a double-tap
+    tapTimer.current = setTimeout(() => {
+      if (wasShownAtDown.current && playing) setTouchHide(true);
+    }, 300);
+  };
+  const onSurfaceClick = (e: React.MouseEvent) => {
+    if (lastPointerType.current !== "mouse" || blocked) return;
+    togglePlay();
+    if (surfaceRef.current && !isLive) {
+      const p = localPoint(e, surfaceRef.current, rotated);
+      ripple(surfaceRef.current, p.x, p.y, "rgba(247,195,90,.22)");
+    }
+  };
+
+  // ---- derived props for the control bar ----
+  const bufferedEnd = (() => {
+    const v = videoRef.current;
+    if (!v) return 0;
+    const b = v.buffered;
+    for (let i = 0; i < b.length; i++) if (curTime >= b.start(i) - 0.5 && curTime <= b.end(i) + 0.5) return b.end(i);
+    return 0;
+  })();
+  const lastScrubSeek = useRef(0);
+  const qualityOptions: QualityOption[] = (
+    item?.renditions?.length
+      ? [...item.renditions].sort((a, b) => b.height - a.height)
+      : levels.map((l) => ({ ...l, status: "ready" as Rendition["status"] }))
+  ).map((r) => {
+    const idx = levels.findIndex((l) => l.label === r.label);
+    if (!r.status || r.status === "ready" || r.status === "complete") {
+      return {
+        key: r.label,
+        label: r.label,
+        state: "ready",
+        active: idx !== -1 && currentLevel === idx,
+        onPick: () => {
+          if (idx !== -1 && hlsRef.current) hlsRef.current.currentLevel = idx;
+        },
+      } satisfies QualityOption;
+    }
+    return {
+      key: r.label,
+      label: r.label,
+      state: r.status === "pending" ? "pending" : r.status === "error" ? "error" : "busy",
+      active: false,
+      onPick: () => {
+        if (r.status === "pending" || r.status === "error") setPendingQualityLabel(r.label);
+      },
+    } satisfies QualityOption;
+  });
+
+  const title = item ? prettyTitle(item.title) : "";
+  const controls = (
+    <PlayerControls
+      rotated={rotated}
+      live={isLive}
+      placement={placement}
+      touch={touch}
+      title={title}
+      playing={playing}
+      onTogglePlay={togglePlay}
+      curTime={curTime}
+      duration={isFinite(totalDuration) && totalDuration > 0 ? totalDuration : duration}
+      bufferedEnd={bufferedEnd}
+      encodedSeconds={encodedSeconds}
+      onScrubStart={() => setDragging(true)}
+      onScrub={(t) => {
+        dragValueRef.current = t;
+        setCurTime(t);
+        const now = performance.now();
+        if (now - lastScrubSeek.current > 140) {
+          lastScrubSeek.current = now;
+          try {
+            if (videoRef.current) videoRef.current.currentTime = t;
+          } catch {}
+        }
+      }}
+      onScrubEnd={(t) => {
+        setDragging(false);
+        seek(t);
+      }}
+      onSkip={skip}
+      canPrev={canPrev}
+      canNext={canNext}
+      onPrev={onPrev}
+      onNext={onNext}
+      shuffle={shuffle}
+      canShuffle={canShuffle}
+      onToggleShuffle={onToggleShuffle}
+      volume={volume}
+      muted={muted}
+      onVolume={(v) => {
+        changeVolume(v);
+        if (v > 0) changeMuted(false);
+      }}
+      onToggleMute={() => changeMuted((m) => !m)}
+      subtitles={(item?.subtitles ?? []).map((s) => ({ id: s.id, label: s.label }))}
+      subIndex={currentSubIndex}
+      onSub={setCurrentSubIndex}
+      onOpenSubStyle={onGoToSubStyle}
+      audioTracks={(item?.audio_tracks ?? []).map((t) => ({ id: t.id, label: t.label }))}
+      audioId={currentAudioTrackId}
+      onAudio={(id) => {
+        setCurrentAudioTrackId(id);
+        const t = item?.audio_tracks?.find((x) => x.id === id);
+        if (t && dubAudioRef.current) dubAudioRef.current.src = t.url;
+      }}
+      rate={rate}
+      canSpeed={canSpeed}
+      onRate={(r) => requestControl("rate", { rate: r })}
+      autoQuality={currentLevel === -1}
+      onAutoQuality={() => {
+        if (hlsRef.current) hlsRef.current.currentLevel = -1;
+        setCurrentLevel(-1);
+      }}
+      qualities={qualityOptions}
+      onOpenSettings={onOpenSettings}
+      floatSupported={Boolean(item)}
+      floating={mini || inPip}
+      onToggleFloat={togglePip}
+      fullscreen={fullscreen}
+      onToggleFullscreen={toggleFullscreen}
+      onRotate={rotateScreen}
+      onMenuOpenChange={(open) => {
+        setMenuOpen(open);
+        if (open) refreshMenuIfStale();
+      }}
+    />
+  );
+
+  const wrapStyle: React.CSSProperties = fullscreen
+    ? { position: "fixed", inset: 0, zIndex: 9999 }
+    : nativeMini
+      ? { position: "fixed", inset: 0, zIndex: 9999 }
+      : floating
+        ? { position: "fixed", right: floatPos.x, bottom: `calc(${floatPos.y}px + env(safe-area-inset-bottom, 0px))`, width: "min(340px, 78vw)", zIndex: 9997 }
+        : {};
+  const subScale = fullscreen ? 1.3 : mini ? 0.55 : 1;
+  const subLift = chromeShown && placement === "overlay" && !mini ? (fullscreen ? 96 : 72) : 0;
+  const showCenterPlay = !blocked && !buffering && (!playing || bigPlay) && !isLive && !mini;
+  const pctDone = totalDuration > 0 ? Math.min(100, (curTime / totalDuration) * 100) : 0;
 
   const [debugInfo, setDebugInfo] = useState<Record<string, string> | null>(null);
+  void debugInfo;
+  void setDebugInfo;
 
   return (
     <>
-      <div
-        ref={wrapRef}
-        data-context-kind="player"
-        tabIndex={-1}
-        onMouseMove={fullscreen ? resetCursorTimer : undefined}
-        onMouseDown={fullscreen ? resetCursorTimer : undefined}
-        onTouchStart={fullscreen ? () => { resetCursorTimer(); } : undefined}
-        className={
-          fullscreen
-            ? `fixed inset-0 z-[9999] bg-black overflow-hidden select-none ${cursorHidden ? "cursor-none" : ""}`
-            : floating
-              ? "fixed z-[9997] rounded-3xl border border-[color:var(--color-border)] bg-black/60 backdrop-blur-md flex flex-col overflow-hidden shadow-2xl"
-              : "relative w-full rounded-3xl border border-[color:var(--color-border)] bg-black/40 backdrop-blur-md flex flex-col overflow-hidden"
-        }
-        style={fullscreen ? { width: "100vw", height: "100vh" } : floating ? { width: 380, maxWidth: "86vw", right: floatPos.x, bottom: floatPos.y } : undefined}
-      >
-        {floating && (
-          <div className="absolute top-0 left-0 right-0 z-[30] flex items-center gap-1.5 rounded-t-3xl bg-black/70 px-2 py-1.5 select-none">
+      <div className="relative w-full">
+        {(fullscreen || mini) && !nativeMini && (
+          <div className="relative flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md border border-dashed border-white/15 bg-black/40 text-center text-white/70">
+            <Clapperboard className="h-8 w-8 text-[color:var(--color-amber)]" />
+            <p className="px-6 text-[13px]">{fullscreen ? "الان تمام‌صفحه داری می‌بینی" : "فیلم شناور شده و داره روی صفحه پخش می‌شه"}</p>
+            {floating && (
+              <button
+                type="button"
+                onClick={() => setFloatMode("none")}
+                className="rounded-full bg-[color:var(--color-amber)] px-4 py-2 text-[13px] font-bold text-black"
+              >
+                برگردونش روی پرده
+              </button>
+            )}
+          </div>
+        )}
+
+        <div
+          ref={(n) => {
+            wrapRef.current = n;
+            floatBoxRef.current = n;
+          }}
+          data-context-kind="player"
+          tabIndex={-1}
+          style={wrapStyle}
+          className={`isolate flex flex-col outline-none ${
+            fullscreen || nativeMini
+              ? `bg-black ${idle && playing && !menuOpen ? "cursor-none" : ""}`
+              : floating
+                ? "overflow-hidden rounded-2xl border border-white/10 bg-black shadow-[0_24px_70px_-10px_rgba(0,0,0,0.85)]"
+                : "relative"
+          } ${fullscreen || nativeMini || floating ? "overflow-hidden" : ""}`}
+        >
+          {/* Forced landscape turns this inner box; the outer node stays upright because browsers force `transform: none` on a real fullscreen element. */}
+          <div
+            className={rotated ? "absolute" : "contents"}
+            style={rotated ? { top: 0, left: 0, width: "100dvh", height: "100dvw", transform: "translateX(100dvw) rotate(90deg)", transformOrigin: "top left" } : undefined}
+          >
+          {/* ambient light behind the screen */}
+          <canvas
+            ref={glowRef}
+            aria-hidden
+            className="pointer-events-none absolute -inset-[5%] -z-10 h-[110%] w-[110%] opacity-60"
+            style={{ filter: "blur(34px) saturate(1.7)", display: fullscreen || mini ? "none" : "block" }}
+          />
+
+          {/* ===== the screen ===== */}
+          <div
+            ref={surfaceRef}
+            className={
+              fullscreen || nativeMini
+                ? "absolute inset-0 overflow-hidden bg-black"
+                : "relative aspect-video w-full overflow-hidden bg-black " + (floating ? "" : "rounded-[5px]")
+            }
+            style={
+              fullscreen || mini
+                ? undefined
+                : { boxShadow: "0 0 0 1px rgba(255,255,255,.07), 0 40px 140px -30px color-mix(in oklab, var(--screen-glow, #f7c35a) 60%, transparent)" }
+            }
+          >
+            <video ref={videoRef} playsInline preload="metadata" className="absolute inset-0 h-full w-full object-contain">
+              {item?.subtitles?.map((s) => (
+                <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={mediaUrl(s.url)} default={false} />
+              ))}
+            </video>
+            <audio ref={dubAudioRef} preload="auto" />
+
+            {/* gesture layer */}
             <div
-              className="flex h-6 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg hover:bg-white/10 active:cursor-grabbing"
-              title="جابه‌جایی پنجره"
-              onPointerDown={onFloatDragStart}
-            >
-              <GripVertical className="h-3.5 w-3.5 text-white/50" />
-            </div>
-            <span className="min-w-0 flex-1 truncate text-[11px] text-white/80">{item?.title || "پخش زنده"}</span>
-            {item?.type !== "live" && (
-              <button
-                title={playing ? "توقف" : "پخش"}
-                onClick={togglePlay}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white"
-              >
-                {playing ? <Pause className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5 fill-current" />}
-              </button>
-            )}
-            <button
-              title="بستن پنجره‌ی شناور"
-              onClick={() => setFloating(false)}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        )}
-        <div
-          className={
-            fullscreen
-              ? "absolute inset-0 z-[1] flex items-center justify-center bg-black overflow-hidden"
-              : "relative flex items-center justify-center overflow-hidden bg-black aspect-video rounded-t-3xl"
-          }
-        >
-          <video
-            ref={videoRef}
-            playsInline
-            preload="metadata"
-            onClick={togglePlay}
-            className="h-full w-full object-contain"
-        >
-          {item?.subtitles?.map((s) => (
-            <track key={s.id} kind="subtitles" label={s.label} srcLang={s.lang || "fa"} src={mediaUrl(s.url)} default={false} />
-          ))}
-        </video>
-          <audio ref={dubAudioRef} preload="auto" />
+              className="absolute inset-0 z-[2]"
+              onPointerDown={onSurfaceDown}
+              onPointerUp={onSurfaceUp}
+              onClick={onSurfaceClick}
+              onDoubleClick={(e) => e.preventDefault()}
+            />
 
-        {!processing && activeCueText.length > 0 && (
-          <div
-            className="pointer-events-none absolute left-0 right-0 z-[3] flex flex-col items-center gap-1 px-6 text-center"
-            style={{ bottom: subStyle.offset }}
-          >
-            {activeCueText.map((line, i) => (
+            {/* subtitles */}
+            {!processing && !inPip && activeCueText.length > 0 && (
               <div
-                key={i}
-                className="max-w-[90%] rounded-lg px-3.5 py-1"
-                style={{
-                  fontFamily: subStyle.font,
-                  fontSize: subStyle.size,
-                  fontWeight: subStyle.bold ? 700 : 400,
-                  color: subStyle.color,
-                  background: `rgba(0,0,0,${subStyle.bgOpacity / 100})`,
-                  lineHeight: 1.45,
-                  textShadow: subStyle.outline ? "0 0 3px rgba(0,0,0,.95), 0 0 7px rgba(0,0,0,.8)" : "none",
-                }}
+                className="pointer-events-none absolute left-0 right-0 z-[3] flex flex-col items-center gap-1 px-6 text-center transition-[bottom] duration-300"
+                style={{ bottom: subStyle.offset * (mini ? 0.4 : 1) + subLift }}
               >
-                {line}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {item?.type === "live" && (
-          <div className="absolute top-3.5 right-3.5 z-[5] flex items-center gap-1.5 rounded-full bg-[color:var(--color-coral)]/90 px-3 py-1 text-xs font-bold text-white" style={{ animation: "pulse-live 1.8s infinite" }}>
-            <Radio className="w-3.5 h-3.5 text-white animate-pulse" /> پخش زنده
-          </div>
-        )}
-
-        {buffering && !processing && !playbackError && !noPlayableSource && (
-          <div className="absolute inset-0 z-[4] flex items-center justify-center">
-            <div className="h-11 w-11 rounded-full border-[3px] border-white/15" style={{ borderTopColor: "var(--color-amber)", animation: "spin .9s linear infinite" }} />
-          </div>
-        )}
-
-        {bigPlay && !processing && !playbackError && !noPlayableSource && (
-          <button
-            onClick={() => {
-              setBigPlay(false);
-              togglePlay();
-            }}
-            className="absolute inset-0 z-[6] m-auto flex h-20 w-20 items-center justify-center rounded-full border border-white/10 bg-black/55 text-2xl text-white backdrop-blur-sm transition-transform hover:scale-105"
-          >
-            <Play className="w-8 h-8 fill-white text-white ml-1" />
-          </button>
-        )}
-
-        {processing && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5 bg-[color:var(--color-bg)] px-6 text-center text-[color:var(--color-ink-muted)]">
-            <div className="flex items-center justify-center text-5xl opacity-80">
-              {item?.status === "error" ? <TriangleAlert className="h-12 w-12 text-[color:var(--color-coral)]" /> : !item ? <Film className="h-12 w-12" /> : <Loader2 className="h-12 w-12 animate-spin" />}
-            </div>
-            <p className="m-0 text-[14.5px]">
-              {!item
-                ? "هنوز ویدیویی برای پخش انتخاب نشده"
-                : item.status === "error"
-                  ? `تبدیل این ویدیو ناموفق بود: ${item.error || "خطای نامشخص"}`
-                  : `در حال آماده‌سازی «${prettyTitle(item.title)}» — پخش معمولاً ظرف حدود ۲ دقیقه شروع می‌شه`}
-            </p>
-            {item && item.status !== "error" && (
-              <div className="flex w-[70%] max-w-[340px] items-center gap-2.5">
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                {activeCueText.map((line, i) => (
                   <div
-                    className="h-full rounded-full transition-all duration-500"
-                    style={{ width: `${defProgress?.pct ?? 0}%`, background: "linear-gradient(90deg, var(--color-amber), var(--color-plum-soft))" }}
-                  />
-                </div>
-                <span className="font-mono text-xs text-[color:var(--color-amber)]">{defProgress?.pct ?? 0}%</span>
-              </div>
-            )}
-            {!item && (
-              <button
-                onClick={onGoToAdd}
-                className="rounded-xl border border-[color:var(--color-border)] bg-white/5 px-5 py-2.5 text-[13.5px] text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50"
-              >
-                <span className="flex items-center gap-1.5">
-                  <Plus className="h-4 w-4" />
-                  افزودن ویدیو
-                </span>
-              </button>
-            )}
-          </div>
-        )}
-
-        {noPlayableSource && (
-          <div
-            role="alert"
-            className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)] px-6 text-center"
-          >
-            <Film className="h-11 w-11 text-[color:var(--color-ink-muted)]" />
-            <p className="m-0 text-[15px] text-[color:var(--color-ink)]">این ویدیو فایل پخشی ندارد</p>
-            <p className="m-0 max-w-[420px] text-[13px] text-[color:var(--color-ink-muted)]">
-              «{prettyTitle(item?.title)}» آماده است ولی هیچ فایل قابل پخشی برایش ساخته نشده.
-            </p>
-            <button
-              onClick={onGoToAdd}
-              className="mt-1 rounded-xl border border-[color:var(--color-amber)]/50 bg-white/5 px-4 py-2 text-[13px] text-[color:var(--color-ink)] transition-colors hover:bg-white/10"
-            >
-              افزودن ویدیو
-            </button>
-          </div>
-        )}
-
-        {playbackError && (
-          <div
-            role="alert"
-            aria-live="assertive"
-            className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)] px-6 text-center"
-          >
-            <TriangleAlert className="h-11 w-11 text-[color:var(--color-coral)]" />
-            <p className="m-0 text-[15px] font-medium text-[color:var(--color-ink)]">{playbackError.title}</p>
-            <p className="m-0 max-w-[420px] text-[13px] text-[color:var(--color-ink-muted)]">{playbackError.detail}</p>
-            {playbackError.code && (
-              <code className="rounded-md bg-white/5 px-2 py-1 font-mono text-[11px] text-[color:var(--color-ink-muted)]">{playbackError.code}</code>
-            )}
-            <div className="mt-1 flex items-center gap-2">
-              <button
-                onClick={retryPlayback}
-                className="flex items-center gap-1.5 rounded-xl border border-[color:var(--color-amber)]/50 bg-white/5 px-4 py-2 text-[13px] text-[color:var(--color-ink)] transition-colors hover:bg-white/10"
-              >
-                <RotateCcw className="h-4 w-4" />
-                تلاش دوباره
-              </button>
-              <button
-                onClick={onGoToAdd}
-                className="rounded-xl border border-[color:var(--color-border)] px-4 py-2 text-[13px] text-[color:var(--color-ink-muted)] transition-colors hover:text-[color:var(--color-ink)]"
-              >
-                ویدیوی دیگر
-              </button>
-            </div>
-          </div>
-        )}
-
-        {toast && (
-          <div className="absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-xl border border-[color:var(--color-amber)]/40 bg-black/80 px-4 py-2 text-xs text-[color:var(--color-ink)] backdrop-blur">
-            {toast}
-          </div>
-        )}
-        </div>
-
-        {!processing && !floating && item?.type === "live" && (
-        <div
-          dir="ltr"
-          className={`transition-opacity duration-300 ${
-            fullscreen
-              ? `absolute bottom-0 left-0 right-0 z-[20] p-4 sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent ${
-                  cursorHidden ? "pointer-events-none opacity-0" : "opacity-100"
-                }`
-              : "relative z-10 p-3.5 pb-4 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/90 rounded-b-3xl"
-          }`}
-        >
-          <div className="flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-1">
-              <CtrlBtn title="بی‌صدا" onClick={() => changeMuted((m) => !m)}>
-                {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              </CtrlBtn>
-              <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => changeVolume(parseFloat(e.target.value))} className="w-16 accent-[color:var(--color-amber)] sm:w-20" />
-            </div>
-            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">{item ? prettyTitle(item.title) : ""}</div>
-            <div className="flex items-center gap-1">
-              <CtrlBtn title="تمام‌صفحه (F)" onClick={toggleFullscreen}>
-                <Maximize className="w-4 h-4" />
-              </CtrlBtn>
-            </div>
-          </div>
-        </div>
-      )}
-
-{!processing && !floating && item?.type !== "live" && (
-        <div
-          dir="ltr"
-          className={`transition-opacity duration-300 ${
-            fullscreen
-              ? `absolute bottom-0 left-0 right-0 z-[20] p-4 sm:p-6 bg-gradient-to-t from-black/95 via-black/60 to-transparent ${
-                  cursorHidden ? "pointer-events-none opacity-0" : "opacity-100"
-                }`
-              : "relative z-10 p-3.5 pb-4 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/90 rounded-b-3xl"
-          }`}
-        >
-          {/* The timeline is the shared playhead. */}
-          <div className="mb-2 flex items-center gap-2.5">
-            <span className="min-w-[90px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]" dir="ltr">{formatTime(curTime)}{isFinite(totalDuration) && totalDuration > 0 ? ` / ${formatTime(totalDuration)}` : ""}</span>
-            <div className="relative flex-1">
-              {!processing && encodedSeconds > 0 && encodedSeconds < totalDuration && (
-                <div
-                  className="pointer-events-none absolute bottom-0 left-0 z-[1] h-1.5 rounded-full bg-white/15"
-                  style={{ width: `${(encodedSeconds / totalDuration) * 100}%` }}
-                />
-              )}
-              <input
-                type="range"
-                min={0}
-                max={isFinite(totalDuration) ? totalDuration || 0 : (duration || 0)}
-                step={0.1}
-                value={dragging ? dragValueRef.current : curTime}
-                onMouseDown={() => setDragging(true)}
-                onTouchStart={() => setDragging(true)}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  dragValueRef.current = v;
-                  setCurTime(v);
-                  const vid = videoRef.current;
-                  if (vid) vid.currentTime = v;
-                }}
-                onMouseUp={() => {
-                  setDragging(false);
-                  seek(dragValueRef.current);
-                }}
-                onTouchEnd={() => {
-                  setDragging(false);
-                  seek(dragValueRef.current);
-                }}
-                className="relative z-[2] h-1.5 w-full cursor-pointer accent-[color:var(--color-amber)]"
-              />
-            </div>
-            <span className="min-w-[90px] text-center font-mono text-xs text-[color:var(--color-ink-muted)]" dir="ltr">{isFinite(totalDuration) && totalDuration > 0 ? formatTime(totalDuration) : formatTime(duration)}</span>
-          </div>
-
-          {/* Only four things live on the bar by default: play/pause, the
-              timeline above, volume, and fullscreen. Everything else is a
-              secondary option and belongs in a menu — so the controls people
-              actually reach for stay legible instead of drowning in chips. */}
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
-            <div className="flex items-center gap-1">
-              <CtrlBtn title="پخش / مکث (K)" main onClick={togglePlay}>
-                {playing ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
-              </CtrlBtn>
-            </div>
-
-            <div className="hidden min-w-0 flex-1 truncate px-2.5 text-center text-[13px] text-[color:var(--color-ink-muted)] sm:block">
-              {item ? prettyTitle(item.title) : ""}
-            </div>
-
-            <div className="flex items-center gap-1">
-              <CtrlBtn title="بی‌صدا (M)" onClick={() => changeMuted((m) => !m)}>
-                {muted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              </CtrlBtn>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={muted ? 0 : volume}
-                onChange={(e) => {
-                  changeVolume(parseFloat(e.target.value));
-                  if (parseFloat(e.target.value) > 0) changeMuted(false);
-                }}
-                aria-label="بلندی صدا"
-                className="w-16 accent-[color:var(--color-amber)] sm:w-20"
-              />
-
-              <div className="relative">
-                <button
-                  type="button"
-                  aria-label="گزینه‌های بیشتر"
-                  aria-expanded={openMenu === "more"}
-                  onClick={() => {
-                    if (openMenu !== "more") refreshMenuIfStale();
-                    setOpenMenu(openMenu === "more" ? null : "more");
-                  }}
-                  className="flex h-[38px] min-w-[38px] items-center justify-center rounded-xl border border-[color:var(--color-border)] bg-white/5 px-2 text-[color:var(--color-ink)] transition-colors hover:border-[color:var(--color-amber)]/50"
-                >
-                  <MoreHorizontal className="w-4 h-4" />
-                </button>
-                {openMenu === "more" && (
-                  <div
-                    role="menu"
-                    aria-label="گزینه‌های بیشتر"
-                    className="absolute bottom-[calc(100%+10px)] right-0 z-50 max-h-[min(70vh,520px)] w-64 overflow-y-auto rounded-2xl border border-[color:var(--color-border)] bg-[color:var(--color-bg-elevated)]/97 p-1.5 shadow-[var(--shadow-soft)] backdrop-blur-md"
-                    style={{ isolation: "isolate" }}
+                    key={i}
+                    className="max-w-[92%] rounded-lg px-3.5 py-1"
+                    style={{
+                      fontFamily: subStyle.font,
+                      fontSize: subStyle.size * subScale,
+                      fontWeight: subStyle.bold ? 700 : 400,
+                      color: subStyle.color,
+                      background: `rgba(0,0,0,${subStyle.bgOpacity / 100})`,
+                      lineHeight: 1.45,
+                      textShadow: subStyle.outline ? "0 0 3px rgba(0,0,0,.95), 0 0 7px rgba(0,0,0,.8)" : "none",
+                    }}
                   >
-                    <MenuSectionLabel>پخش</MenuSectionLabel>
-                    <MenuItem disabled={!canPrev} onClick={onPrev}>
-                      <span className="flex items-center gap-2"><SkipBack className="w-3.5 h-3.5" />آیتم قبلی <kbd className="ms-auto">P</kbd></span>
-                    </MenuItem>
-                    <MenuItem disabled={!canNext} onClick={onNext}>
-                      <span className="flex items-center gap-2"><SkipForward className="w-3.5 h-3.5" />آیتم بعدی <kbd className="ms-auto">N</kbd></span>
-                    </MenuItem>
-                    <MenuItem onClick={() => videoRef.current && seek(Math.max(0, videoRef.current.currentTime - 10))}>
-                      <span className="flex items-center gap-2"><RotateCcw className="w-3.5 h-3.5" />۱۰ ثانیه عقب</span>
-                    </MenuItem>
-                    <MenuItem onClick={() => videoRef.current && seek(Math.min(duration || 1e9, videoRef.current.currentTime + 10))}>
-                      <span className="flex items-center gap-2"><RotateCw className="w-3.5 h-3.5" />۱۰ ثانیه جلو</span>
-                    </MenuItem>
-                    <MenuItem disabled={!canShuffle} onClick={onToggleShuffle} active={shuffle}>
-                      <span className="flex items-center gap-2"><Shuffle className="w-3.5 h-3.5" />پخش تصادفی</span>
-                    </MenuItem>
-
-                    <MenuDivider />
-                    <MenuSectionLabel>سرعت</MenuSectionLabel>
-                    <div className="grid grid-cols-4 gap-1 px-1 pb-1">
-                      {SPEEDS.map((s) => (
-                        <button
-                          key={s}
-                          type="button"
-                          disabled={!canSpeed}
-                          onClick={() => requestControl("rate", { rate: s })}
-                          className={`rounded-lg px-1.5 py-1.5 text-[12px] disabled:opacity-40 ${
-                            rate === s
-                              ? "bg-[color:var(--color-amber)]/15 font-bold text-[color:var(--color-amber)]"
-                              : "text-[color:var(--color-ink)] hover:bg-white/5"
-                          }`}
-                        >
-                          {s}x
-                        </button>
-                      ))}
-                    </div>
-
-                    <MenuDivider />
-                    <MenuSectionLabel>کیفیت</MenuSectionLabel>
-                    <MenuItem active={currentLevel === -1} onClick={() => hlsRef.current && (hlsRef.current.currentLevel = -1)}>
-                      خودکار
-                    </MenuItem>
-                    {(item?.renditions?.length
-                      ? [...item.renditions].sort((a, b) => b.height - a.height)
-                      : levels.map((l) => ({ ...l, status: "ready" as const, vbr: "", abr: "" }))
-                    ).map((r) => {
-                      if (r.status === "ready" || r.status === "complete" || !r.status) {
-                        const idx = levels.findIndex((l) => l.label === r.label);
-                        return (
-                          <MenuItem key={r.label} active={idx !== -1 && currentLevel === idx} onClick={() => idx !== -1 && hlsRef.current && (hlsRef.current.currentLevel = idx)}>
-                            {r.label}
-                          </MenuItem>
-                        );
-                      }
-                      if (r.status === "pending" || r.status === "error") {
-                        return (
-                          <MenuItem key={r.label} onClick={() => setPendingQualityLabel(r.label)}>
-                            {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">{r.status === "error" ? "خطا — دوباره امتحان کن" : "برای آماده‌سازی کلیک کن"}</span>
-                          </MenuItem>
-                        );
-                      }
-                      return (
-                        <MenuItem key={r.label} disabled>
-                          {r.label} <span className="mr-1.5 text-[10.5px] text-[color:var(--color-ink-dim)]">در حال آماده‌سازی…</span>
-                        </MenuItem>
-                      );
-                    })}
-
-                    <MenuDivider />
-                    <MenuSectionLabel>صدا</MenuSectionLabel>
-                    <MenuItem active={!currentAudioTrackId} onClick={() => setCurrentAudioTrackId(null)}>
-                      <span className="flex items-center gap-2"><Headphones className="w-3.5 h-3.5" />صدای اصلی</span>
-                    </MenuItem>
-                    {item?.audio_tracks?.map((t) => (
-                      <MenuItem
-                        key={t.id}
-                        active={currentAudioTrackId === t.id}
-                        onClick={() => {
-                          setCurrentAudioTrackId(t.id);
-                          if (dubAudioRef.current) dubAudioRef.current.src = t.url;
-                        }}
-                      >
-                        {t.label}
-                      </MenuItem>
-                    ))}
-
-                    <MenuDivider />
-                    <MenuSectionLabel>زیرنویس</MenuSectionLabel>
-                    <MenuItem active={currentSubIndex === -1} onClick={() => setCurrentSubIndex(-1)}>
-                      <Slash className="w-3.5 h-3.5 text-rose-400" /> خاموش
-                    </MenuItem>
-                    {item?.subtitles?.map((sub, i) => (
-                      <MenuItem key={sub.id} active={currentSubIndex === i} onClick={() => setCurrentSubIndex(i)}>
-                        {sub.label}
-                      </MenuItem>
-                    ))}
-
-                    <MenuDivider />
-                    <MenuSectionLabel>نمایش</MenuSectionLabel>
-                    <MenuItem onClick={togglePip}>
-                      <span className="flex items-center gap-2"><PictureInPicture2 className="w-3.5 h-3.5" />تصویر در تصویر</span>
-                    </MenuItem>
-                    <MenuItem onClick={onGoToSubStyle}>
-                      <span className="flex items-center gap-2"><MessageSquare className="w-3.5 h-3.5" />استایل زیرنویس</span>
-                    </MenuItem>
-                    <MenuItem onClick={onOpenShortcuts}>
-                      <span className="flex items-center gap-2"><Keyboard className="w-3.5 h-3.5" />کلیدهای میانبر</span>
-                    </MenuItem>
-                    <MenuItem onClick={() => onOpenSettings?.()}>
-                      <span className="flex items-center gap-2"><Settings className="w-3.5 h-3.5" />تنظیمات</span>
-                    </MenuItem>
+                    {line}
                   </div>
+                ))}
+              </div>
+            )}
+
+            {isLive && (
+              <div
+                className="absolute right-3 top-3 z-[5] flex items-center gap-1.5 rounded-full bg-[color:var(--color-coral)] px-3 py-1 text-[11.5px] font-bold text-white shadow-lg"
+                style={{ animation: "pulse-live 1.8s infinite" }}
+              >
+                <Radio className="h-3.5 w-3.5" /> زنده
+              </div>
+            )}
+
+            {buffering && !blocked && (
+              <div className="pointer-events-none absolute inset-0 z-[4] flex items-center justify-center">
+                <div className="h-12 w-12 rounded-full border-[3px] border-white/15" style={{ borderTopColor: "var(--color-amber)", animation: "spin .9s linear infinite" }} />
+              </div>
+            )}
+
+            {showCenterPlay && <CenterPlay onClick={() => { setBigPlay(false); togglePlay(); }} />}
+            {skipFlash && <SkipFlash key={skipFlash.key} side={skipFlash.side} onDone={() => setSkipFlash(null)} />}
+
+            {/* friendly empty / loading / error states */}
+            {processing && (
+              <div className="absolute inset-0 z-[6] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)]/92 px-6 text-center">
+                {!item ? (
+                  <EmptyScreen onGoToAdd={onGoToAdd} />
+                ) : item.status === "error" ? (
+                  <>
+                    <TriangleAlert className="h-11 w-11 text-[color:var(--color-coral)]" />
+                    <p className="display text-[20px] text-white">ای بابا! این یکی خراب شد</p>
+                    <p className="max-w-[380px] text-[13px] text-white/60">{item.error || "تبدیل ویدیو با خطا روبه‌رو شد. یه فایل یا لینک دیگه امتحان کن."}</p>
+                  </>
+                ) : (
+                  <>
+                    <Loader2 className="h-10 w-10 animate-spin text-[color:var(--color-amber)]" />
+                    <p className="display text-[20px] text-white">فیلم داره آماده می‌شه…</p>
+                    <p className="max-w-[420px] truncate text-[13px] text-white/60" dir="auto">«{prettyTitle(item.title)}»</p>
+                    <div className="flex w-[70%] max-w-[340px] items-center gap-2.5" dir="ltr">
+                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full transition-all duration-500"
+                          style={{ width: `${defProgress?.pct ?? 0}%`, background: "linear-gradient(90deg, var(--color-plum-soft), var(--color-amber))" }}
+                        />
+                      </div>
+                      <span className="font-mono text-xs text-[color:var(--color-amber)]">{defProgress?.pct ?? 0}%</span>
+                    </div>
+                    <p className="text-[12px] text-white/45">معمولاً تا ۲ دقیقه‌ی دیگه پخشش شروع می‌شه 🍿</p>
+                  </>
                 )}
               </div>
+            )}
 
-              <CtrlBtn title="تمام‌صفحه (F)" onClick={toggleFullscreen}>
-                <Maximize className="w-4 h-4" />
-              </CtrlBtn>
-            </div>
+            {noPlayableSource && (
+              <div role="alert" className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)] px-6 text-center">
+                <Film className="h-11 w-11 text-white/60" />
+                <p className="display text-[20px] text-white">این فیلم فایل پخش ندارد</p>
+                <p className="max-w-[420px] text-[13px] text-white/60" dir="auto">«{prettyTitle(item?.title)}» آماده است ولی هیچ فایل قابل پخشی برایش ساخته نشده.</p>
+                {onGoToAdd && (
+                  <button onClick={onGoToAdd} className="rounded-full bg-[color:var(--color-amber)] px-5 py-2 text-[13px] font-bold text-black">
+                    یه فیلم دیگه اضافه کن
+                  </button>
+                )}
+              </div>
+            )}
+
+            {playbackError && (
+              <div role="alert" aria-live="assertive" className="absolute inset-0 z-[7] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)] px-6 text-center">
+                <TriangleAlert className="h-11 w-11 text-[color:var(--color-coral)]" />
+                <p className="display text-[20px] text-white">{playbackError.title}</p>
+                <p className="max-w-[420px] text-[13px] text-white/60">{playbackError.detail}</p>
+                {playbackError.code && <code className="rounded-md bg-white/5 px-2 py-1 font-mono text-[11px] text-white/50">{playbackError.code}</code>}
+                <div className="mt-1 flex items-center gap-2">
+                  <button onClick={retryPlayback} className="flex items-center gap-1.5 rounded-full bg-[color:var(--color-amber)] px-5 py-2 text-[13px] font-bold text-black">
+                    <RotateCcw className="h-4 w-4" />
+                    دوباره امتحان کن
+                  </button>
+                  {onGoToAdd && (
+                    <button onClick={onGoToAdd} className="rounded-full border border-white/20 px-5 py-2 text-[13px] text-white/80 hover:bg-white/10">
+                      فیلم دیگه
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {toast && (
+              <div
+                className="pointer-events-none absolute left-1/2 z-20 -translate-x-1/2 rounded-full border border-[color:var(--color-amber)]/40 bg-black/80 px-4 py-2 text-[12px] text-white backdrop-blur"
+                style={{ bottom: placement === "overlay" ? 110 : 16 }}
+              >
+                {toast}
+              </div>
+            )}
+
+            {/* fullscreen top strip: where am I, and a clear way out */}
+            {fullscreen && (
+              <div
+                ref={topBarRef}
+                dir="rtl"
+                className="absolute inset-x-0 top-0 z-[20] flex items-center gap-3 bg-gradient-to-b from-black/85 via-black/40 to-transparent px-4 pb-8 pt-3"
+                style={{ paddingTop: "max(12px, env(safe-area-inset-top, 0px))" }}
+              >
+                <button
+                  type="button"
+                  onClick={toggleFullscreen}
+                  aria-label="خروج از تمام‌صفحه"
+                  className="hit flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+                <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-white" dir="auto">{title}</span>
+              </div>
+            )}
+
+            {/* mini-player strip (in-page float and the Tauri mini window) */}
+            {mini && (
+              <>
+                <div
+                  {...(nativeMini ? { "data-tauri-drag-region": "" } : {})}
+                  onPointerDown={floating ? onFloatDown : undefined}
+                  onPointerMove={floating ? onFloatMove : undefined}
+                  onPointerUp={floating ? onFloatUp : undefined}
+                  onPointerCancel={floating ? onFloatUp : undefined}
+                  dir="rtl"
+                  className="absolute inset-x-0 top-0 z-[30] flex touch-none cursor-grab items-center gap-1 bg-gradient-to-b from-black/85 to-transparent px-2 pb-5 pt-1.5 active:cursor-grabbing"
+                >
+                  <GripVertical className="h-4 w-4 shrink-0 text-white/50" {...(nativeMini ? { "data-tauri-drag-region": "" } : {})} />
+                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-white/85" dir="auto" {...(nativeMini ? { "data-tauri-drag-region": "" } : {})}>
+                    {title || "پخش زنده"}
+                  </span>
+                  {!isLive && (
+                    <button
+                      type="button"
+                      aria-label={playing ? "توقف" : "پخش"}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={togglePlay}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-white hover:bg-white/15"
+                    >
+                      {playing ? <Pause className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5 fill-current" />}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    aria-label="برگرد به پرده"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={togglePip}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-white hover:bg-white/15"
+                  >
+                    <Maximize2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {!isLive && (
+                  <div className="absolute inset-x-0 bottom-0 z-[30] h-[3px] bg-white/15">
+                    <div className="h-full" style={{ width: `${pctDone}%`, background: "linear-gradient(90deg, var(--color-plum-soft), var(--color-amber))" }} />
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* overlay controls (desktop, landscape, fullscreen) */}
+            {!mini && !blocked && placement === "overlay" && (
+              <div
+                ref={controlsRef}
+                className="absolute inset-x-0 bottom-0 z-[20] bg-gradient-to-t from-black/90 via-black/55 to-transparent pt-10"
+                style={fullscreen ? { paddingBottom: "env(safe-area-inset-bottom, 0px)" } : undefined}
+              >
+                {controls}
+              </div>
+            )}
+          </div>
+
+          {/* controls under the screen on portrait phones: big, always reachable, never covering the picture */}
+          {!mini && !blocked && placement === "below" && (
+            <>
+              <div className="mt-2 rounded-2xl bg-white/[0.05]">{controls}</div>
+              <div dir="rtl" className="px-1 pt-2">
+                <h2 className="truncate text-[15px] font-bold text-white" dir="auto">{title}</h2>
+                {item?.added_by && <p className="mt-0.5 text-[12px] text-white/45">{item.added_by} اضافه‌ش کرده</p>}
+              </div>
+            </>
+          )}
           </div>
         </div>
-      )}
-
       </div>
 
       {showDebug && (
@@ -1474,60 +1714,75 @@ export function Player({
   );
 }
 
-function CtrlBtn({
-  children,
-  title,
-  onClick,
-  main,
-  disabled,
-}: {
-  children: React.ReactNode;
-  title: string;
-  onClick: () => void;
-  main?: boolean;
-  disabled?: boolean;
-}) {
+/* ---------------------------------------------------------------------- */
+
+function CenterPlay({ onClick }: { onClick: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    run(ref.current, { scale: [0.5, 1], opacity: [0, 1], duration: 520, ease: spring({ stiffness: 320, damping: 16 }) });
+  }, []);
   return (
     <button
-      title={title}
+      ref={ref}
+      type="button"
+      aria-label="پخش"
       onClick={onClick}
-      disabled={disabled}
-      className={`flex h-[38px] w-[38px] items-center justify-center rounded-xl text-[15px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-        main
-          ? "text-white shadow-[0_4px_18px_-4px_rgba(232,161,92,0.5)]"
-          : "border border-[color:var(--color-border)] bg-white/5 text-[color:var(--color-ink)] hover:border-[color:var(--color-amber)]/50"
-      }`}
-      style={main ? { background: "linear-gradient(135deg, var(--color-amber), var(--color-plum))" } : undefined}
+      className="absolute inset-0 z-[6] m-auto flex h-[76px] w-[76px] items-center justify-center rounded-full bg-[color:var(--color-amber)] text-black shadow-[0_0_0_10px_rgba(247,195,90,0.18),0_20px_60px_-10px_rgba(0,0,0,0.8)] transition-[filter] hover:brightness-110"
     >
-      {children}
+      <Play className="ml-1.5 h-9 w-9 fill-current" />
     </button>
   );
 }
 
-
-function MenuItem({ children, active, onClick, disabled }: { children: React.ReactNode; active?: boolean; onClick?: () => void; disabled?: boolean }) {
+function SkipFlash({ side, onDone }: { side: -1 | 1; onDone: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    run(ref.current, {
+      opacity: [0, 1, 1, 0],
+      scale: [0.8, 1, 1, 1.05],
+      duration: 700,
+      ease: "outQuad",
+      onComplete: onDone,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div
-      onClick={disabled ? undefined : onClick}
-      className={`flex items-center justify-between gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-[13.5px] ${
-        disabled ? "cursor-default opacity-60" : "cursor-pointer hover:bg-white/5"
-      } ${active ? "font-bold text-[color:var(--color-amber)]" : "text-[color:var(--color-ink)]"}`}
+      ref={ref}
+      dir="rtl"
+      className={`pointer-events-none absolute inset-y-0 z-[5] flex w-1/3 items-center justify-center ${side === 1 ? "right-0 rounded-l-[100%]" : "left-0 rounded-r-[100%]"} bg-white/10`}
+      style={{ opacity: 0 }}
     >
-      {children}
-      {active && <span>✓</span>}
+      <span className="rounded-full bg-black/55 px-4 py-2 text-[14px] font-bold text-white">{side === 1 ? "۱۰ ثانیه جلو ⏩" : "⏪ ۱۰ ثانیه عقب"}</span>
     </div>
   );
 }
 
-function MenuDivider() {
-  return <div className="my-1 h-px bg-[color:var(--color-border)]" />;
-}
-
-/** Small non-interactive header that groups items in a long menu. */
-function MenuSectionLabel({ children }: { children: React.ReactNode }) {
+function EmptyScreen({ onGoToAdd }: { onGoToAdd?: () => void }) {
+  const icon = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // the one idle flourish in the whole player: a popcorn bucket that bobs, because the screen is waiting for you
+    const a = run(icon.current, { translateY: [0, -8], rotate: [-4, 4], duration: 1400, ease: "inOutSine", loop: true, alternate: true });
+    return () => {
+      a?.cancel();
+    };
+  }, []);
   return (
-    <p className="px-3 pb-1 pt-2 text-[9.5px] font-semibold tracking-[0.18em] text-[color:var(--color-ink-dim)] uppercase">
-      {children}
-    </p>
+    <>
+      <div ref={icon} className="text-[color:var(--color-amber)]">
+        <Popcorn className="h-14 w-14" strokeWidth={1.5} />
+      </div>
+      <p className="display text-[26px] leading-tight text-white">پرده خالیه!</p>
+      <p className="max-w-[340px] text-[13.5px] text-white/60">یه فیلم، سریال یا لینک بیار تا همه با هم ببینیم.</p>
+      {onGoToAdd && (
+        <button
+          onClick={onGoToAdd}
+          className="mt-1 flex items-center gap-2 rounded-full bg-[color:var(--color-amber)] px-6 py-2.5 text-[14px] font-bold text-black shadow-[var(--shadow-lamp)] transition-transform active:scale-95"
+        >
+          <Plus className="h-4 w-4" />
+          فیلم اضافه کن
+        </button>
+      )}
+    </>
   );
 }

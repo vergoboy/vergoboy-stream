@@ -3,7 +3,7 @@
 import { Keyboard, X } from "lucide-react";
 
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "./anim";
 import { useAppSettings, SHORTCUT_LABELS, formatKey } from "@/lib/settings";
 
 export function ShortcutsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
