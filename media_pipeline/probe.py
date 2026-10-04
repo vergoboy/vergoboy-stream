@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .errors import ProbeError
+from archive_network import direct_media_environment
 
 log = logging.getLogger(__name__)
 
@@ -285,7 +286,8 @@ def probe(source: str, timeout: int = PROBE_TIMEOUT_S) -> MediaInfo:
     args.append(source)
 
     try:
-        proc = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+        proc = subprocess.run(args, capture_output=True, timeout=timeout, check=False,
+                              env=direct_media_environment())
     except FileNotFoundError as exc:
         raise ProbeError("ffprobe is not installed") from exc
     except subprocess.TimeoutExpired as exc:

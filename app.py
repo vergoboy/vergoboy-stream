@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
+import requests
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import selectinload
 
@@ -35,8 +36,12 @@ from media_pipeline import (
     cleanup_orphaned_partials,
 )
 import archive_scraper
+from archive_network import create_direct_media_session, direct_media_environment
+from archive_logging import configure as configure_archive_logging, event as archive_event, redact, reset_request_id, safe_target, set_request_id, timer as ArchiveTimer
+from archive_filters import FilterValidationError, SearchFilters, available_options
 import db as dbmod
 from db import User as DBUser
+import permissions as permmod
 from livekit_auth import generate_livekit_token
 import mail as mailmod
 from srt_to_vtt import convert_srt_to_vtt
@@ -82,6 +87,7 @@ except ImportError as e:
 
 app = Flask(__name__, static_url_path="/stream/static", template_folder="templates")
 app.config.from_object(Config)
+configure_archive_logging(Config.ARCHIVE_LOG_LEVEL)
 
 CORS(
     app,
@@ -113,6 +119,11 @@ ENCODE_SEMAPHORE = gevent.lock.BoundedSemaphore(Config.MAX_CONCURRENT_ENCODES)
 # about the machine, not about one room, and per-call breakers would have
 # every room rediscover it on its own.
 ENCODE_RUNNER = EncodeRunner()
+
+# This client is deliberately distinct from the Digimoviez archive client.
+# ``trust_env=False`` prevents HTTP(S)_PROXY / ALL_PROXY from routing a movie
+# download through the archive proxy.
+MEDIA_CLIENT = create_direct_media_session()
 
 
 def allowed(filename: str, exts: set) -> bool:
@@ -193,27 +204,83 @@ def _current_room_code() -> str | None:
     return (user.current_room_id if user else None)
 
 
+def _perm_snapshot(user: DBUser) -> permmod.PermissionView:
+    """Resolved capabilities for this request. Cached on flask.g."""
+    if not user:
+        return permmod.resolve_view(permmod.ResolveContext(
+            user_id="", role="watcher", email=None, is_active=False,
+            can_control=False, youtube_allowed=False, room_id=None, room_owner_id=None,
+        ))
+    key = (user.id, user.current_room_id)
+    cached = getattr(g, "_perm_cache", None)
+    if cached and cached[0] == key:
+        return cached[1]
+    session = dbmod.SessionLocal()
+    try:
+        fresh = session.get(DBUser, user.id)
+        if not fresh:
+            view = permmod.resolve_view(permmod.ResolveContext(
+                user_id=user.id, role="watcher", email=None, is_active=False,
+                can_control=False, youtube_allowed=False, room_id=None, room_owner_id=None,
+            ))
+        else:
+            view = dbmod.resolve_user_permissions(session, fresh, fresh.current_room_id)
+        g._perm_cache = (key, view)
+        return view
+    finally:
+        session.close()
+
+
+def _has_perm(user: DBUser, perm: str) -> bool:
+    if not user or not user.is_active:
+        return False
+    return _perm_snapshot(user).allowed(perm)
+
+
+def _deny_unless(user: DBUser, perm: str, message: str = "اجازه این کار را نداری"):
+    if _has_perm(user, perm):
+        return None
+    return jsonify({"error": message}), 403
+
+
+def _quota_ok(user: DBUser) -> bool:
+    if not user or not user.is_active:
+        return False
+    view = _perm_snapshot(user)
+    if view.is_site_admin or view.is_root or view.is_owner:
+        return True
+    return user.upload_quota == -1 or (user.uploads_used or 0) < user.upload_quota
+
+
 def _may_control(user: DBUser) -> bool:
-    """Room 'manager': admin, the room's own owner, or a promoted controller.
-    This is the gate for things that change what everyone watches (speed,
-    switching media, quality requests, removing items) plus room moderation."""
-    return bool(user and user.is_active and (_is_admin(user) or user.can_control or _is_room_owner(user)))
+    """True when the user may change shared playback (legacy helper)."""
+    if not user or not user.is_active:
+        return False
+    view = _perm_snapshot(user)
+    return bool(
+        view.is_owner or view.is_site_admin or view.is_root
+        or view.allowed(permmod.PERM_SELECT_PLAYLIST_ITEM)
+        or view.allowed(permmod.PERM_CHANGE_PLAYBACK_SPEED)
+        or view.allowed(permmod.PERM_PROMOTE_USER)
+    )
 
 
 def _may_youtube(user: DBUser) -> bool:
-    return bool(user and user.is_active and (user.youtube_allowed or user.role == "admin"))
+    return _has_perm(user, permmod.PERM_ADD_YOUTUBE)
 
 
 def _may_add(user: DBUser) -> bool:
-    """Adding media/streams is reserved for the room owner and promoted
-    controllers (plus admins); plain watchers cannot add."""
     if not user or not user.is_active:
         return False
-    if user.role == "admin":
-        return True
-    if not (user.can_control or _is_room_owner(user)):
+    if not (
+        _has_perm(user, permmod.PERM_ADD_VIDEO)
+        or _has_perm(user, permmod.PERM_ADD_VIDEO_URL)
+        or _has_perm(user, permmod.PERM_ADD_VIDEO_FILE)
+        or _has_perm(user, permmod.PERM_ADD_YOUTUBE)
+        or _has_perm(user, permmod.PERM_ADD_STREAM)
+    ):
         return False
-    return user.upload_quota == -1 or user.uploads_used < user.upload_quota
+    return _quota_ok(user)
 
 
 def _is_admin(user: DBUser) -> bool:
@@ -297,6 +364,38 @@ def _refresh_socket_perms(code: str, user_id: str, can_control: bool = None):
     broadcast_presence(rs)
 
 
+def _reload_socket_user(user_id: str):
+    """Re-binds every live socket for this account to a fresh DB user so
+    permission checks after promote/demote/override do not use a stale row."""
+    session = dbmod.SessionLocal()
+    try:
+        fresh = session.execute(
+            dbmod.select(DBUser)
+            .where(DBUser.id == user_id)
+            .options(selectinload(DBUser.own_room))
+        ).scalar_one_or_none()
+        if not fresh:
+            return
+        view = dbmod.resolve_user_permissions(session, fresh, fresh.current_room_id)
+        dbmod.sync_legacy_flags(fresh, view)
+        session.commit()
+        for sid, (code, _old) in list(SOCKET_SESSIONS.items()):
+            if _old.id == user_id:
+                SOCKET_SESSIONS[sid] = (code, fresh)
+        if fresh.current_room_id:
+            _refresh_socket_perms(
+                fresh.current_room_id, user_id,
+                can_control=bool(fresh.can_control or view.is_owner or view.is_site_admin),
+            )
+        socketio.emit(
+            "permissions_sync",
+            {"user_id": user_id, "permissions": view.effective, "room_role": view.room_role},
+            to=_room_channel(fresh.current_room_id) if fresh.current_room_id else None,
+        )
+    finally:
+        session.close()
+
+
 def _kick_room_user(code: str, user_id: str):
     """Force-disconnects every socket of `user_id` currently in room `code`."""
     for sid, (scode, suser) in list(SOCKET_SESSIONS.items()):
@@ -327,9 +426,12 @@ def free_space_mb(path: str) -> float:
 
 
 def _download_to_file(url: str, dest_path: str, timeout: int = 25) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest_path, "wb") as out:
-        shutil.copyfileobj(resp, out, length=1024 * 1024)
+    with MEDIA_CLIENT.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout,
+                          stream=True) as resp, open(dest_path, "wb") as out:
+        resp.raise_for_status()
+        for chunk in resp.iter_content(1024 * 1024):
+            if chunk:
+                out.write(chunk)
 
 
 def _check_link_ok(url: str, timeout: int = 15) -> bool:
@@ -341,18 +443,24 @@ def _check_link_ok(url: str, timeout: int = 15) -> bool:
     Returns False for HTTP >= 400, TLS/certificate failures, DNS/connection
     errors and timeouts — i.e. any URL that could never be encoded."""
     try:
-        req = urllib.request.Request(url, headers={
+        started = ArchiveTimer()
+        archive_event("media", "probe_start", proxy_enabled=False, direct=True, **safe_target(url))
+        response = MEDIA_CLIENT.get(url, headers={
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             ),
             "Accept": "video/*,*/*;q=0.8",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            ok = 200 <= resp.status < 400
-            resp.read(1)
-            return ok
-    except Exception:
+        }, timeout=timeout, stream=True)
+        ok = 200 <= response.status_code < 400
+        next(response.iter_content(1), b"")
+        response.close()
+        archive_event("media", "probe_result", status=response.status_code, elapsed_ms=started.ms,
+                      proxy_enabled=False, direct=True, **safe_target(url))
+        return ok
+    except Exception as exc:
+        archive_event("media", "probe_error", level=logging.WARNING, error_class=type(exc).__name__,
+                      error=str(exc)[:200], proxy_enabled=False, direct=True, **safe_target(url))
         return False
 
 
@@ -391,14 +499,13 @@ def _resolve_media_url_remote(url: str, timeout: int = 15) -> str:
 
     html = None
     try:
-        req = urllib.request.Request(url, headers=_UA_HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with MEDIA_CLIENT.get(url, headers=_UA_HEADERS, timeout=timeout) as resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             if ctype.startswith(("video/", "audio/")) or "matroska" in ctype:
                 return url
             if not ctype.startswith(("text/html", "application/xhtml")):
                 return url
-            html = resp.read().decode("utf-8", errors="ignore")[:1_000_000]
+            html = resp.content.decode("utf-8", errors="ignore")[:1_000_000]
     except Exception:
         return url
 
@@ -415,9 +522,9 @@ def _resolve_media_url_remote(url: str, timeout: int = 15) -> str:
         base, folder = m.group(1), urllib.parse.unquote(m.group(2))
         list_url = f"{base}/files/api/list?p=" + urllib.parse.quote(folder, safe="/")
         try:
-            req = urllib.request.Request(list_url, headers=_UA_HEADERS)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            with MEDIA_CLIENT.get(list_url, headers=_UA_HEADERS, timeout=timeout) as resp:
+                resp.raise_for_status()
+                data = resp.json()
             for it in (data or {}).get("items", []) or []:
                 if it.get("type") != "file":
                     continue
@@ -730,7 +837,7 @@ def _ffprobe_source(source: str, timeout: int = 20) -> dict:
                      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
         args += [source]
-        proc = subprocess.run(args, capture_output=True, timeout=timeout + 10)
+        proc = subprocess.run(args, capture_output=True, timeout=timeout + 10, env=direct_media_environment())
         log_debug(f"ffprobe done in {time.time() - start_time:.2f}s, returncode={proc.returncode}")
         if proc.returncode != 0:
             log_debug(f"ffprobe stderr: {proc.stderr.decode(errors='ignore')[:300]}")
@@ -1016,7 +1123,7 @@ def _extract_subtitles_async(item_id: str, source: str, sub_streams: list, reque
         try:
             subprocess.run(
                 ["ffmpeg", "-y", "-i", source, "-map", f"0:{s['index']}", "-c:s", "srt", srt_path],
-                capture_output=True, timeout=120, check=True,
+                capture_output=True, timeout=120, check=True, env=direct_media_environment(),
             )
             if os.path.exists(srt_path) and os.path.getsize(srt_path) > 10:
                 sub_id = new_id()
@@ -1557,7 +1664,10 @@ def api_upload():
     cur = _current_room()
     if not cur:
         return jsonify({"error": "اتاق فعال نیست — اول وارد حساب شو"}), 400
-    if not _may_add(user):
+    denied = _deny_unless(user, permmod.PERM_ADD_VIDEO_FILE, "اجازه آپلود فایل را نداری")
+    if denied:
+        return denied
+    if not _quota_ok(user):
         return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     f = request.files.get("file")
     title = (request.form.get("title") or "").strip()
@@ -1601,43 +1711,170 @@ def api_upload():
 
 ARCHIVE_MAX_ADD = 60
 
-
-def _archive_err(e):
-    msg = getattr(e, "reason", None) or str(e)
+# Each archive failure gets its own HTTP status and its own operator-facing
+# message, so the UI can tell "sign in", "solve it yourself", "your session
+# died", "the proxy is down" and "the site refused us" apart instead of
+# collapsing everything into one generic archive error.
+_ARCHIVE_ERRORS = {
+    archive_scraper.KIND_AUTH_REQUIRED: (401, "برای دیدن لینک‌های دانلود باید وارد حساب دیجی‌موویز شوید"),
+    archive_scraper.KIND_MANUAL_CHALLENGE: (503, "دیجی‌موویز سؤال امنیتی می‌پرسد؛ نشست را کامل کنید و دوباره تلاش کنید"),
+    archive_scraper.KIND_SESSION_EXPIRED: (401, "نشست دیجی‌موویز منقضی شده؛ دوباره وارد شوید"),
+    archive_scraper.KIND_AUTH_UNAVAILABLE: (503, "ورود به آرشیو ممکن نشد؛ تنظیمات حساب را بررسی کنید"),
+    archive_scraper.KIND_PROXY_UNAVAILABLE: (502, "پروکسی آرشیو در دسترس نیست"),
+    archive_scraper.KIND_PROXY_CONFIG: (500, "آدرس پروکسی آرشیو نامعتبر است"),
+    archive_scraper.KIND_NETWORK_TIMEOUT: (504, "دیجی‌موویز پاسخ نداد؛ دوباره تلاش کنید"),
+    archive_scraper.KIND_HTTP_ERROR: (502, "دیجی‌موویز درخواست را رد کرد"),
+    archive_scraper.KIND_PARSE_ERROR: (502, "ساختار صفحه دیجی‌موویز تغییر کرده و قابل خواندن نبود"),
+}
+_ARCHIVE_DEFAULT_ERROR = (502, "خطا در ارتباط با آرشیو")
+def _archive_err(e, archive_request_id=None):
+    kind = getattr(e, "kind", None)
+    archive_event("api", "request_error", level=logging.ERROR, error_class=type(e).__name__,
+                  error=redact(str(e))[:300], classification=kind or "unexpected")
+    if isinstance(e, archive_scraper.ArchiveRequestError):
+        status, message = _ARCHIVE_ERRORS.get(e.kind, _ARCHIVE_DEFAULT_ERROR)
+        payload = {"error": message, "kind": e.kind, "detail": redact(str(e))[:300],
+                   "manual_session_helpful": False}
+        if archive_request_id:
+            payload["archive_request_id"] = archive_request_id
+        return jsonify(payload), status
     if "timed out" in str(e).lower() or "timeout" in str(e).lower():
-        return jsonify({"error": "سایت مبدأ پاسخ نداد؛ دوباره تلاش کن"}), 504
-    return jsonify({"error": "خطا در دریافت اطلاعات از سایت مبدأ"}), 502
+        status, message = 504, "سایت مبدأ پاسخ نداد؛ دوباره تلاش کنید"
+        kind = archive_scraper.KIND_NETWORK_TIMEOUT
+    else:
+        status, message = 502, "خطا در دریافت اطلاعات از سایت مبدأ"
+        kind = "unexpected"
+    payload = {"error": message, "kind": kind, "manual_session_helpful": False}
+    if archive_request_id:
+        payload["archive_request_id"] = archive_request_id
+    return jsonify(payload), status
 
 
 @app.route("/stream/api/archive/search", methods=["POST"])
 def api_archive_search():
+    user = _require_user()
+    denied = _deny_unless(user, permmod.PERM_SEARCH_ARCHIVE, "اجازه جستجوی آرشیو را نداری")
+    if denied:
+        return denied
+    if not _has_perm(user, permmod.PERM_ACCESS_ARCHIVE):
+        return jsonify({"error": "اجازه دسترسی به آرشیو را نداری"}), 403
     data = request.get_json(force=True, silent=True) or {}
-    q = (data.get("q") or "").strip()
-    sources = data.get("sources") or list(archive_scraper.SOURCES)
-    if not q:
-        return jsonify({"error": "عبارت جستجو خالی است"}), 400
-    if len(q) > 80:
-        return jsonify({"error": "عبارت جستجو خیلی طولانی است"}), 400
+    token = set_request_id(str(data.get("archive_request_id") or uuid.uuid4().hex[:12]))
+    started = ArchiveTimer()
     try:
-        results = archive_scraper.search(q, sources)
+        archive_event("api", "request_start", method=request.method, endpoint=request.path,
+                      filters={key: value for key, value in (data.get("filters") or data).items() if key not in {"password", "cookies"}})
+        filters = SearchFilters.from_mapping(data.get("filters") or data)
+        if not filters.query and not any((filters.director, filters.actors)):
+            raise FilterValidationError("عبارت جستجو خالی است")
+        results = archive_scraper.get_collector().search(filters)
+        archive_event("api", "request_complete", status=200, elapsed_ms=started.ms, result_count=len(results))
+        return jsonify({"results": results, "archive_request_id": data.get("archive_request_id")})
+    except FilterValidationError as e:
+        archive_event("api", "request_complete", status=400, elapsed_ms=started.ms, error=str(e))
+        return jsonify({"error": str(e), "kind": archive_scraper.KIND_VALIDATION, "detail": str(e),
+                        "manual_session_helpful": False,
+                        "archive_request_id": str(data.get("archive_request_id") or "")}), 400
+    except Exception as e:
+        archive_event("api", "request_complete", status=502, elapsed_ms=started.ms,
+                      error_class=type(e).__name__)
+        return _archive_err(e, data.get("archive_request_id"))
+    finally:
+        reset_request_id(token)
+
+
+@app.route("/stream/api/archive/filters", methods=["GET"])
+def api_archive_filters():
+    """UI option lists are derived from i.txt, never duplicated in JavaScript."""
+    user = _require_user()
+    denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
+    if denied:
+        return denied
+    return jsonify({"types": [{"value": "post", "label": "فیلم"}, {"value": "series", "label": "سریال"}],
+                    "countries": available_options().get("adv_country", ()),
+                    "age_ratings": available_options().get("adv_age", ()),
+                    "qualities": available_options().get("adv_quality", ()),
+                    "sorts": available_options().get("adv_order", ()),
+                    "year_min": 1888, "year_max": datetime.now().year,
+                    "rating_min": 0, "rating_max": 10, "rating_step": 0.1})
+
+
+@app.route("/stream/api/archive/auth/status", methods=["GET"])
+def api_archive_auth_status():
+    user = _require_user()
+    denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
+    if denied:
+        return denied
+    return jsonify(_archive_auth_status_payload(archive_scraper.get_collector().auth))
+
+
+def _archive_auth_status_payload(manager):
+    """Safe auth state for the Archive UI; never includes session material."""
+    state = manager.state.value
+    error = getattr(manager, "last_check_error", None)
+    messages = {
+        "AUTHENTICATED": "نشست بک‌اند دیجی‌موویز تأیید شده است.",
+        "AUTH_MANUAL_INTERVENTION_REQUIRED": "دیجی‌موویز در صفحه ورود سؤال امنیتی دارد. ورود را در مرورگر خود کامل کنید، سپس نشست بک‌اند را بررسی کنید.",
+        "AUTH_EXPIRED": "نشست بک‌اند دیجی‌موویز منقضی یا ایجاد نشده است.",
+        "AUTH_FAILED": "نشست بک‌اند دیجی‌موویز تأیید نشد.",
+        "AUTH_CHECKING": "در حال بررسی نشست بک‌اند دیجی‌موویز…",
+        "AUTHENTICATING": "در حال ورود بک‌اند به دیجی‌موویز…",
+    }
+    if error == "proxy_unavailable":
+        message, kind = "پروکسی آرشیو در دسترس نیست.", archive_scraper.KIND_PROXY_UNAVAILABLE
+    elif error == "network_timeout":
+        message, kind = "دیجی‌موویز پاسخ نداد؛ دوباره بررسی کنید.", archive_scraper.KIND_NETWORK_TIMEOUT
+    elif error:
+        message, kind = "بررسی نشست بک‌اند دیجی‌موویز ناموفق بود.", error
+    elif state == "AUTH_MANUAL_INTERVENTION_REQUIRED":
+        message, kind = messages[state], archive_scraper.KIND_MANUAL_CHALLENGE
+    elif state == "AUTHENTICATED":
+        message, kind = messages[state], "authenticated"
+    else:
+        message, kind = messages.get(state, "وضعیت نشست دیجی‌موویز نامشخص است."), state.lower()
+    return {"enabled": manager.settings.enabled, "state": state, "kind": kind,
+            "message": message, "proxy_configured": bool(manager.settings.http_proxy)}
+
+
+@app.route("/stream/api/archive/auth/check", methods=["POST"])
+def api_archive_auth_check():
+    """Explicitly verify the backend's own session; never imports browser cookies."""
+    user = _require_user()
+    denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
+    if denied:
+        return denied
+    token = set_request_id(str(uuid.uuid4().hex[:12]))
+    manager = archive_scraper.get_collector().auth
+    try:
+        archive_event("api", "auth_check_requested", method=request.method, endpoint=request.path)
+        manager.verify_existing_session()
     except Exception as e:
         return _archive_err(e)
-    return jsonify({"results": results})
+    finally:
+        reset_request_id(token)
+    return jsonify(_archive_auth_status_payload(manager))
 
 
 @app.route("/stream/api/archive/title", methods=["POST"])
 def api_archive_title():
+    user = _require_user()
+    denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
+    if denied:
+        return denied
     data = request.get_json(force=True, silent=True) or {}
     source = (data.get("source") or "").strip()
     url = (data.get("url") or "").strip()
     if source not in archive_scraper.SOURCES:
-        return jsonify({"error": "منبع ناشناخته است"}), 400
-    if not url.startswith((archive_scraper.DS_BASE, archive_scraper.DS_ALT_BASE, archive_scraper.AX_BASE)):
-        return jsonify({"error": "آدرس صفحه معتبر نیست"}), 400
+        return jsonify({"error": "منبع ناشناخته است", "kind": archive_scraper.KIND_VALIDATION}), 400
+    if not url.startswith(Config.ARCHIVE_BASE_URL + "/"):
+        return jsonify({"error": "آدرس صفحه معتبر نیست", "kind": archive_scraper.KIND_VALIDATION}), 400
+    token = set_request_id(str(data.get("archive_request_id") or uuid.uuid4().hex[:12]))
     try:
         info = archive_scraper.title(source, url)
     except Exception as e:
-        return _archive_err(e)
+        return _archive_err(e, data.get("archive_request_id"))
+    finally:
+        reset_request_id(token)
     return jsonify(info)
 
 
@@ -1645,13 +1882,9 @@ def api_archive_title():
 def api_archive_files():
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
-    if not url or "hollowofthealley" not in url:
-        return jsonify({"error": "آدرس پوشه دانلود معتبر نیست"}), 400
-    try:
-        files = archive_scraper.list_dir(url)
-    except Exception as e:
-        return _archive_err(e)
-    return jsonify({"files": files})
+    # CDN directory crawling belonged exclusively to the disabled animex
+    # collector and must never produce archive network requests.
+    return jsonify({"error": "این جمع‌آورنده غیرفعال است"}), 410
 
 
 def _add_url_item(url: str, title: str, name: str, room_code: str = None,
@@ -1696,9 +1929,13 @@ def api_add_many():
     if not _may_add(user):
         return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
     data = request.get_json(force=True, silent=True) or {}
+    token = set_request_id(str(data.get("archive_request_id") or uuid.uuid4().hex[:12]))
     items = data.get("items") or []
     name = (data.get("name") or "ناشناس").strip()
+    archive_event("playlist", "creation_start", item_count=len(items) if isinstance(items, list) else 0,
+                  proxy_enabled=False, direct_media_only=True)
     if not isinstance(items, list) or not items:
+        reset_request_id(token)
         return jsonify({"error": "هیچ قسمتی برای افزودن نیست"}), 400
     if len(items) > ARCHIVE_MAX_ADD:
         return jsonify({"error": f"بیش از حد مجاز است — حداکثر {ARCHIVE_MAX_ADD} قسمت در هر بار"}), 400
@@ -1752,7 +1989,10 @@ def api_add_many():
         return jsonify({"added": 0, "skipped": skipped, "dead": dead})
     broadcast_notify("playlist_add_many", name, room_code=cur.room_id,
                      title=first_title, count=added, skipped=skipped, dead=len(dead))
-    return jsonify({"added": added, "skipped": skipped, "dead": dead})
+    archive_event("playlist", "creation_complete", added=added, skipped=skipped, dead=len(dead),
+                  direct_media_only=True, proxy_enabled=False)
+    reset_request_id(token)
+    return jsonify({"added": added, "skipped": skipped, "dead": dead, "archive_request_id": data.get("archive_request_id")})
 
 
 _LANG_NAME = {
@@ -3848,6 +4088,14 @@ if __name__ == "__main__":
         log_debug(f"Boot cleanup of partial encodes failed: {e}")
     gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
+    if archive_scraper.enabled_collectors(Config):
+        archive_scraper.get_collector().auth.start()
+        log_debug("COLLECTOR_ENABLED name=digimoviez kind=movies")
+    else:
+        log_debug("COLLECTOR_DISABLED name=digimoviez")
+    log_debug("COLLECTOR_DISABLED name=series")
+    log_debug("COLLECTOR_DISABLED name=anime")
+    log_debug("COLLECTOR_DISABLED name=animation")
     from gevent import pywsgi
     from geventwebsocket.handler import WebSocketHandler
     server = pywsgi.WSGIServer(

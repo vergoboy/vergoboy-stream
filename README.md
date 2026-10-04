@@ -282,6 +282,14 @@ HTTPS/WSS domains and refuses missing secrets or LiveKit configuration.
 | STREAM_YTDLP_PROXY | socks5://127.0.0.1:1080 | Proxy for yt-dlp (YouTube imports) |
 | STREAM_YTDLP_COOKIES | /opt/stream/cookies.txt | Cookies file for yt-dlp |
 | STREAM_YTDLP_FORMAT | bestvideo[ext=mp4]+bestaudio[ext=m4a]/… | yt-dlp format selector |
+| STREAM_ARCHIVE_MOVIES_ENABLED | true | Enables the sole Digimoviez movie archive collector; series/anime/animation collectors remain disabled |
+| STREAM_ARCHIVE_AUTH_ENABLED | false | Enables the optional persistent Digimoviez session manager |
+| STREAM_ARCHIVE_HTTP_PROXY | http://127.0.0.1:10808 | Mandatory proxy for Digimoviez website/auth/search/detail traffic only; extracted media URLs explicitly bypass all proxy environment variables |
+| DIGIMOVIEZ_USERNAME / DIGIMOVIEZ_PASSWORD | unset | Archive credentials; never commit them |
+| STREAM_ARCHIVE_LOGIN_USERNAME_FIELD / _PASSWORD_FIELD | unset | Target login-form field names; explicitly configure after an authorized form inspection |
+| STREAM_ARCHIVE_AUTH_CHECK_INTERVAL | 120 | Seconds between archive session health checks |
+| STREAM_ARCHIVE_REQUEST_TIMEOUT | 30 | Authentication request timeout in seconds |
+| STREAM_ARCHIVE_LOGIN_RETRY_COUNT | 3 | Login retries with exponential backoff |
 | STREAM_LIVEKIT_URL / _ROOM / _TOKEN_TTL | URL unset in development | Voice-room connection; production requires an explicit reachable WSS URL |
 | STREAM_LIVEKIT_API_KEY / _API_SECRET | parsed from `/etc/livekit/config.yaml` | LiveKit token minting; never sent to clients |
 

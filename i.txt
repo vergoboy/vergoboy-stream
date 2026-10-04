@@ -1,0 +1,387 @@
+<form method="GET" action="https://digimoviez.com" class="field_holder_search">
+                <input type="hidden" name="advanced_search" id="advanced_search" value="on">
+                <div class="items_four">
+
+                    <div class="item_search_field change_type">
+                        <div class="label_search">نوع</div>
+                        <div class="toogle_type">
+                            <div class="item_toogle_type" data-posttype="post">فیلم</div>
+                            <div class="item_toogle_type" data-posttype="series">سریال</div>
+                            <input type="hidden" name="adv_post_type" value="">
+                        </div>
+                    </div>
+
+                    <div class="item_search_field">
+                        <label for="avg_director">کارگردان</label>
+                        <input type="text" name="avg_director" id="avg_director" value="" placeholder="Christopher Nolan">
+                    </div>
+
+                    <div class="item_search_field">
+                        <label for="adv_cast">بازیگران</label>
+                        <input type="text" name="adv_cast" id="adv_cast" value="" placeholder="leonardo dicaprio">
+                    </div>
+
+                    <div class="item_search_field search_release">
+                        <div class="release_item_search">
+                            <div class="label_search">سال ساخت</div>
+                            <div class="num_search"><span class="start_release" id="slider-range-value1">1888</span><span class="sep_release"> - </span><span class="end_release" id="slider-range-value2">2026</span></div>
+                            <input type="hidden" name="min_release" id="min_release" value="1888">
+                            <input type="hidden" name="max_release" id="max_release" value="2026">
+
+                        </div>
+                        <div class="slider_holder">
+                            <div id="slider_range" class="noUi-target noUi-rtl noUi-horizontal noUi-txt-dir-rtl"><div class="noUi-base"><div class="noUi-connects"><div class="noUi-connect" style="transform: translate(0%) scale(1);"></div></div><div class="noUi-origin" style="transform: translate(1000%); z-index: 5;"><div class="noUi-handle noUi-handle-lower" data-handle="0" tabindex="0" role="slider" aria-orientation="horizontal" aria-valuemin="1888.0" aria-valuemax="2026.0" aria-valuenow="1888.0" aria-valuetext="1888"><div class="noUi-touch-area"></div></div></div><div class="noUi-origin" style="transform: translate(0%); z-index: 4;"><div class="noUi-handle noUi-handle-upper" data-handle="1" tabindex="0" role="slider" aria-orientation="horizontal" aria-valuemin="1888.0" aria-valuemax="2026.0" aria-valuenow="2026.0" aria-valuetext="2026"><div class="noUi-touch-area"></div></div></div></div></div>
+                        </div>
+                    </div>
+
+                </div>
+                <div class="items_five">
+
+                    <div class="item_search_field">
+                        <label for="adv_country">کشور</label>
+                        <select name="adv_country" id="adv_country">
+                            <option value="0">همه</option>
+                                                                <option value="Albania">Albania</option>
+                                                                        <option value="Bangladesh">Bangladesh</option>
+                                                                        <option value="Belarus">Belarus</option>
+                                                                        <option value="Benin">Benin</option>
+                                                                        <option value="Bhutan">Bhutan</option>
+                                                                        <option value="Brunei">Brunei</option>
+                                                                        <option value="Côte d'Ivoire">Côte d'Ivoire</option>
+                                                                        <option value="Djibouti">Djibouti</option>
+                                                                        <option value="Ecuador">Ecuador</option>
+                                                                        <option value="Federal Republic of Yugoslavia">Federal Republic of Yugoslavia</option>
+                                                                        <option value="Gambia">Gambia</option>
+                                                                        <option value="Haiti">Haiti</option>
+                                                                        <option value="Iran">Iran</option>
+                                                                        <option value="Iran (Islamic Republic of)">Iran (Islamic Republic of)</option>
+                                                                        <option value="Isle of Man">Isle of Man</option>
+                                                                        <option value="korea">korea</option>
+                                                                        <option value="Kosovo">Kosovo</option>
+                                                                        <option value="Liechtenstein">Liechtenstein</option>
+                                                                        <option value="Maldives">Maldives</option>
+                                                                        <option value="Mali">Mali</option>
+                                                                        <option value="Martinique">Martinique</option>
+                                                                        <option value="Mauritius">Mauritius</option>
+                                                                        <option value="Mongolia">Mongolia</option>
+                                                                        <option value="myanmar">myanmar</option>
+                                                                        <option value="Namibia">Namibia</option>
+                                                                        <option value="North Macedonia">North Macedonia</option>
+                                                                        <option value="Occupied Palestinian Territory">Occupied Palestinian Territory</option>
+                                                                        <option value="peru">peru</option>
+                                                                        <option value="Republic of Korea">Republic of Korea</option>
+                                                                        <option value="Republic of North Macedonia">Republic of North Macedonia</option>
+                                                                        <option value="Saint Helena">Saint Helena</option>
+                                                                        <option value="Saint Kitts and Nevis">Saint Kitts and Nevis</option>
+                                                                        <option value="Senegal">Senegal</option>
+                                                                        <option value="syria">syria</option>
+                                                                        <option value="taiwan">taiwan</option>
+                                                                        <option value="آذربایجان">آذربایجان</option>
+                                                                        <option value="آرژانتین">آرژانتین</option>
+                                                                        <option value="آفریقای جنوبی">آفریقای جنوبی</option>
+                                                                        <option value="آلمان">آلمان</option>
+                                                                        <option value="آلمان غربی">آلمان غربی</option>
+                                                                        <option value="آمریکا">آمریکا</option>
+                                                                        <option value="آمریکا،انگلستان">آمریکا،انگلستان</option>
+                                                                        <option value="اتحاد جماهیر شوروی">اتحاد جماهیر شوروی</option>
+                                                                        <option value="اتریش">اتریش</option>
+                                                                        <option value="اردن">اردن</option>
+                                                                        <option value="اروگوئه">اروگوئه</option>
+                                                                        <option value="اسپانیا">اسپانیا</option>
+                                                                        <option value="استرالیا">استرالیا</option>
+                                                                        <option value="استونی">استونی</option>
+                                                                        <option value="اسرائيل">اسرائيل</option>
+                                                                        <option value="اسلواکی">اسلواکی</option>
+                                                                        <option value="اسلوونی">اسلوونی</option>
+                                                                        <option value="الجزایر">الجزایر</option>
+                                                                        <option value="امارات متحده عربی">امارات متحده عربی</option>
+                                                                        <option value="اندونزی">اندونزی</option>
+                                                                        <option value="انگلستان">انگلستان</option>
+                                                                        <option value="اوکراین">اوکراین</option>
+                                                                        <option value="ایالات متحده آمریکا">ایالات متحده آمریکا</option>
+                                                                        <option value="ایالات متحده امریکا">ایالات متحده امریکا</option>
+                                                                        <option value="ایتالیا">ایتالیا</option>
+                                                                        <option value="ایران">ایران</option>
+                                                                        <option value="ایرلند">ایرلند</option>
+                                                                        <option value="ایسلند">ایسلند</option>
+                                                                        <option value="باهاما">باهاما</option>
+                                                                        <option value="بحرین">بحرین</option>
+                                                                        <option value="برزیل">برزیل</option>
+                                                                        <option value="بلژیک">بلژیک</option>
+                                                                        <option value="بلغارستان">بلغارستان</option>
+                                                                        <option value="بوسنی و هرزگوین">بوسنی و هرزگوین</option>
+                                                                        <option value="بولیوی">بولیوی</option>
+                                                                        <option value="پاراگوئه">پاراگوئه</option>
+                                                                        <option value="پاکستان">پاکستان</option>
+                                                                        <option value="پاناما">پاناما</option>
+                                                                        <option value="پرتغال">پرتغال</option>
+                                                                        <option value="پورتوریکو">پورتوریکو</option>
+                                                                        <option value="تایلند">تایلند</option>
+                                                                        <option value="تایوان">تایوان</option>
+                                                                        <option value="ترکیه">ترکیه</option>
+                                                                        <option value="تونس">تونس</option>
+                                                                        <option value="جزایر کیمن">جزایر کیمن</option>
+                                                                        <option value="جمهوری اسلامی ایران">جمهوری اسلامی ایران</option>
+                                                                        <option value="جمهوری چک">جمهوری چک</option>
+                                                                        <option value="جمهوری دومینیکن">جمهوری دومینیکن</option>
+                                                                        <option value="جمهوری مقدونیه">جمهوری مقدونیه</option>
+                                                                        <option value="جمهوری موریس">جمهوری موریس</option>
+                                                                        <option value="چک">چک</option>
+                                                                        <option value="چکسلواکی">چکسلواکی</option>
+                                                                        <option value="چين">چين</option>
+                                                                        <option value="چین">چین</option>
+                                                                        <option value="دانمارک">دانمارک</option>
+                                                                        <option value="روسیه">روسیه</option>
+                                                                        <option value="رومانی">رومانی</option>
+                                                                        <option value="زامبیا">زامبیا</option>
+                                                                        <option value="ژاپن">ژاپن</option>
+                                                                        <option value="سری لانکا">سری لانکا</option>
+                                                                        <option value="سنگاپور">سنگاپور</option>
+                                                                        <option value="سنگال">سنگال</option>
+                                                                        <option value="سوئد">سوئد</option>
+                                                                        <option value="سوئیس">سوئیس</option>
+                                                                        <option value="سوییس">سوییس</option>
+                                                                        <option value="شیلی">شیلی</option>
+                                                                        <option value="صربستان">صربستان</option>
+                                                                        <option value="عربستان">عربستان</option>
+                                                                        <option value="عربستان سعودی">عربستان سعودی</option>
+                                                                        <option value="غنا">غنا</option>
+                                                                        <option value="فرانسه">فرانسه</option>
+                                                                        <option value="فلسطین">فلسطین</option>
+                                                                        <option value="فنلاند">فنلاند</option>
+                                                                        <option value="فیلیپین">فیلیپین</option>
+                                                                        <option value="قبرس">قبرس</option>
+                                                                        <option value="قزاقستان">قزاقستان</option>
+                                                                        <option value="قطر">قطر</option>
+                                                                        <option value="کاستاریکا">کاستاریکا</option>
+                                                                        <option value="کامبوج">کامبوج</option>
+                                                                        <option value="کانادا">کانادا</option>
+                                                                        <option value="کره جنوبی">کره جنوبی</option>
+                                                                        <option value="کرواسی">کرواسی</option>
+                                                                        <option value="کلمبیا">کلمبیا</option>
+                                                                        <option value="کنیا">کنیا</option>
+                                                                        <option value="گرجستان">گرجستان</option>
+                                                                        <option value="گواتمالا">گواتمالا</option>
+                                                                        <option value="گینه بیسائو">گینه بیسائو</option>
+                                                                        <option value="لبنان">لبنان</option>
+                                                                        <option value="لتونی">لتونی</option>
+                                                                        <option value="لهستان">لهستان</option>
+                                                                        <option value="لوکزامبورگ">لوکزامبورگ</option>
+                                                                        <option value="لیتوانی">لیتوانی</option>
+                                                                        <option value="ماکائو">ماکائو</option>
+                                                                        <option value="مالاوی">مالاوی</option>
+                                                                        <option value="مالت">مالت</option>
+                                                                        <option value="مالزی">مالزی</option>
+                                                                        <option value="مجارستان">مجارستان</option>
+                                                                        <option value="مراکش">مراکش</option>
+                                                                        <option value="مصر">مصر</option>
+                                                                        <option value="مکزیک">مکزیک</option>
+                                                                        <option value="موناکو">موناکو</option>
+                                                                        <option value="نپال">نپال</option>
+                                                                        <option value="نروژ">نروژ</option>
+                                                                        <option value="نیجریه">نیجریه</option>
+                                                                        <option value="نیوزلند">نیوزلند</option>
+                                                                        <option value="هلند">هلند</option>
+                                                                        <option value="هندوستان">هندوستان</option>
+                                                                        <option value="هنگ کنگ">هنگ کنگ</option>
+                                                                        <option value="ونزوئلا">ونزوئلا</option>
+                                                                        <option value="ویتنام">ویتنام</option>
+                                                                        <option value="یوگسلاوی">یوگسلاوی</option>
+                                                                        <option value="یونان">یونان</option>
+                                                            </select>
+                    </div>
+
+
+                    <div class="item_search_field">
+                                                <label for="adv_age">رده سنی</label>
+                        <select name="adv_age" id="adv_age">
+                            <option value="0">همه</option>
+                            <option>PG-13</option>
+                            <option>TV-PG</option>
+                            <option>R</option>
+                            <option>P</option>
+                            <option>C16</option>
+                            <option>E10+</option>
+                            <option>C18</option>
+                            <option>TV-14</option>
+                            <option>PG</option>
+                        </select>
+                    </div>
+                    <div class="item_search_field">
+                        <label for="adv_genre">ژانر</label>
+                        <select name="adv_genre" id="adv_genre">
+                            <option value="0">همه</option>
+                                                                <option value="درام">درام</option>
+                                                                        <option value="هیجان انگیز">هیجان انگیز</option>
+                                                                        <option value="کمدی">کمدی</option>
+                                                                        <option value="اکشن">اکشن</option>
+                                                                        <option value="ماجراجویی">ماجراجویی</option>
+                                                                        <option value="جنایی">جنایی</option>
+                                                                        <option value="ترسناک">ترسناک</option>
+                                                                        <option value="عاشقانه">عاشقانه</option>
+                                                                        <option value="رازآلود">رازآلود</option>
+                                                                        <option value="فانتزی">فانتزی</option>
+                                                                        <option value="علمی تخیلی">علمی تخیلی</option>
+                                                                        <option value="انیمیشن">انیمیشن</option>
+                                                                        <option value="خانوادگی">خانوادگی</option>
+                                                                        <option value="بیوگرافی">بیوگرافی</option>
+                                                                        <option value="تاریخی">تاریخی</option>
+                                                                        <option value="جنگی">جنگی</option>
+                                                                        <option value="آهنگ">آهنگ</option>
+                                                                        <option value="ورزشی">ورزشی</option>
+                                                                        <option value="موزیکال">موزیکال</option>
+                                                                        <option value="رمانتیک">رمانتیک</option>
+                                                                        <option value="مستند">مستند</option>
+                                                                        <option value="وسترن">وسترن</option>
+                                                                        <option value="موسیقی">موسیقی</option>
+                                                                        <option value="معمایی">معمایی</option>
+                                                                        <option value="کوتاه">کوتاه</option>
+                                                                        <option value="film-noir">film-noir</option>
+                                                                        <option value="فیلم کوتاه">فیلم کوتاه</option>
+                                                                        <option value="استندآپ کمدی">استندآپ کمدی</option>
+                                                                        <option value="انیمیشن کوتاه">انیمیشن کوتاه</option>
+                                                                        <option value="reality-tv">reality-tv</option>
+                                                                        <option value="Talk-Show">Talk-Show</option>
+                                                                        <option value="اجتماعی">اجتماعی</option>
+                                                            </select>
+                    </div>
+                                        <div class="item_search_field search_rate">
+                        <div class="rate_item_search">
+                            <div class="label_search">امتیاز</div>
+                            <div class="num_search"><span class="start_rate" id="slider-range-rate1">1.0</span><span class="sep_release"> - </span><span class="rate_release" id="slider-range-rate2">10.0</span></div>
+                            <input type="hidden" name="min_rate" id="min_rate" value="1.0">
+                            <input type="hidden" name="max_rate" id="max_rate" value="10.0">
+                        </div>
+                        <div class="slider_holder">
+                            <div id="slider_range_rate" class="noUi-target noUi-rtl noUi-horizontal noUi-txt-dir-rtl"><div class="noUi-base"><div class="noUi-connects"><div class="noUi-connect" style="transform: translate(0%) scale(1);"></div></div><div class="noUi-origin" style="transform: translate(1000%); z-index: 5;"><div class="noUi-handle noUi-handle-lower" data-handle="0" tabindex="0" role="slider" aria-orientation="horizontal" aria-valuemin="1.0" aria-valuemax="10.0" aria-valuenow="1.0" aria-valuetext="1.0"><div class="noUi-touch-area"></div></div></div><div class="noUi-origin" style="transform: translate(0%); z-index: 4;"><div class="noUi-handle noUi-handle-upper" data-handle="1" tabindex="0" role="slider" aria-orientation="horizontal" aria-valuemin="1.0" aria-valuemax="10.0" aria-valuenow="10.0" aria-valuetext="10.0"><div class="noUi-touch-area"></div></div></div></div></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="items_five">
+                    <div class="item_search_field">
+                                                <label for="adv_quality">کیفیت</label>
+                        <select name="adv_quality" id="adv_quality">
+                            <option value="0">همه</option>
+                                                                <option value="2160p 4K 10bit BluRay x265 SoftSub">2160p 4K 10bit BluRay x265 SoftSub</option>
+                                                                        <option value="2160p 4K 10bit WEB-DL x265 SoftSub">2160p 4K 10bit WEB-DL x265 SoftSub</option>
+                                                                        <option value="1080p Full HD BluRay SoftSub">1080p Full HD BluRay SoftSub</option>
+                                                                        <option value="1080p Full HD WEB-DL SoftSub">1080p Full HD WEB-DL SoftSub</option>
+                                                                        <option value="1080p 3D HSBS 6CH BluRay">1080p 3D HSBS 6CH BluRay</option>
+                                                                        <option value="1080p 3D 10bit HSBS BluRay x265">1080p 3D 10bit HSBS BluRay x265</option>
+                                                                        <option value="1080p 3D HSBS 6CH BluRay SoftSub">1080p 3D HSBS 6CH BluRay SoftSub</option>
+                                                                        <option value="1080p BluRay SoftSub">1080p BluRay SoftSub</option>
+                                                                        <option value="1080p BluRay">1080p BluRay</option>
+                                                                        <option value="1080p WEB-DL SoftSub">1080p WEB-DL SoftSub</option>
+                                                                        <option value="1080p WEB-DL">1080p WEB-DL</option>
+                                                                        <option value="1080p WEBRip SoftSub">1080p WEBRip SoftSub</option>
+                                                                        <option value="1080p HDTV SoftSub">1080p HDTV SoftSub</option>
+                                                                        <option value="1080p HDCAM SoftSub">1080p HDCAM SoftSub</option>
+                                                                        <option value="1080p 10bit BluRay x265 SoftSub">1080p 10bit BluRay x265 SoftSub</option>
+                                                                        <option value="1080p BluRay x265 SoftSub">1080p BluRay x265 SoftSub</option>
+                                                                        <option value="1080p 10bit WEB-DL x265 SoftSub">1080p 10bit WEB-DL x265 SoftSub</option>
+                                                                        <option value="1080p WEB-DL x265 SoftSub">1080p WEB-DL x265 SoftSub</option>
+                                                                        <option value="1080p 10bit WEBRip x265 SoftSub">1080p 10bit WEBRip x265 SoftSub</option>
+                                                                        <option value="1080p WEBRip x265 SoftSub">1080p WEBRip x265 SoftSub</option>
+                                                                        <option value="720p BluRay HardSub">720p BluRay HardSub</option>
+                                                                        <option value="720p BluRay SoftSub">720p BluRay SoftSub</option>
+                                                                        <option value="720p BluRay">720p BluRay</option>
+                                                                        <option value="720p WEB-DL HardSub">720p WEB-DL HardSub</option>
+                                                                        <option value="720p WEB-DL SoftSub">720p WEB-DL SoftSub</option>
+                                                                        <option value="720p WEB-DL">720p WEB-DL</option>
+                                                                        <option value="720p WEBRip SoftSub">720p WEBRip SoftSub</option>
+                                                                        <option value="720p HDTV SoftSub">720p HDTV SoftSub</option>
+                                                                        <option value="720p HDCAM SoftSub">720p HDCAM SoftSub</option>
+                                                                        <option value="720p 10bit BluRay x265 SoftSub">720p 10bit BluRay x265 SoftSub</option>
+                                                                        <option value="720p BluRay x265 SoftSub">720p BluRay x265 SoftSub</option>
+                                                                        <option value="720p BluRay x265">720p BluRay x265</option>
+                                                                        <option value="720p 10bit WEB-DL x265 SoftSub">720p 10bit WEB-DL x265 SoftSub</option>
+                                                                        <option value="720p WEB-DL x265 SoftSub">720p WEB-DL x265 SoftSub</option>
+                                                                        <option value="720p WEB-DL x265">720p WEB-DL x265</option>
+                                                                        <option value="720p 10bit WEBRip x265 SoftSub">720p 10bit WEBRip x265 SoftSub</option>
+                                                                        <option value="720p WEBRip x265 SoftSub">720p WEBRip x265 SoftSub</option>
+                                                                        <option value="720p HDTV x265 SoftSub">720p HDTV x265 SoftSub</option>
+                                                                        <option value="480p BluRay HardSub">480p BluRay HardSub</option>
+                                                                        <option value="480p BluRay SoftSub">480p BluRay SoftSub</option>
+                                                                        <option value="480p BluRay">480p BluRay</option>
+                                                                        <option value="480p WEB-DL HardSub">480p WEB-DL HardSub</option>
+                                                                        <option value="480p WEB-DL SoftSub">480p WEB-DL SoftSub</option>
+                                                                        <option value="480p WEB-DL">480p WEB-DL</option>
+                                                                        <option value="480p WEBRip SoftSub">480p WEBRip SoftSub</option>
+                                                                        <option value="480p HDTV SoftSub">480p HDTV SoftSub</option>
+                                                            </select>
+                    </div>
+                    <div class="item_search_field">
+                                                <label for="adv_network">شبکه</label>
+                        <select name="adv_network" id="adv_network">
+                            <option value="0">همه</option>
+                                                                <option value="AMC">AMC</option>
+                                                                        <option value="Apple TV Plus">Apple TV Plus</option>
+                                                                        <option value="ABC">ABC</option>
+                                                                        <option value="Adult Swim">Adult Swim</option>
+                                                                        <option value="Amazon Prime">Amazon Prime</option>
+                                                                        <option value="BBC">BBC</option>
+                                                                        <option value="Canal+">Canal+</option>
+                                                                        <option value="CBS">CBS</option>
+                                                                        <option value="CineMax">CineMax</option>
+                                                                        <option value="CW">CW</option>
+                                                                        <option value="DC Universe">DC Universe</option>
+                                                                        <option value="Disney+">Disney+</option>
+                                                                        <option value="Discovery">Discovery</option>
+                                                                        <option value="Epix">Epix</option>
+                                                                        <option value="FOX">FOX</option>
+                                                                        <option value="Freeform">Freeform</option>
+                                                                        <option value="FX">FX</option>
+                                                                        <option value="HBO">HBO</option>
+                                                                        <option value="History Channel">History Channel</option>
+                                                                        <option value="Hulu">Hulu</option>
+                                                                        <option value="ITV">ITV</option>
+                                                                        <option value="MTV">MTV</option>
+                                                                        <option value="National Geographic">National Geographic</option>
+                                                                        <option value="NBC">NBC</option>
+                                                                        <option value="Netflix">Netflix</option>
+                                                                        <option value="Paramount TV">Paramount TV</option>
+                                                                        <option value="Peacock">Peacock</option>
+                                                                        <option value="Quibi">Quibi</option>
+                                                                        <option value="show time">show time</option>
+                                                                        <option value="Sky 1">Sky 1</option>
+                                                                        <option value="Sky Atlantic">Sky Atlantic</option>
+                                                                        <option value="Starz">Starz</option>
+                                                                        <option value="syfy">syfy</option>
+                                                                        <option value="TBS">TBS</option>
+                                                                        <option value="TNT">TNT</option>
+                                                                        <option value="tvN">tvN</option>
+                                                                        <option value="USA">USA</option>
+                                                                        <option value="YouTube">YouTube</option>
+                                                            </select>
+                    </div>
+                    <div class="item_search_field">
+                                                <label for="adv_order">ترتیب</label>
+                        <select name="adv_order" id="adv_order">
+                                                                <option value="publish_date" selected="selected">جدیدترین‌ها</option>
+                                                                        <option value="imdb_rate">بالاترین امتیاز imdb</option>
+                                                                        <option value="vote_count">بیشترین رأی imdb</option>
+                                                                        <option value="critics_rate_movie">بالاترین امتیاز منتقدین</option>
+                                                                        <option value="comment_count">بیشترین نظرات</option>
+                                                            </select>
+
+                    </div>
+                    <div class="item_search_field"></div>
+                </div>
+
+                <div class="items_bottom">
+
+                    <div class="item_search_bottom">
+
+                        <div class="item_checkbox " data-valcheck="1"><div class="text_holder">دوبله فارسی</div><div class="icon_holder"><svg class="icon icon_check"><use xlink:href="#toggle_off_icon"></use></svg></div><input type="checkbox" class="hidden" value="1" name="adv_dubbed" id="adv_dubbed"></div>
+                        <div class="item_checkbox " data-valcheck="1"><div class="text_holder">سانسور شده</div><div class="icon_holder"><svg class="icon icon_check"><use xlink:href="#toggle_off_icon"></use></svg></div><input type="checkbox" class="hidden" value="1" name="adv_censorship" id="adv_censorship"></div>
+                        <div class="item_checkbox " data-valcheck="1"><div class="text_holder">زیرنویس</div><div class="icon_holder"><svg class="icon icon_check"><use xlink:href="#toggle_off_icon"></use></svg></div><input type="checkbox" class="hidden" value="1" name="adv_subtitle" id="adv_subtitle"></div>
+                        <div class="item_checkbox " data-valcheck="1"><div class="text_holder">پخش آنلاین</div><div class="icon_holder"><svg class="icon icon_check"><use xlink:href="#toggle_off_icon"></use></svg></div><input type="checkbox" class="hidden" value="1" name="adv_online" id="adv_online"></div>
+                    </div>
+
+                    <div class="item_search_bottom">
+                        <button type="submit"><svg class="icon icon_search"><use xlink:href="#search"></use></svg> جستجو</button>
+                    </div>
+
+                </div>
+
+            </form>

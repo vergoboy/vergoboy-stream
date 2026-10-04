@@ -17,6 +17,18 @@ import time
 import urllib.parse
 import urllib.request
 
+import logging
+import random
+from dataclasses import dataclass
+from typing import Any
+
+import requests
+
+from archive_auth import ArchiveAuthManager, AuthSettings
+from archive_filters import SearchFilters, build_search_request
+from archive_network import ArchiveProxyConfigurationError
+from archive_logging import event as archive_event, redact, safe_target, timer as ArchiveTimer
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -34,7 +46,34 @@ DS_RETRIES = 2
 AX_BASE = "https://animex.click"
 CDN_BASE = "https://csdl1.hollowofthealley.space"
 
-SOURCES = ("donyayeserial", "animex")
+# The old sources remain implemented below for backwards-compatible parsing,
+# but are deliberately not active collectors.  A single movie collector keeps
+# archive jobs, requests and writes in scope.
+SOURCES = ("digimoviez",)
+DIGIMOVIEZ_BASE = "https://digimoviez.com"
+LOG = logging.getLogger("archive.collector")
+
+# Error kinds.  These cross the API boundary verbatim so the UI can tell an
+# expired session from a challenge it must not attempt to solve, from a dead
+# proxy, from Digimoviez rejecting the request.
+KIND_AUTH_REQUIRED = "auth_required"
+KIND_MANUAL_CHALLENGE = "manual_challenge_required"
+KIND_SESSION_EXPIRED = "session_expired"
+KIND_AUTH_UNAVAILABLE = "auth_unavailable"
+KIND_HTTP_ERROR = "http_error"
+KIND_PROXY_UNAVAILABLE = "proxy_unavailable"
+KIND_NETWORK_TIMEOUT = "network_timeout"
+KIND_NETWORK_ERROR = "network_error"
+KIND_PROXY_CONFIG = "proxy_configuration"
+KIND_PARSE_ERROR = "parse_error"
+KIND_VALIDATION = "validation"
+
+# Verified against the live theme: one result card per ``div.item_def_loop``
+# and page links inside ``div.alphapageNavi`` as ``a.page-numbers``.
+CARD_CLASS = "item_def_loop"
+PAGINATION_CLASS = "alphapageNavi"
+MAX_SEARCH_PAGES = 3
+_TITLE_PREFIX = re.compile(r"^دانلود\s+(?:فیلم|سریال)\s+")
 
 _MEDIA_EXT = (".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov", ".mp3", ".mka", ".aac")
 _VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov")
@@ -407,21 +446,267 @@ def _ep_num(label):
 
 
 def search(q, sources=None):
-    """Runs the enabled source searches and merges the results."""
-    if sources is None:
-        sources = list(SOURCES)
-    sources = [s for s in sources if s in SOURCES]
-    out = []
-    if "donyayeserial" in sources:
-        out.extend(search_donyayeserial(q))
-    if "animex" in sources:
-        out.extend(search_animex(q))
-    return out
+    """Compatibility entry point for the movie-only collector."""
+    return get_collector().search(SearchFilters.from_mapping({"query": q}))
 
 
 def title(source, url):
-    if source == "donyayeserial":
-        return parse_donyayeserial_title(url)
-    if source == "animex":
-        return parse_animex_title(url)
+    if source == "digimoviez":
+        return get_collector().title(url)
     raise ValueError("منبع ناشناخته")
+
+
+class ArchiveRequestError(RuntimeError):
+    """A classified, non-secret error suitable for the API layer."""
+    def __init__(self, kind: str, message: str = "archive request failed") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def _absolute(base: str, href: str) -> str:
+    return urllib.parse.urljoin(base, html.unescape(href))
+
+
+def _iter_blocks(page: str, marker: str):
+    """Yield the markup of each element that opens with ``marker``.
+
+    Slicing between consecutive occurrences of the marker avoids trying to
+    balance ``</div>`` tags by hand, which real WordPress markup frequently
+    makes impossible.
+    """
+    starts = [match.start() for match in re.finditer(re.escape(marker), page)]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(page)
+        yield page[start:end]
+
+
+def _field(pattern: str, block: str, group: int = 1) -> str | None:
+    match = re.search(pattern, block, re.I | re.S)
+    return _clean(match.group(group)) if match else None
+
+
+def _parse_search_card(block: str, base_url: str) -> dict[str, Any] | None:
+    """Read one real ``item_def_loop`` result card."""
+    anchor = re.search(
+        r'<div[^>]+class="[^"]*title_h[^"]*"[^>]*>\s*<h2[^>]*>\s*'
+        r'<a[^>]+title="([^"]*)"[^>]+href="([^"]+)"',
+        block, re.I | re.S)
+    if not anchor:
+        anchor = re.search(
+            r'<div[^>]+class="[^"]*inner_cover[^"]*"[^>]*>\s*'
+            r'<a[^>]+title="([^"]*)"[^>]+href="([^"]+)"',
+            block, re.I | re.S)
+    if not anchor:
+        return None
+    title = _TITLE_PREFIX.sub("", _clean(anchor.group(1)))
+    url = _absolute(base_url, anchor.group(2))
+    if not title or not url.startswith(base_url + "/"):
+        return None
+    poster = _field(r'<div[^>]+class="[^"]*inner_cover[^"]*"[^>]*>.*?<img[^>]+src="([^"]+)"', block)
+    return {
+        "source": "digimoviez", "kind": "movie", "title": title, "url": url,
+        "poster": _absolute(base_url, poster) if poster else None,
+        "rating": _field(r'<div[^>]+class="[^"]*rate_num[^"]*"[^>]*>\s*<strong>([\d.]+)</strong>', block),
+        "year": _field(r'\b((?:19|20)\d{2})\b', title),
+    }
+
+
+def _next_page_url(page: str, base_url: str) -> str | None:
+    """Return the numbered ``/page/N/`` successor, or None at the last page.
+
+    ``rel="next"`` is absent on this theme, so the successor is resolved from
+    the ``alphapageNavi`` block.  The current page is marked
+    ``aria-current="page"``; only that page's successor is followed, which also
+    avoids the theme's links to the far end of the archive.
+    """
+    for block in _iter_blocks(page, f'class="{PAGINATION_CLASS}"'):
+        current = re.search(r'<span[^>]*aria-current="page"[^>]*>(\d+)</span>', block, re.I)
+        if not current:
+            continue
+        wanted = str(int(current.group(1)) + 1)
+        link = re.search(rf'<a[^>]+class="[^"]*page-numbers[^"]*"[^>]+href="([^"]+)"[^>]*>\s*{wanted}\s*</a>',
+                         block, re.I)
+        if link:
+            candidate = _absolute(base_url, html.unescape(link.group(1))).split("#", 1)[0]
+            return candidate if candidate.startswith(base_url) else None
+    return None
+
+
+def _auth_failure(auth: ArchiveAuthManager) -> tuple[str, str]:
+    """Map an unusable authentication state onto a distinct, actionable kind.
+
+    Keeping these apart is what lets the UI show the manual authentication
+    panel only for a real challenge instead of for every failed login.
+    """
+    from archive_auth import AuthState
+
+    state = auth.state
+    if state is AuthState.AUTH_MANUAL_INTERVENTION_REQUIRED:
+        return KIND_MANUAL_CHALLENGE, "Digimoviez requires a manual security challenge"
+    if state is AuthState.AUTH_EXPIRED:
+        return KIND_SESSION_EXPIRED, "the Digimoviez session has expired"
+    return KIND_AUTH_UNAVAILABLE, "archive authentication is unavailable"
+
+
+class DigimoviezMovieCollector:
+    """The only enabled collector; it performs no background crawl jobs."""
+    name = "digimoviez"
+
+    def __init__(self, base_url: str, auth: ArchiveAuthManager, *, connect_timeout: float,
+                 read_timeout: float, total_timeout: float, retries: int) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.auth = auth
+        self.connect_timeout, self.read_timeout = connect_timeout, read_timeout
+        self.total_timeout, self.retries = total_timeout, retries
+        self.session = auth.session
+
+    def _request(self, request: dict[str, Any]) -> str:
+        deadline = time.monotonic() + self.total_timeout
+        for attempt in range(self.retries + 1):
+            started = ArchiveTimer()
+            error_class = ""
+            error_message = ""
+            archive_event("proxy", "request_start", method=request["method"], attempt=attempt + 1,
+                          proxy=self.auth.settings.http_proxy, **safe_target(request["url"]))
+            if self.auth.settings.enabled and not self.auth.ensure_authenticated():
+                raise ArchiveRequestError(*_auth_failure(self.auth))
+            try:
+                response = self.session.request(request["method"], request["url"],
+                    timeout=(self.connect_timeout, self.read_timeout), headers={
+                        "User-Agent": UA, "Accept-Language": "fa,en;q=0.8",
+                    })
+                if response.status_code >= 500:
+                    raise requests.HTTPError(response.status_code)
+                if response.status_code >= 400:
+                    raise ArchiveRequestError(KIND_HTTP_ERROR, f"archive returned HTTP {response.status_code}")
+                archive_event("proxy", "request_complete", status=response.status_code, elapsed_ms=started.ms,
+                              content_type=response.headers.get("Content-Type", ""), response_bytes=len(response.content),
+                              redirects=[safe_target(h.url) for h in response.history], **safe_target(response.url))
+                return response.text
+            except ArchiveRequestError:
+                raise
+            except requests.exceptions.ProxyError:
+                kind = KIND_PROXY_UNAVAILABLE
+                error_class, error_message = "ProxyError", "configured archive proxy is unavailable"
+            except requests.Timeout:
+                kind = KIND_NETWORK_TIMEOUT
+                error_class, error_message = "Timeout", "archive request timed out"
+            except requests.RequestException as exc:
+                kind = KIND_NETWORK_ERROR
+                # Transport messages can embed the proxy URL, so they are
+                # redacted before they reach a log line.
+                error_class, error_message = type(exc).__name__, redact(str(exc))[:200]
+                LOG.info("REQUEST_FAILED kind=%s error=%s", kind, type(exc).__name)
+            archive_event("proxy", "request_error", level=logging.WARNING, classification=kind,
+                          error_class=error_class, error=error_message, elapsed_ms=started.ms,
+                          retry=attempt + 1, **safe_target(request["url"]))
+            if attempt >= self.retries or time.monotonic() >= deadline:
+                raise ArchiveRequestError(kind)
+            delay = min(8, 2 ** attempt) + random.uniform(0, 0.25)
+            LOG.info("REQUEST_RETRY kind=%s attempt=%s", kind, attempt + 1)
+            time.sleep(min(delay, max(0, deadline - time.monotonic())))
+        raise ArchiveRequestError(KIND_NETWORK_ERROR)
+
+    def search(self, filters: SearchFilters, max_pages: int = MAX_SEARCH_PAGES) -> list[dict[str, Any]]:
+        request = build_search_request(filters, self.base_url)
+        archive_event("filters", "search_request", filters=request["params"], **safe_target(request["url"]))
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        pages = 0
+        url = request["url"]
+        while url and pages < max(1, max_pages):
+            page = self._request({"method": "GET", "url": url})
+            pages += 1
+            for block in _iter_blocks(page, CARD_CLASS):
+                card = _parse_search_card(block, self.base_url)
+                if card and card["url"] not in seen:
+                    seen.add(card["url"])
+                    results.append(card)
+            url = _next_page_url(page, self.base_url)
+        archive_event("collector", "search_parsed", result_count=len(results), pages_fetched=pages,
+                      titles=[result["title"][:80] for result in results[:3]],
+                      pagination="bounded" if pages > 1 else "single_page")
+        return results
+
+    def title(self, url: str) -> dict[str, Any]:
+        if not url.startswith(self.base_url + "/"):
+            raise ValueError("invalid archive URL")
+        archive_event("collector", "detail_start", **safe_target(url))
+        page = self._request({"method": "GET", "url": url})
+        title = _field(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', page) or url
+        poster = _field(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', page)
+        groups, gated = self._parse_download_groups(page, url)
+        if gated:
+            # Digimoviez replaces the download rows with a "sign in" notice for
+            # guests.  Reporting that as "no episodes" would silently look like
+            # a broken parser, so it is surfaced as its own condition.
+            archive_event("collector", "detail_gated", classification=KIND_AUTH_REQUIRED, **safe_target(url))
+            raise ArchiveRequestError(KIND_AUTH_REQUIRED, "Digimoviez requires an authenticated session for download links")
+        if not groups:
+            archive_event("collector", "detail_parsed", parsed="og:title" in page, group_count=0,
+                          media_url_count=0, level=logging.WARNING,
+                          note="no download rows matched; the theme layout may have changed")
+        media_count = sum(len(group["episodes"]) for group in groups)
+        archive_event("collector", "detail_parsed", parsed=bool(poster is not None), group_count=len(groups),
+                      media_url_count=media_count)
+        return {"source": self.name, "title": title, "poster": poster, "kind": "movie", "groups": groups}
+
+    def _parse_download_groups(self, page: str, page_url: str) -> tuple[list[dict[str, Any]], bool]:
+        """Read the real ``dllink_holder_ham`` quality groups.
+
+        Returns the groups plus a flag that is set when the page shows the
+        guest "sign in to download" notice instead of download rows.
+        """
+        groups: list[dict[str, Any]] = []
+        gated = False
+        for block in _iter_blocks(page, 'class="dllink_holder_ham'):
+            body_match = re.search(r'<div[^>]+class="[^"]*body_dllink_movies[^"]*"[^>]*>(.*)', block, re.I | re.S)
+            if not body_match:
+                continue
+            body = body_match.group(1)
+            if re.search(r'class="[^"]*guest_line_comments[^"]*"|data-popup="login_box"', body, re.I):
+                gated = True
+                continue
+            label = _field(r'<div[^>]+class="[^"]*title_dllink[^"]*"[^>]*>.*?'
+                           r'<div[^>]+class="[^"]*right_title[^"]*"[^>]*>(.*?)</div>', block) or "دانلود"
+            episodes: list[dict[str, Any]] = []
+            for index, anchor in enumerate(
+                    re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', body, re.I | re.S), 1):
+                href = _absolute(page_url, anchor.group(1))
+                text = _clean(anchor.group(2))
+                episodes.append({"num": _ep_num(text) or index, "url": href, "label": text})
+            for direct, text in _media_links(body):
+                episodes.append({"num": _ep_num(text) or len(episodes) + 1, "url": direct, "label": text})
+            if episodes:
+                groups.append({"label": label, "season": None, "quality": label, "version": None,
+                               "size": None, "episodes": episodes})
+        return groups, gated
+
+
+_collector: DigimoviezMovieCollector | None = None
+
+
+def enabled_collectors(config: Any) -> tuple[str, ...]:
+    """Explicit registry: disabled categories never instantiate a worker."""
+    return ("digimoviez",) if config.ARCHIVE_MOVIES_ENABLED else ()
+
+
+def get_collector() -> DigimoviezMovieCollector:
+    global _collector
+    if _collector is None:
+        from config import Config
+        if not enabled_collectors(Config):
+            raise RuntimeError("COLLECTOR_DISABLED name=digimoviez")
+        settings = AuthSettings(Config.ARCHIVE_AUTH_ENABLED, Config.ARCHIVE_LOGIN_URL,
+            Config.ARCHIVE_AUTH_CHECK_URL, Config.ARCHIVE_USERNAME, Config.ARCHIVE_PASSWORD,
+            __import__("pathlib").Path(Config.ARCHIVE_SESSION_FILE),
+            Config.ARCHIVE_HTTP_PROXY, Config.ARCHIVE_LOGIN_USERNAME_FIELD, Config.ARCHIVE_LOGIN_PASSWORD_FIELD,
+            Config.ARCHIVE_AUTH_CHECK_INTERVAL, Config.ARCHIVE_REQUEST_TIMEOUT, Config.ARCHIVE_LOGIN_RETRY_COUNT)
+        try:
+            auth = ArchiveAuthManager(settings)
+        except ArchiveProxyConfigurationError as exc:
+            raise ArchiveRequestError("proxy_configuration", str(exc)) from exc
+        _collector = DigimoviezMovieCollector(Config.ARCHIVE_BASE_URL, auth,
+            connect_timeout=Config.ARCHIVE_CONNECT_TIMEOUT, read_timeout=Config.ARCHIVE_READ_TIMEOUT,
+            total_timeout=Config.ARCHIVE_TOTAL_TIMEOUT, retries=Config.ARCHIVE_REQUEST_RETRY_COUNT)
+    return _collector

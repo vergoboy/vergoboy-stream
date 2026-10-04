@@ -36,6 +36,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from archive_network import direct_media_environment
+
 from .errors import EncodeError, ErrorKind, classify_failure
 
 log = logging.getLogger(__name__)
@@ -496,6 +498,7 @@ class EncodeRunner:
                 argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=direct_media_environment(),
                 # start_new_session => setsid => its own process group, which is
                 # what makes the group kill above safe.
                 start_new_session=True,
