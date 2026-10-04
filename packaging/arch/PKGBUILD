@@ -14,8 +14,7 @@ sha256sums=('SKIP')
 build() {
   cd "${srcdir}/${pkgname}/webapp"
   npm ci
-  npx tsc --noEmit
-  NEXT_SKIP_TYPECHECK=1 NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN=https://vergoboy.ir \
+  NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN=https://vergoboy.ir \
     npm run tauri -- build --no-bundle
 }
 

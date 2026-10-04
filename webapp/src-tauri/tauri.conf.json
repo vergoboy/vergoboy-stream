@@ -7,7 +7,7 @@
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000/",
     "beforeDevCommand": "NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN=https://vergoboy.ir npm run dev",
-    "beforeBuildCommand": "NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN=https://vergoboy.ir npm run build"
+    "beforeBuildCommand": "NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN=https://vergoboy.ir npm run build:tauri"
   },
   "app": {
     "windows": [

@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
+    "build:tauri": "npx tsc --noEmit && NEXT_SKIP_TYPECHECK=1 npm run build",
     "start": "next start",
     "lint": "eslint",
     "tauri": "tauri"
