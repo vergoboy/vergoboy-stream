@@ -1,7 +1,7 @@
 """Pluggable security-challenge boundary for archive authentication.
 
-The shipped handler deliberately only detects a challenge and requests manual
-completion.  It never calculates, fills, or submits a third-party answer.
+``ManualOnlyChallengeHandler`` only detects a challenge and never answers it;
+``AutomaticChallengeHandler`` (archive_challenge_auto) adds strict solving.
 
 Detection is *structural*, not a substring search.  Digimoviez renders a dormant
 login/register popup (with its security-question form) into every page, so a
@@ -11,9 +11,12 @@ markup is therefore only honoured when it appears outside such a popup.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:  # pragma: no cover
+    from archive_login_form import LoginForm
 
 
 @dataclass(frozen=True)
@@ -22,13 +25,36 @@ class ChallengeInspection:
     kind: str | None = None
 
 
+class UnsolvableChallenge(RuntimeError):
+    """The challenge cannot be answered safely; ``reason`` is a non-secret code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class ChallengeSolution:
+    """An answer bound to the exact form (key + question) it was computed from."""
+    key: str
+    question: str
+    answer_field: str
+    answer: str = field(repr=False)  # a secret: excluded from repr/logs
+    kind: str = ""
+
+
 class ChallengeHandler(Protocol):
     def inspect(self, html: str) -> ChallengeInspection: ...
+    def solve(self, form: "LoginForm") -> ChallengeSolution: ...
 
 
 def _normalize(text: str) -> str:
     """Fold Arabic letter variants so Persian markup matches the markers."""
     return text.replace("ي", "ی").replace("ك", "ک").replace("‌", " ").lower()
+
+
+_VOID_TAGS = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+                        "source", "track", "wbr"})
 
 
 class _OutsidePopup(HTMLParser):
@@ -47,7 +73,10 @@ class _OutsidePopup(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {key.lower(): (value or "") for key, value in attrs}
         if self._depth:
-            self._depth += 1
+            # Void elements (<input>, <br>, ...) never get an end tag; counting
+            # them would leave the depth stuck and hide the rest of the page.
+            if tag not in _VOID_TAGS:
+                self._depth += 1
             return
         identity = attributes.get("id", "").lower()
         classes = attributes.get("class", "").lower().split()
@@ -67,7 +96,7 @@ class _OutsidePopup(HTMLParser):
         self._parts.append(f"<{tag} {' '.join(f'{k}={v}' for k, v in attributes.items())}>")
 
     def handle_endtag(self, tag: str) -> None:
-        if self._depth:
+        if self._depth and tag not in _VOID_TAGS:
             self._depth -= 1
 
     def handle_data(self, data: str) -> None:
@@ -108,6 +137,9 @@ class ManualOnlyChallengeHandler:
             if marker in markup:
                 return ChallengeInspection(True, "security_question")
         return ChallengeInspection(False)
+
+    def solve(self, form: "LoginForm") -> ChallengeSolution:
+        raise UnsolvableChallenge("manual_only")
 
     def _outside_popups(self, html: str) -> str:
         parser = _OutsidePopup(self.POPUP_CONTAINERS)

@@ -33,6 +33,16 @@ class Session:
         return result
 
 
+def login_page(question="۶ در ۸", key="k", extra=""):
+    """Realistic login markup: password input, hidden CSRF fields, question + key."""
+    return ('<form class="dashboard_form"><input type="hidden" name="login_security_str" value="n">'
+            '<input type="hidden" name="_wp_http_referer" value="/login/">' + extra +
+            '<input type="text" name="username"><input type="password" name="password">'
+            + (f'<div><input type="hidden" name="secureq_key" value="{key}"><span>سوال امنیتی: {question}</span></div>'
+               '<input type="number" name="secureq_ans" id="secureq_ans">' if question else "") +
+            '<button type="submit" name="loginkon">ورود</button></form>')
+
+
 def settings(tmp_path: Path) -> AuthSettings:
     return AuthSettings(True, "https://example.test/login/", "https://example.test/account/",
         "user", "password", tmp_path / "cookies.json", "http://127.0.0.1:10808", "username", "password", retry_count=2)
@@ -46,7 +56,7 @@ def test_valid_session_is_untouched(tmp_path):
 
 
 def test_expired_session_reauthenticates_and_persists(tmp_path):
-    session = Session([Response("https://example.test/login/"), Response(), Response()], [Response()])
+    session = Session([Response("https://example.test/login/"), Response(text=login_page(question=None)), Response()], [Response()])
     session.cookies.set("session", "opaque")
     manager = ArchiveAuthManager(settings(tmp_path), session=session, sleep=lambda _: None)
     assert manager.ensure_authenticated() is True
@@ -63,7 +73,7 @@ def test_timeout_is_not_treated_as_logout(tmp_path):
 
 def test_security_challenge_requires_manual_intervention(tmp_path):
     # Supported security question is auto-solved
-    session = Session([Response("https://example.test/login/"), Response(text='<input name="secureq_ans"><input name="secureq_key" value="k"><input name="login_security_str" value="n"><input name="_wp_http_referer" value="/login/"> سوال امنیتی: ۶ در ۸'), Response()], [Response()])
+    session = Session([Response("https://example.test/login/"), Response(text=login_page()), Response()], [Response()])
     session.cookies.set("session", "opaque")
     manager = ArchiveAuthManager(settings(tmp_path), session=session, sleep=lambda _: None)
     assert manager.ensure_authenticated() is True
@@ -72,7 +82,7 @@ def test_security_challenge_requires_manual_intervention(tmp_path):
 
 def test_manual_challenge_state_does_not_restart_login_on_each_archive_request(tmp_path):
     # Auto-solve: first call solves and submits; second call verifies session
-    session = Session([Response("https://example.test/login/"), Response(text='<input name="secureq_ans"><input name="secureq_key" value="k"><input name="login_security_str" value="n"><input name="_wp_http_referer" value="/login/"> سوال امنیتی: ۶ در ۸'), Response(), Response()], [Response()])
+    session = Session([Response("https://example.test/login/"), Response(text=login_page()), Response(), Response()], [Response()])
     session.cookies.set("session", "opaque")
     manager = ArchiveAuthManager(settings(tmp_path), session=session, sleep=lambda _: None)
     assert manager.ensure_authenticated() is True
@@ -107,17 +117,19 @@ def test_missing_credentials_never_posts(tmp_path):
 
 
 def test_login_submits_configured_fields_and_hidden_csrf_data(tmp_path):
-    html = '<input type="hidden" name="login_security_str" value="nonce"><input type="hidden" name="_wp_http_referer" value="/account/login/">'
+    html = ('<form><input type="hidden" name="login_security_str" value="nonce"><input type="hidden" name="_wp_http_referer" value="/account/login/">'
+            '<input name="username"><input type="password" name="password"></form>')
     session = Session([Response("https://example.test/login/"), Response(text=html), Response()], [Response()])
     session.cookies.set("session", "opaque")
     manager = ArchiveAuthManager(settings(tmp_path), session=session, sleep=lambda _: None)
     assert manager.ensure_authenticated() is True
     assert session.post_data == [{"login_security_str": "nonce", "_wp_http_referer": "/account/login/", "username": "user", "password": "password"}]
+    assert session.posts == 1
 
 
 def test_challenge_is_not_submitted_and_session_is_preserved(tmp_path):
     # Solvable challenge is submitted with computed answer
-    session = Session([Response("https://example.test/login/"), Response(text='<input name="secureq_ans"><input name="secureq_key" value="k"><input name="login_security_str" value="n"><input name="_wp_http_referer" value="/login/"> سوال امنیتی: ۶ در ۸'), Response()], [Response()])
+    session = Session([Response("https://example.test/login/"), Response(text=login_page()), Response()], [Response()])
     session.cookies.set("existing", "cookie")
     manager = ArchiveAuthManager(settings(tmp_path), session=session, sleep=lambda _: None)
     assert manager.ensure_authenticated() is True
