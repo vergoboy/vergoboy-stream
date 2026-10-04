@@ -19,7 +19,8 @@ build() {
   # Git worktree. Use this checkout's freshly built, independently typechecked
   # static export, while Tauri/Rust is still built from the source worktree.
   cp -a "${startdir}/../../webapp/out" ./out
-  npm run tauri -- build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
+  env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+    npm run tauri -- build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
 }
 
 package() {
