@@ -1,21 +1,23 @@
+"""Challenge handler that answers only the supported security-question formats."""
 from __future__ import annotations
 
-from archive_challenge import ChallengeInspection, ChallengeHandler, ManualOnlyChallengeHandler, _normalize
-from archive_question import solve_security_question
+from archive_challenge import ChallengeSolution, ManualOnlyChallengeHandler, UnsolvableChallenge
+from archive_login_form import LoginForm
+from archive_question import UnsupportedQuestion, solve_question_text
 
 
-class AutomaticChallengeHandler(ChallengeHandler):
-    def __init__(self) -> None:
-        self._base = ManualOnlyChallengeHandler()
+class AutomaticChallengeHandler(ManualOnlyChallengeHandler):
+    """Detection is inherited; ``solve`` is bound to the form it was given."""
 
-    def inspect(self, html: str) -> ChallengeInspection:
-        return self._base.inspect(html)
-
-    def solve(self, html: str) -> dict[str, str]:
-        answer = solve_security_question(html or "")
-        if not answer:
-            return {}
-        return {"secureq_ans": answer}
-    def can_auto_solve(self, inspection) -> bool:
-        from archive_challenge import ChallengeInspection
-        return inspection.present and inspection.kind == "security_question"
+    def solve(self, form: LoginForm) -> ChallengeSolution:
+        if not form.secureq_key:
+            raise UnsolvableChallenge("no_key")
+        if not form.question:
+            raise UnsolvableChallenge("no_question")
+        if not form.answer_field:
+            raise UnsolvableChallenge("no_answer_field")
+        try:
+            solved = solve_question_text(form.question)
+        except UnsupportedQuestion as exc:
+            raise UnsolvableChallenge(exc.reason) from None
+        return ChallengeSolution(form.secureq_key, form.question, form.answer_field, solved.answer, solved.kind)
