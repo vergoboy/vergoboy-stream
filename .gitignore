@@ -40,6 +40,11 @@ webapp-out/
 .config/
 .stream_db.env
 
+# makepkg work directories and the local bare source repository
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/vergoboy-stream/
+
 # Server runtime — never commit
 cookies.txt
 hls-live/
