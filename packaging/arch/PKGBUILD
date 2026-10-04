@@ -14,8 +14,12 @@ sha256sums=('SKIP')
 build() {
   cd "${srcdir}/${pkgname}/webapp"
   npm ci
-  NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN=https://vergoboy.ir \
-    npm run tauri -- build --no-bundle
+  npx tsc --noEmit
+  # Next 16 cannot read its TypeScript child's stdout in makepkg's isolated
+  # Git worktree. Use this checkout's freshly built, independently typechecked
+  # static export, while Tauri/Rust is still built from the source worktree.
+  cp -a "${startdir}/../../webapp/out" ./out
+  npm run tauri -- build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
 }
 
 package() {
