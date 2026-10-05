@@ -6,6 +6,12 @@ pkgdesc='Private cinema watch-party desktop client'
 arch=('x86_64')
 url='https://vergoboy.ir'
 license=('custom')
+# No -debug split. A Rust binary has no separate debug ELF for makepkg to split
+# off, so the generated -debug package carries no symbols and every build prints
+#   Error while writing index for '.../usr/bin/vergoboy-stream': No debugging symbols
+# The message looks like a build failure but concerns an artifact nobody consumes,
+# and it ships a misleadingly named package next to the real one.
+options=('!debug')
 depends=('webkit2gtk-4.1' 'gtk3' 'librsvg' 'openssl' 'libayatana-appindicator')
 makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file' 'patchelf')
 source=("${pkgname}::git+file://${startdir}/../..")

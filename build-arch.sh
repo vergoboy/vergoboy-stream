@@ -130,6 +130,22 @@ if [ "$REBUILD_UI" -eq 1 ] || [ ! -f "$OUTDIR/index.html" ]; then
   ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
 else
   say "reusing webapp/out (pass --rebuild-ui to force a fresh export)"
+  # out/ is gitignored, so it is never sourced from the clone -- PKGBUILD copies
+  # it from this working tree. Nothing in the build links it to the frontend
+  # source, so a stale export is packaged silently and the only symptom is a UI
+  # that does not match the code. Warn when the source has moved on.
+  stale="$(find "$ROOT/webapp" -type f \
+    \( -name '*.tsx' -o -name '*.ts' -o -name '*.css' -o -name 'next.config.*' \) \
+    -newer "$OUTDIR/index.html" \
+    -not -path '*/node_modules/*' -not -path '*/.next/*' \
+    -not -path '*/out/*' -not -path '*/target/*' -not -name 'next-env.d.ts' \
+    -printf '%P\n' 2>/dev/null | head -5 || true)"
+  if [ -n "$stale" ]; then
+    warn "webapp/out is older than the frontend source; the package would ship a"
+    warn "stale UI. Rebuilding now (same as --rebuild-ui)."
+    printf '%s\n' "$stale" | sed 's/^/      /' >&2
+    ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
+  fi
 fi
 
 # Tauri validates the icon formats itself, but the failure mode is an unhelpful
