@@ -1,6 +1,7 @@
 # ADR 0002 — Play media in mpv as a separate process (spike + license decision)
 
-- **Status:** Accepted — 2026-10-05 (phase 1, part A)
+- **Status:** Accepted — 2026-10-05 (phase 1, part A); implemented by
+  `webapp/src-tauri/crates/mpv_controller` (part B)
 - **Complements:** ADR 0001 (staging of the migration)
 - **Evidence:** `docs/spike/mpv-ipc-observations.json` — regenerate with
   `venv/bin/python scripts/mpv_spike.py` (exit 0 = every check passed)
@@ -77,3 +78,27 @@ libmpv.**
 - Controls are limited to what IPC exposes; anything the UI needs later must be a
   property or command, not shared memory.
 - The web client keeps the HLS path untouched (ADR 0001 phase boundary).
+
+## Part B implementation record — `mpv_controller` (2026-10-05)
+
+`cargo test -p mpv_controller` is the executable evidence: 21 tests (18 unit, 3 against
+a real headless mpv — local-file roundtrip, crash/restart/give-up without zombies,
+buffering edges over a throttled HTTP source; auto-skip when mpv/ffmpeg are absent).
+
+Five wire behaviours were **measured** against mpv v0.41 while building the crate,
+because the design depends on them:
+
+| Measured behaviour | Consequence in `mpv.rs` |
+| --- | --- |
+| `observe_property` emits the current value once on subscription | the first `pause` / `paused-for-cache` / `eof-reached` change per connection is discarded (`initial_props`) — otherwise the port starts with a phantom `Buffering(false)` and `UserPause` |
+| the `seek` event has **no** `reason` field: command and keypress seeks are byte-identical | own seeks are counted (`own_seeks`); only unmatched seeks become `UserSeek`, with the position fetched synchronously |
+| the `pause` echo to `set_property` races its reply (arrives before *or* after) | echoes are recognised by value against the last write (`own_pause`), never by timing |
+| EOF can be signalled twice (`eof-reached` **and** `end-file reason=eof`) | `Ended` is latched per run of the file and cleared by load/seek — a UI must not advance the playlist twice |
+| `time-pos` changes at frame rate when observed | it is deliberately not observed; position is fetched on demand (`get_pos`, user-seek) |
+
+Two more lessons are baked into tests: the IPC socket is **newline-delimited** JSON (a
+request without a trailing `\n` is never answered — caught by the scripted-server test
+before it could hang against real mpv), and crash recovery is bounded
+(`DEFAULT_MAX_RESTARTS = 3`, resume at last known position) with the child killed *and
+reaped* on give-up — the socket usually dies before the process does, so the budget
+can be reached while the corpse still needs a `wait()`.

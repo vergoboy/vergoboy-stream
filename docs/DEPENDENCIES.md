@@ -14,4 +14,4 @@ that do not exist yet).
 | **Not used** | `libmpv.so` (LGPL-2.1+) is *not* linked; see ADR 0002. |
 | **Distribution** | User/distro-installed, like ffmpeg. Absent → native client shows "install mpv"; web client unaffected. |
 | **Detection** | `mpv_controller` resolves `$STREAM_MPV_BIN`, then `PATH`; spawn failure is an `Error` port event, never a crash. |
-| **Evidence** | `docs/spike/mpv-ipc-observations.json`, ADR 0002. |
+| **Evidence** | `docs/spike/mpv-ipc-observations.json`, ADR 0002 (incl. part-B wire-behaviour record), `cargo test -p mpv_controller` (21 tests, 3 of them against a real headless mpv). |
