@@ -13,7 +13,7 @@ PYTEST ?= -q
 
 .DEFAULT_GOAL := help
 .PHONY: help test test-unit test-socket test-integration test-fast coverage \
-        fixtures-argv fixtures-probe verify-argv clean
+        fixtures-argv fixtures-probe verify-argv clean package-arch
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -54,6 +54,13 @@ verify-argv: ## Fail if any ffmpeg argv golden is stale (does not rewrite them)
 
 fixtures-probe: ## Re-capture the ffprobe JSON fixtures into tests/fixtures/probe/
 	$(PYTHON) scripts/capture_probe_fixtures.py
+
+## ── packaging ────────────────────────────────────────────────────────────────
+#
+# The full option set lives in the script: ./build-arch.sh --help
+
+package-arch: ## Build the Arch/pacman .pkg.tar.zst (clean makepkg run)
+	./build-arch.sh
 
 ## ── housekeeping ─────────────────────────────────────────────────────────────
 

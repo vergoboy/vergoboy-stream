@@ -71,6 +71,13 @@ KIND_VALIDATION = "validation"
 # Verified against the live theme: one result card per ``div.item_def_loop``
 # and page links inside ``div.alphapageNavi`` as ``a.page-numbers``.
 CARD_CLASS = "item_def_loop"
+# The live theme emits ``item_dubbled`` for page cards and ``item_small_loop``
+# for the AJAX search results; ``item_def_loop`` is the older markup and is still
+# accepted so already-stored fixtures keep parsing.
+CARD_CLASSES = ("item_small_loop", "item_dubbled", CARD_CLASS)
+# Free-text search is answered by this endpoint; the ``?s=`` page renders a
+# generic "dubbed" list and does not filter by the query at all.
+SEARCH_AJAX_ACTION = "ajaxsearch"
 PAGINATION_CLASS = "alphapageNavi"
 MAX_SEARCH_PAGES = 3
 _TITLE_PREFIX = re.compile(r"^دانلود\s+(?:فیلم|سریال)\s+")
@@ -485,30 +492,68 @@ def _field(pattern: str, block: str, group: int = 1) -> str | None:
     return _clean(match.group(group)) if match else None
 
 
+def _card_blocks(page: str) -> list[str]:
+    """One block per result card, tolerating any of the theme class names."""
+    for marker in CARD_CLASSES:
+        blocks = list(_iter_blocks(page, f'class="{marker}'))
+        if blocks:
+            return blocks
+    return []
+
+
+def _unwrap_ajax_payload(text: str) -> str:
+    """WordPress hands some AJAX actions back as a JSON string of HTML.
+
+    The payload is a quoted, escaped document, so the card markup only becomes
+    greppable after one ``json.loads``.  ``0``/``-1`` mean "no results" and an
+    unparsable body is returned untouched rather than raising.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(('"', "'")):
+        return text
+    try:
+        decoded = json.loads(stripped)
+    except ValueError:
+        return text
+    return decoded if isinstance(decoded, str) else text
+
+
 def _parse_search_card(block: str, base_url: str) -> dict[str, Any] | None:
-    """Read one real ``item_def_loop`` result card."""
-    anchor = re.search(
-        r'<div[^>]+class="[^"]*title_h[^"]*"[^>]*>\s*<h2[^>]*>\s*'
-        r'<a[^>]+title="([^"]*)"[^>]+href="([^"]+)"',
-        block, re.I | re.S)
-    if not anchor:
-        anchor = re.search(
-            r'<div[^>]+class="[^"]*inner_cover[^"]*"[^>]*>\s*'
-            r'<a[^>]+title="([^"]*)"[^>]+href="([^"]+)"',
-            block, re.I | re.S)
-    if not anchor:
-        return None
-    title = _TITLE_PREFIX.sub("", _clean(anchor.group(1)))
-    url = _absolute(base_url, anchor.group(2))
-    if not title or not url.startswith(base_url + "/"):
-        return None
-    poster = _field(r'<div[^>]+class="[^"]*inner_cover[^"]*"[^>]*>.*?<img[^>]+src="([^"]+)"', block)
-    return {
-        "source": "digimoviez", "kind": "movie", "title": title, "url": url,
-        "poster": _absolute(base_url, poster) if poster else None,
-        "rating": _field(r'<div[^>]+class="[^"]*rate_num[^"]*"[^>]*>\s*<strong>([\d.]+)</strong>', block),
-        "year": _field(r'\b((?:19|20)\d{2})\b', title),
-    }
+    """Read one result card.
+
+    The link is located on its own instead of through a heading wrapper: the
+    live theme wraps the poster *and* the heading in the same anchor
+    (``<a title=… href=…><div class=cover>…</div><h2>Title</h2></a>``), while the
+    older markup kept them as siblings under ``title_h``/``inner_cover``.
+    """
+    for anchor in re.finditer(r"(?is)<a\b([^>]*)>(.*?)</a>", block):
+        attrs, inner = anchor.group(1), anchor.group(2)
+        href = _field(r'\bhref="([^"]+)"', attrs)
+        if not href:
+            continue
+        url = _absolute(base_url, href)
+        if not url.startswith(base_url + "/"):
+            continue
+        # Movie permalinks are a single root-level slug ("/birth-2004/"); this
+        # skips the section/nav links that share the card block's tail.
+        if url[len(base_url) + 1:].count("/") != 1:
+            continue
+        heading = re.search(r"(?is)<h2[^>]*>(.*?)</h2>", inner)
+        title = ""
+        if heading:
+            title = _TITLE_PREFIX.sub("", _clean(re.sub(r"(?s)<[^>]+>", " ", heading.group(1))))
+        if not title:
+            title = _TITLE_PREFIX.sub("", _field(r'\btitle="([^"]*)"', attrs) or "")
+        if not title:
+            continue
+        poster = _field(r'<div[^>]+class="[^"]*(?:inner_cover|\bcover\b)[^"]*"[^>]*>.*?<img[^>]+src="([^"]+)"', block)
+        return {
+            "source": "digimoviez", "kind": "movie", "title": title, "url": url,
+            "poster": _absolute(base_url, poster) if poster else None,
+            "rating": _field(r'<div[^>]+class="[^"]*(?:rate_num|imdb_rate_dubbled)[^"]*"[^>]*>\s*<strong>([\d.]+)</strong>', block),
+            "year": _field(r'\b((?:19|20)\d{2})\b', title),
+        }
+    return None
 
 
 def _next_page_url(page: str, base_url: str) -> str | None:
@@ -548,6 +593,14 @@ def _auth_failure(auth: ArchiveAuthManager) -> tuple[str, str]:
     return KIND_AUTH_UNAVAILABLE, "archive authentication is unavailable"
 
 
+def _cards_from(page: str, base_url: str, seen: set[str], results: list[dict[str, Any]]) -> None:
+    for block in _card_blocks(page):
+        card = _parse_search_card(block, base_url)
+        if card and card["url"] not in seen:
+            seen.add(card["url"])
+            results.append(card)
+
+
 class DigimoviezMovieCollector:
     """The only enabled collector; it performs no background crawl jobs."""
     name = "digimoviez"
@@ -574,7 +627,9 @@ class DigimoviezMovieCollector:
                 response = self.session.request(request["method"], request["url"],
                     timeout=(self.connect_timeout, self.read_timeout), headers={
                         "User-Agent": UA, "Accept-Language": "fa,en;q=0.8",
-                    })
+                        **({"X-Requested-With": "XMLHttpRequest",
+                            "Referer": self.base_url + "/"} if request.get("ajax") else {}),
+                    }, data=request.get("data"))
                 if response.status_code >= 500:
                     raise requests.HTTPError(response.status_code)
                 if response.status_code >= 400:
@@ -607,21 +662,38 @@ class DigimoviezMovieCollector:
             time.sleep(min(delay, max(0, deadline - time.monotonic())))
         raise ArchiveRequestError(KIND_NETWORK_ERROR)
 
+    def _search_ajax(self, query: str, kind: str | None) -> list[dict[str, Any]]:
+        """Free-text search through the endpoint the site's own header uses.
+
+        The ``?s=`` page is not an alternative: it renders the same "dubbed"
+        listing whatever the query is, so filtering has to go through AJAX.
+        """
+        payload = self._request({"method": "POST", "url": f"{self.base_url}/wp-admin/admin-ajax.php",
+                                 "ajax": True,
+                                 "data": {"action": SEARCH_AJAX_ACTION,
+                                          "type": kind or "movie", "s": query}})
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        _cards_from(_unwrap_ajax_payload(payload), self.base_url, seen, results)
+        return results
+
     def search(self, filters: SearchFilters, max_pages: int = MAX_SEARCH_PAGES) -> list[dict[str, Any]]:
         request = build_search_request(filters, self.base_url)
         archive_event("filters", "search_request", filters=request["params"], **safe_target(request["url"]))
         results: list[dict[str, Any]] = []
         seen: set[str] = set()
         pages = 0
-        url = request["url"]
+        if filters.query:
+            # A text query is answered by AJAX; the page path below would only
+            # add the unfiltered listing.
+            results = self._search_ajax(filters.query, filters.type)
+            seen.update(card["url"] for card in results)
+            pages = 1
+        url = request["url"] if not filters.query else None
         while url and pages < max(1, max_pages):
             page = self._request({"method": "GET", "url": url})
             pages += 1
-            for block in _iter_blocks(page, CARD_CLASS):
-                card = _parse_search_card(block, self.base_url)
-                if card and card["url"] not in seen:
-                    seen.add(card["url"])
-                    results.append(card)
+            _cards_from(page, self.base_url, seen, results)
             url = _next_page_url(page, self.base_url)
         archive_event("collector", "search_parsed", result_count=len(results), pages_fetched=pages,
                       titles=[result["title"][:80] for result in results[:3]],
@@ -701,7 +773,9 @@ def get_collector() -> DigimoviezMovieCollector:
             Config.ARCHIVE_AUTH_CHECK_URL, Config.ARCHIVE_USERNAME, Config.ARCHIVE_PASSWORD,
             __import__("pathlib").Path(Config.ARCHIVE_SESSION_FILE),
             Config.ARCHIVE_HTTP_PROXY, Config.ARCHIVE_LOGIN_USERNAME_FIELD, Config.ARCHIVE_LOGIN_PASSWORD_FIELD,
-            Config.ARCHIVE_AUTH_CHECK_INTERVAL, Config.ARCHIVE_REQUEST_TIMEOUT, Config.ARCHIVE_LOGIN_RETRY_COUNT)
+            Config.ARCHIVE_AUTH_CHECK_INTERVAL, Config.ARCHIVE_REQUEST_TIMEOUT, Config.ARCHIVE_LOGIN_RETRY_COUNT,
+            lag_threshold=Config.ARCHIVE_LAG_THRESHOLD, max_lag_streak=Config.ARCHIVE_MAX_LAG_STREAK,
+            lag_backoff_max=Config.ARCHIVE_LAG_BACKOFF_MAX)
         try:
             auth = ArchiveAuthManager(settings)
         except ArchiveProxyConfigurationError as exc:

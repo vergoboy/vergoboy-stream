@@ -59,3 +59,7 @@ app.py.save
 .coverage
 .coverage.*
 .pytest_cache/
+
+# Locally built packages and the API-origin override written by build-arch.sh
+packaging/arch/*.pkg.tar.zst
+packaging/arch/.api-origin

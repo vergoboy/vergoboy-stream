@@ -328,13 +328,91 @@ cmd_status() {
   if port_busy 7880; then say "LiveKit   running :7880"; else warn "LiveKit   stopped"; fi
 }
 
+# Must match app_logging._default_log_dir() and log_dir() in lib.rs.
+APP_LOG_DIR="${STREAM_LOG_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/vergoboy-stream/logs}"
+
+# Crash summary across every process that can die: Python backend, the Rust
+# host and the webview all write into data/logs, so one command shows all of it.
+# Coredumps are listed too, because the two crashes found so far were a
+# WebKitWebProcess segfault and a Mesa/EGL abort that left nothing in any app log.
+cmd_crash() {
+  local found=0 f
+  say "== crash log =="
+  if [ -s "$APP_LOG_DIR/crash.log" ]; then
+    found=1
+    tail -n 120 "$APP_LOG_DIR/crash.log"
+  else
+    warn "no crashes recorded ($APP_LOG_DIR/crash.log)"
+  fi
+
+  say "== recent errors =="
+  if [ -s "$APP_LOG_DIR/error.log" ]; then
+    found=1
+    tail -n 40 "$APP_LOG_DIR/error.log"
+  else
+    warn "no errors recorded ($APP_LOG_DIR/error.log)"
+  fi
+
+  say "== log files =="
+  for f in app.log error.log crash.log; do
+    if [ -f "$APP_LOG_DIR/$f" ]; then
+      say "$(printf '%-12s %8s bytes  %s' "$f" "$(wc -c <"$APP_LOG_DIR/$f")" "$(date -r "$APP_LOG_DIR/$f" '+%Y-%m-%d %H:%M:%S')")"
+    fi
+  done
+
+  say "== recent system coredumps =="
+  # `info --no-pager` on a machine with no crash gives exit 1; treat that as
+  # "none" rather than failing the whole report.
+  if ! coredumpctl --no-pager --no-legend list 2>/dev/null | tail -n 15 | grep -qE "."; then
+    warn "none (or coredumpctl unavailable)"
+  else
+    found=1
+    coredumpctl --no-pager --no-legend list 2>/dev/null | tail -n 15 || warn "none"
+  fi
+
+  # `list` shows the crashing executable, which for this app is always
+  # WebKitWebProcess or gdb — never vergoboy-stream itself. So grepping the
+  # executable name finds nothing and would be misleading. Attribution has to go
+  # through the systemd scope: a coredump from app-Hyprland-gtk-launch-*.scope is
+  # this app (it is launched via gtk-launch), while one from a kitty-*.scope is a
+  # different program entirely.
+  say "== attribution of recent webview/gdb coredumps =="
+  local pid unit attributed=0
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    unit="$(coredumpctl --no-pager info "$pid" 2>/dev/null \
+      | sed -n 's/.*User Unit: *//p')"
+    # systemd escapes "-" as "\x2d" in unit names, so a literal match on
+    # "gtk-launch" misses the real scope name and every crash is misreported as
+    # belonging to something else. Normalise before comparing.
+    unit_norm="${unit//\\x2d/-}"
+    case "$unit_norm" in
+      *gtk-launch*scope*|vergoboy*)
+        found=1; attributed=1
+        say "pid $pid  unit=$unit_norm  <- THIS APP"
+        ;;
+      *)
+        say "pid $pid  unit=${unit:-unknown}  (not this app)"
+        ;;
+    esac
+  done <<< "$(coredumpctl --no-pager --no-legend list 2>/dev/null \
+    | grep -iE 'WebKitWebProcess|/usr/bin/gdb' | tail -n 8 | awk '{print $5}')"
+  [ "$attributed" -eq 0 ] && say "none of the recent ones are this app"
+
+  [ "$found" -eq 0 ] && say "nothing to report"
+  return 0
+}
+
 cmd_logs() {
   case "${1:-backend}" in
     backend)  tail -n 50 -f "$BACKEND_LOG" ;;
     frontend) tail -n 50 -f "$FRONTEND_LOG" ;;
     postgres) tail -n 50 -f "$PGLOG" ;;
     livekit)  tail -n 50 -f "$LIVEKIT_LOG" ;;
-    *) die "usage: ./run.sh logs [backend|frontend|postgres|livekit]" ;;
+    app)      tail -n 50 -f "$APP_LOG_DIR/app.log" ;;
+    error)    tail -n 50 -f "$APP_LOG_DIR/error.log" ;;
+    crash)    tail -n 50 -f "$APP_LOG_DIR/crash.log" ;;
+    *) die "usage: ./run.sh logs [backend|frontend|postgres|livekit|app|error|crash]" ;;
   esac
 }
 
@@ -345,5 +423,6 @@ case "${1:-start}" in
   restart) cmd_stop; cmd_start ;;
   status)  cmd_status ;;
   logs)    cmd_logs "${2:-}" ;;
-  *) die "usage: ./run.sh {setup|start|stop|restart|status|logs [backend|frontend|postgres|livekit]}" ;;
+  crash)   cmd_crash ;;
+  *) die "usage: ./run.sh {setup|start|stop|restart|status|logs [backend|frontend|postgres|livekit|app|error|crash]|crash}" ;;
 esac

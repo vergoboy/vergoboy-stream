@@ -11,14 +11,79 @@ makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file' 'pa
 source=("${pkgname}::git+file://${startdir}/../..")
 sha256sums=('SKIP')
 
+# Backend origin baked into the static export, written by ../build-arch.sh.
+# Defaults to production when absent (e.g. a bare `makepkg` run).
+_api_origin_file="${startdir}/.api-origin"
+_api_origin='https://vergoboy.ir'
+[ -r "${_api_origin_file}" ] && _api_origin="$(<"${_api_origin_file}")"
+
+# The static export in webapp/out carries NEXT_PUBLIC_API_ORIGIN, but Tauri takes
+# its CSP from the *cloned* source tree. hls.js attaches its MediaSource to
+# <video> through a blob: URL, and without blob: in media-src the WebView raises
+# MediaError 4 (MEDIA_ERR_SRC_NOT_SUPPORTED) on every stream -- which the UI then
+# misreports as "your browser does not support this format". A local backend also
+# has to be allowlisted. So patch the clone here rather than committing a
+# developer machine's IP into the repository.
+_inject_csp() {
+  local conf="$1"
+  API_ORIGIN_INJECT="$_api_origin" python3 - "${conf}" <<'EOF' || return 1
+import json, os, re, sys
+
+path = sys.argv[1]
+origin = os.environ["API_ORIGIN_INJECT"].rstrip("/")
+raw = open(path, encoding="utf-8").read()
+
+match = re.search(r'"csp"\s*:\s*"(?:[^"\\]|\\.)*"', raw)
+if match is None:
+    sys.exit("no csp key found in " + path)
+csp = json.loads("{" + match.group(0) + "}")["csp"]
+
+order, directives = [], {}
+for part in csp.split(";"):
+    fields = part.split()
+    if not fields:
+        continue
+    directives[fields[0]] = [f for f in fields[1:] if f != "'none'"]
+    order.append(fields[0])
+
+def allow(directive, *sources):
+    if directive not in directives:
+        directives[directive] = []
+        order.append(directive)
+    for source in sources:
+        if source not in directives[directive]:
+            directives[directive].append(source)
+
+allow("media-src", "blob:")
+allow("worker-src", "blob:", "'self'")
+
+if origin != "https://vergoboy.ir":
+    ws = "ws" + origin[4:] if origin.startswith("http://") else None
+    for directive in ("connect-src", "media-src", "img-src"):
+        allow(directive, origin, *([ws] if ws else []))
+
+patched = "; ".join(" ".join([d] + directives[d]) for d in order)
+raw = raw[:match.start()] + '"csp": ' + json.dumps(patched) + raw[match.end():]
+open(path, "w", encoding="utf-8").write(raw)
+EOF
+}
+
 build() {
   cd "${srcdir}/${pkgname}/webapp"
+  _inject_csp src-tauri/tauri.conf.json || return 1
   npm ci
   npx tsc --noEmit
   # Next 16 cannot read its TypeScript child's stdout in makepkg's isolated
   # Git worktree. Use this checkout's freshly built, independently typechecked
   # static export, while Tauri/Rust is still built from the source worktree.
   cp -a "${startdir}/../../webapp/out" ./out
+  # rustc's MIR optimizer recurses deeply over the glib/gtk bindings and, under
+  # makepkg's default RUSTFLAGS (-C debuginfo=2 -C prefer-dynamic), intermittently
+  # exhausts the stack -- SIGSEGV in optimized_mir / encode_metadata. Spawned codegen
+  # workers need RUST_MIN_STACK; the main thread instead takes its stack from
+  # RLIMIT_STACK at exec time, so both have to be raised. Virtual memory only.
+  ulimit -s 65536 2>/dev/null || true
+  export RUST_MIN_STACK=33554432
   env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
     npm run tauri -- build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
 }

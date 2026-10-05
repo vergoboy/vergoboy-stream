@@ -8,6 +8,7 @@ must match, only a logged-in cookie opens /account/.
 from __future__ import annotations
 
 import datetime
+import json
 from urllib.parse import parse_qs
 
 import requests
@@ -16,7 +17,13 @@ from requests.adapters import BaseAdapter
 BASE = "https://digimoviez.test"
 LOGIN_URL = f"{BASE}/account/login/"
 ACCOUNT_URL = f"{BASE}/account/"
+AJAX_URL = f"{BASE}/wp-admin/admin-ajax.php"
 COOKIE = "wordpress_logged_in"
+
+# WordPress emits this link *only* for an authenticated session.  It is the one
+# structural difference between the logged-in and logged-out rendering of the
+# same page, because the theme renders the login widget either way.
+LOGOUT_LINK = f'<a href="{BASE}/wp-login.php?action=logout&amp;_wpnonce=deadbeef">خروج</a>'
 
 # Dormant popup the theme renders into every page, with a DIFFERENT key and a
 # decoy question.  Correct code must never pair with or answer it.
@@ -28,6 +35,11 @@ POPUP = (
     '<input type="hidden" name="secureq_key" value="999"><span>سوال امنیتی: ۱ بعلاوه ۱</span>'
     '<input type="number" name="secureq_ans"></form></div></div></div>'
 )
+
+
+def account_page() -> str:
+    """An authenticated page: account heading plus the logout link."""
+    return "<html><body>" + POPUP + "<h1>حساب کاربری</h1>" + LOGOUT_LINK + "</body></html>"
 
 
 class FakeDigimoviez(BaseAdapter):
@@ -46,7 +58,7 @@ class FakeDigimoviez(BaseAdapter):
         self.rejections: list[str] = []      # why each POST was rejected
         self.issued: list[dict] = []         # every challenge served, in order
         self.current: dict | None = None
-        self.posts = self.login_gets = self.account_gets = 0
+        self.posts = self.login_gets = self.account_gets = self.ajax_searches = 0
         self._sid = 0
 
     # --- wiring -------------------------------------------------------
@@ -61,6 +73,14 @@ class FakeDigimoviez(BaseAdapter):
 
     def close(self) -> None:  # BaseAdapter API
         pass
+
+    @staticmethod
+    def item_small_loop(url: str, title: str) -> str:
+        """The theme's AJAX search card shape."""
+        return (f'<div class="item_small_loop" data-ID="4370">'
+                f'<a title="دانلود فیلم {title}" href="{url}">'
+                f'<div class="cover"><img src="{BASE}/poster.jpg"></div>'
+                f'<h2>{title}</h2></a></div>')
 
     # --- site behaviour -----------------------------------------------
     def _issue(self) -> dict:
@@ -121,7 +141,7 @@ class FakeDigimoviez(BaseAdapter):
         sid = f"SID-{self._sid}-secretvalue"
         self.sessions.add(sid)
         self.session.cookies.set(COOKIE, sid)
-        return "<html><body>" + POPUP + "<h1>حساب کاربری</h1></body></html>", ACCOUNT_URL
+        return account_page(), ACCOUNT_URL
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         self.requests.append({"method": request.method, "url": request.url, "proxies": dict(proxies or {}),
@@ -137,9 +157,20 @@ class FakeDigimoviez(BaseAdapter):
         elif url == ACCOUNT_URL:
             self.account_gets += 1
             if self._cookie_sid(request) in self.sessions:
-                body, final = "<html><body>" + POPUP + "<h1>حساب کاربری</h1></body></html>", ACCOUNT_URL
+                body, final = account_page(), ACCOUNT_URL
             else:  # logged out: WordPress redirects to the login page
                 body, final = self._login_page(), (ACCOUNT_URL if self.account_shows_login_inline else LOGIN_URL)
+        elif url == AJAX_URL and request.method == "POST":
+            # Mirrors the theme's own header search: only a free-text term is
+            # honoured, and the answer comes back as a JSON string of HTML.
+            self.ajax_searches += 1
+            data = {k: v[0] for k, v in parse_qs(
+                request.body.decode() if isinstance(request.body, bytes) else (request.body or ""),
+                keep_blank_values=True).items()}
+            term = data.get("s", "").strip()
+            cards = [f'{self.item_small_loop("https://digimoviez.test/tt-0/", f"Result {n} 2014")}'
+                     for n, match in enumerate([term], 1) if match]
+            body, final = json.dumps("".join(cards)), AJAX_URL
         else:
             body, final, status = "not found", url, 404
         response = requests.Response()

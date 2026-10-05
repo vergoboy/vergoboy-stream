@@ -113,6 +113,23 @@ class LoginForm:
         return target
 
 
+# WordPress emits this only for an authenticated session; it is the one marker
+# that actually separates "logged in" from "logged out" on this site.
+_LOGOUT_HREF = re.compile(r"""href\s*=\s*["'][^"']*(?:action=logout|/logout/?[?#"'])""", re.I)
+
+
+def is_authenticated_page(html: str | None) -> bool:
+    """True when *html* was served to a session WordPress considers logged in.
+
+    Digimoviez renders the very same login widget on ``/account/`` for anonymous
+    visitors and for authenticated ones, so "a login form is present" says
+    nothing about the session -- treating it as proof of being logged out makes
+    every check report an expired session and triggers an endless relogin loop.
+    The logout link is the only structural difference between the two cases.
+    """
+    return bool(html) and _LOGOUT_HREF.search(html) is not None
+
+
 def _text_nodes(node: _Node) -> list[_Node]:
     return [n for n in _walk(node) if n.tag == "#text"]
 

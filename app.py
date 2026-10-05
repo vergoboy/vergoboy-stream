@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import uuid
@@ -39,6 +40,8 @@ import archive_scraper
 from archive_network import create_direct_media_session, direct_media_environment
 from archive_logging import configure as configure_archive_logging, event as archive_event, redact, reset_request_id, safe_target, set_request_id, timer as ArchiveTimer
 from archive_filters import FilterValidationError, SearchFilters, available_options
+import app_logging
+from app_logging import diagnostics as log_diagnostics, record_client_error
 import db as dbmod
 from db import User as DBUser
 import permissions as permmod
@@ -48,7 +51,14 @@ from srt_to_vtt import convert_srt_to_vtt
 
 
 def log_debug(msg):
+    # The stream prefix is kept because run.sh and the Tauri host both key off
+    # it, but the line also goes to data/logs/app.log so a GUI launch has
+    # somewhere to read after the fact.
     print(f"[DEBUG_STREAM] {msg}", file=sys.stderr, flush=True)
+    try:
+        app_log.log("%s", msg, level=logging.DEBUG)
+    except Exception:
+        pass  # never let logging be the reason something dies
 
 
 def _safe_source_for_log(source: str) -> str:
@@ -87,7 +97,12 @@ except ImportError as e:
 
 app = Flask(__name__, static_url_path="/stream/static", template_folder="templates")
 app.config.from_object(Config)
+app_log = app_logging.configure(os.environ.get("STREAM_LOG_LEVEL", "INFO"), stream=sys.stderr)
 configure_archive_logging(Config.ARCHIVE_LOG_LEVEL)
+app_logging.install_gevent_hook()
+app_log.info("backend starting: pid=%s env=%s log_level=%s python=%s",
+             os.getpid(), Config.ENVIRONMENT, os.environ.get("STREAM_LOG_LEVEL", "INFO"),
+             sys.version.split()[0])
 
 CORS(
     app,
@@ -189,6 +204,27 @@ class _AuthError(Exception):
 @app.errorhandler(_AuthError)
 def _handle_auth_error(e):
     return jsonify({"error": "ابتدا وارد حساب شو (دوباره لاگین کن)"}), 401
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_error(e):
+    """Log anything that reaches the WSGI layer.
+
+    Without this Flask answers with a bare 500 and the exception never reaches
+    stderr in a way that survives the process, so a request-time crash is
+    invisible. Explicit HTTP errors keep their own status and are not recorded
+    as crashes.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return jsonify({"error": e.description}), e.code
+    app_logging.record_crash(
+        "request_exception", f"{type(e).__name__}: {e}",
+        traceback_text="".join(traceback.format_exception(type(e), e, e.__traceback__)),
+        fields={"where": "flask errorhandler", "method": request.method,
+                "path": request.path, "client_ip": request.remote_addr or ""})
+    log_debug(f"[request] {request.method} {request.path} -> {type(e).__name__}: {e}")
+    return jsonify({"error": "internal error"}), 500
 
 
 def _current_room():
@@ -1611,6 +1647,22 @@ def api_health():
     return jsonify({"status": "healthy" if healthy else "degraded", "checks": checks}), (200 if healthy else 503)
 
 
+@app.route("/stream/api/log/client", methods=["POST"])
+def api_log_client():
+    """Accept an error the webview caught. See app_logging.record_client_error."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "expected a JSON object"}), 400
+    ident = record_client_error(payload, client_ip=request.remote_addr or "")
+    return jsonify({"ok": True, "id": ident}), 201
+
+
+@app.route("/stream/api/log/diagnostics")
+def api_log_diagnostics():
+    """Log files, sizes, mtimes and the tail of error/crash logs."""
+    return jsonify(log_diagnostics()), 200
+
+
 @app.route("/stream/media/uploads/<path:filename>")
 def serve_upload(filename):
     return send_from_directory(Config.UPLOAD_DIR, filename, conditional=True)
@@ -1727,6 +1779,13 @@ _ARCHIVE_ERRORS = {
     archive_scraper.KIND_PARSE_ERROR: (502, "ساختار صفحه دیجی‌موویز تغییر کرده و قابل خواندن نبود"),
 }
 _ARCHIVE_DEFAULT_ERROR = (502, "خطا در ارتباط با آرشیو")
+# Only these conditions can be cleared by importing a completed session.
+ARCHIVE_MANUAL_SESSION_KINDS = frozenset({
+    archive_scraper.KIND_MANUAL_CHALLENGE, archive_scraper.KIND_AUTH_REQUIRED,
+    archive_scraper.KIND_SESSION_EXPIRED,
+})
+
+
 def _archive_err(e, archive_request_id=None):
     kind = getattr(e, "kind", None)
     archive_event("api", "request_error", level=logging.ERROR, error_class=type(e).__name__,
@@ -1734,7 +1793,7 @@ def _archive_err(e, archive_request_id=None):
     if isinstance(e, archive_scraper.ArchiveRequestError):
         status, message = _ARCHIVE_ERRORS.get(e.kind, _ARCHIVE_DEFAULT_ERROR)
         payload = {"error": message, "kind": e.kind, "detail": redact(str(e))[:300],
-                   "manual_session_helpful": False}
+                   "manual_session_helpful": e.kind in ARCHIVE_MANUAL_SESSION_KINDS}
         if archive_request_id:
             payload["archive_request_id"] = archive_request_id
         return jsonify(payload), status
@@ -1805,54 +1864,44 @@ def api_archive_auth_status():
     denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
     if denied:
         return denied
-    return jsonify(_archive_auth_status_payload(archive_scraper.get_collector().auth))
+    manager = archive_scraper.get_collector().auth
+    return jsonify({"enabled": manager.settings.enabled, "state": manager.state.value,
+                    "proxy_configured": bool(manager.settings.http_proxy),
+                    "manual_session_kinds": sorted(ARCHIVE_MANUAL_SESSION_KINDS)})
 
 
-def _archive_auth_status_payload(manager):
-    """Safe auth state for the Archive UI; never includes session material."""
-    state = manager.state.value
-    error = getattr(manager, "last_check_error", None)
-    messages = {
-        "AUTHENTICATED": "نشست بک‌اند دیجی‌موویز تأیید شده است.",
-        "AUTH_MANUAL_INTERVENTION_REQUIRED": "دیجی‌موویز در صفحه ورود سؤال امنیتی دارد. ورود را در مرورگر خود کامل کنید، سپس نشست بک‌اند را بررسی کنید.",
-        "AUTH_EXPIRED": "نشست بک‌اند دیجی‌موویز منقضی یا ایجاد نشده است.",
-        "AUTH_FAILED": "نشست بک‌اند دیجی‌موویز تأیید نشد.",
-        "AUTH_CHECKING": "در حال بررسی نشست بک‌اند دیجی‌موویز…",
-        "AUTHENTICATING": "در حال ورود بک‌اند به دیجی‌موویز…",
-    }
-    if error == "proxy_unavailable":
-        message, kind = "پروکسی آرشیو در دسترس نیست.", archive_scraper.KIND_PROXY_UNAVAILABLE
-    elif error == "network_timeout":
-        message, kind = "دیجی‌موویز پاسخ نداد؛ دوباره بررسی کنید.", archive_scraper.KIND_NETWORK_TIMEOUT
-    elif error:
-        message, kind = "بررسی نشست بک‌اند دیجی‌موویز ناموفق بود.", error
-    elif state == "AUTH_MANUAL_INTERVENTION_REQUIRED":
-        message, kind = messages[state], archive_scraper.KIND_MANUAL_CHALLENGE
-    elif state == "AUTHENTICATED":
-        message, kind = messages[state], "authenticated"
-    else:
-        message, kind = messages.get(state, "وضعیت نشست دیجی‌موویز نامشخص است."), state.lower()
-    return {"enabled": manager.settings.enabled, "state": state, "kind": kind,
-            "message": message, "proxy_configured": bool(manager.settings.http_proxy)}
+@app.route("/stream/api/archive/auth/manual-session", methods=["POST"])
+def api_archive_manual_session():
+    """Operator-only continuation after a manually completed challenge.
 
-
-@app.route("/stream/api/archive/auth/check", methods=["POST"])
-def api_archive_auth_check():
-    """Explicitly verify the backend's own session; never imports browser cookies."""
+    The browser session the operator completed the challenge in is imported
+    here, verified against the account endpoint, and from then on reused as-is.
+    Cookie values are never logged and never echoed back.
+    """
     user = _require_user()
     denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
     if denied:
         return denied
     token = set_request_id(str(uuid.uuid4().hex[:12]))
+    cookies = (request.get_json(force=True, silent=True) or {}).get("cookies")
+    if not isinstance(cookies, dict) or not cookies or not all(
+            isinstance(k, str) and isinstance(v, str) and k and v for k, v in cookies.items()):
+        return jsonify({"error": "کوکی‌های جلسه معتبر نیستند", "kind": archive_scraper.KIND_VALIDATION}), 400
     manager = archive_scraper.get_collector().auth
     try:
-        archive_event("api", "auth_check_requested", method=request.method, endpoint=request.path)
-        manager.verify_existing_session()
+        manager.import_manual_session(cookies)
+        # Prove the imported session actually works before telling the operator
+        # to retry, so a bad import is reported here instead of as a mystery
+        # failure on the next search.
+        verified = manager.check()
     except Exception as e:
         return _archive_err(e)
     finally:
         reset_request_id(token)
-    return jsonify(_archive_auth_status_payload(manager))
+    if verified is not True:
+        return jsonify({"error": "کوکی‌های واردشده جلسه فعالی ایجاد نکردند", "kind": manager.state.value,
+                        "state": manager.state.value}), 401
+    return jsonify({"ok": True, "state": manager.state.value})
 
 
 @app.route("/stream/api/archive/title", methods=["POST"])

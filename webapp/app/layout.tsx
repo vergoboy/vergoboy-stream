@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { vazirmatn, jetbrainsMono, lalezar } from "./fonts";
+import ClientErrorReporter from "@/components/ClientErrorReporter";
 import "./globals.css";
 
 // metadata.icons doesn't auto-prefix basePath for a plain string path, so we
@@ -28,7 +29,12 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="fa" dir="rtl" suppressHydrationWarning className={`${vazirmatn.variable} ${jetbrainsMono.variable} ${lalezar.variable}`}>
-      <body>{children}</body>
+      <body>
+        {/* First child so it is mounted for every route: a release build has no
+            devtools, so this is the only record a client-side crash leaves. */}
+        <ClientErrorReporter />
+        {children}
+      </body>
     </html>
   );
 }

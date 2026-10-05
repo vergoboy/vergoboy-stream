@@ -28,7 +28,8 @@ from archive_network import create_archive_session
 from archive_logging import event as archive_event, safe_target, timer as ArchiveTimer
 from archive_challenge import ChallengeHandler, UnsolvableChallenge
 from archive_challenge_auto import AutomaticChallengeHandler
-from archive_login_form import LoginForm, LoginFormError, build_login_payload, parse_login_form
+from archive_login_form import (LoginForm, LoginFormError, build_login_payload, is_authenticated_page,
+                                parse_login_form)
 
 LOG = logging.getLogger("archive.auth")
 
@@ -67,6 +68,14 @@ class AuthSettings:
     max_unsupported_refetch: int = 2
     # After a rejected login no new login is attempted for this long.
     failed_login_cooldown: float = 300.0
+    # A session check slower than this is reported as lagging.  Digimoviez
+    # answers in roughly 2-4s through the proxy, so this is deliberately well
+    # above the normal spread.
+    lag_threshold: float = 8.0
+    # Consecutive slow checks tolerated before the watchdog starts backing off.
+    max_lag_streak: int = 3
+    # Ceiling for the watchdog's backoff multiplier while lagging.
+    lag_backoff_max: float = 4.0
 
 
 class _Outcome(Enum):
@@ -101,6 +110,10 @@ class ArchiveAuthManager:
         self._login_posts = 0
         self._login_blocked_until = 0.0
         self.last_check_error: str | None = None
+        self.last_check_ms: float | None = None
+        self.last_login_ms: float | None = None
+        self.lag_streak = 0
+        self.lagging = False
         self._load_cookies()
 
     def _log(self, event: str, **fields: object) -> None:
@@ -157,6 +170,38 @@ class ArchiveAuthManager:
         temp.replace(path)
         return True
 
+    def _note_latency(self, elapsed_ms: float) -> None:
+        """Record how slow the archive is right now and raise the lag flag.
+
+        A timeout is a lag signal too, so the transport branches below feed their
+        elapsed time through here as well: it is already past the threshold.
+        """
+        self.last_check_ms = elapsed_ms
+        if elapsed_ms / 1000.0 > self.settings.lag_threshold:
+            self.lag_streak += 1
+            self.lagging = True
+            self._log("AUTH_LAG_DETECTED", elapsed_ms=round(elapsed_ms),
+                      threshold_ms=round(self.settings.lag_threshold * 1000),
+                      lag_streak=self.lag_streak,
+                      backing_off=self.lag_streak > self.settings.max_lag_streak)
+        elif self.lag_streak or self.lagging:
+            self.lag_streak = 0
+            self.lagging = False
+            self._log("AUTH_LAG_CLEARED", elapsed_ms=round(elapsed_ms))
+
+    def status(self) -> dict[str, object]:
+        """Snapshot of session health for the UI and for the stability job."""
+        return {
+            "state": self.state.value,
+            "authenticated": self.state is AuthState.AUTHENTICATED,
+            "lagging": self.lagging,
+            "lag_streak": self.lag_streak,
+            "last_check_ms": self.last_check_ms,
+            "last_login_ms": self.last_login_ms,
+            "last_check_error": self.last_check_error,
+            "cookie_count": len(self.session.cookies),
+        }
+
     def start(self) -> None:
         if not self.settings.enabled or self._thread:
             return
@@ -169,8 +214,24 @@ class ArchiveAuthManager:
             self._thread.join(timeout=2)
 
     def _watchdog(self) -> None:
-        while not self._stop.wait(self.settings.check_interval):
+        """The in-code stability job.
+
+        Runs entirely inside this process -- no cron, no systemd timer.  While the
+        site is answering slowly the interval grows so a lagging archive is polled
+        less often instead of being hammered, and it returns to
+        ``check_interval`` as soon as a check is fast again.
+        """
+        while not self._stop.wait(self._next_interval()):
             self.ensure_authenticated()
+
+    def _next_interval(self) -> float:
+        if not self.lagging or self.lag_streak <= self.settings.max_lag_streak:
+            return self.settings.check_interval
+        factor = min(self.settings.lag_backoff_max,
+                     1.0 + 0.5 * (self.lag_streak - self.settings.max_lag_streak))
+        self._log("AUTH_WATCHDOG_BACKOFF", factor=round(factor, 2), lag_streak=self.lag_streak,
+                  interval_s=round(self.settings.check_interval * factor))
+        return self.settings.check_interval * factor
 
     def check(self, *, keep_manual_challenge: bool = False) -> bool | None:
         """True=valid, False=expired, None=temporary transport failure."""
@@ -186,19 +247,34 @@ class ArchiveAuthManager:
         except requests.exceptions.ProxyError:
             self.last_check_error = "proxy_unavailable"
             self._transition(AuthState.AUTH_FAILED, "proxy_unavailable")
+            self._note_latency(started.ms)
             self._log("AUTH_CHECK_PROXY_ERROR")
             return None
         except requests.Timeout:
             self.last_check_error = "network_timeout"
             self._transition(AuthState.AUTH_FAILED, "network_timeout")
+            self._note_latency(started.ms)
             self._log("AUTH_CHECK_TIMEOUT")
             return None
         except requests.RequestException as exc:
             self.last_check_error = "network_error"
             self._transition(AuthState.AUTH_FAILED, "network_error")
+            self._note_latency(started.ms)
             self._log("AUTH_CHECK_HTTP_ERROR", error=type(exc).__name__)
             return None
         challenge = self.challenge_handler.inspect(response.text)
+        # A real session is recognised *first*: the logout link is positive proof,
+        # while the challenge and login-form tests below also fire on the site's
+        # dormant login widget, which it renders into ordinary pages too.
+        # Checking in the other order reports every healthy session as expired and
+        # relogs in on every single request.
+        if is_authenticated_page(response.text):
+            self._note_latency(started.ms)
+            self._transition(AuthState.AUTHENTICATED, "logout_link_present")
+            self._log("AUTH_OK", status=response.status_code, redirect_to=safe_target(response.url),
+                      cookie_count=len(self.session.cookies), marker="logout_link",
+                      challenge_decorated=challenge.present, elapsed_ms=started.ms)
+            return True
         if challenge.present:
             # The normal automatic path proceeds to its login; an explicit
             # operator check stays at the manual boundary without logging in.
@@ -209,21 +285,29 @@ class ArchiveAuthManager:
             return False
         login_path = self.settings.login_url.rstrip("/")
         if response.url.rstrip("/") == login_path or response.status_code in (401, 403):
+            self._note_latency(started.ms)
             self._transition(AuthState.AUTH_EXPIRED, "redirected_to_login")
             self._log("AUTH_EXPIRED", status=response.status_code, redirect_to=safe_target(response.url), elapsed_ms=started.ms)
             return False
         form = parse_login_form(response.text)
         if form is not None and form.is_login_form(self.settings.username_field, self.settings.password_field):
             # A 200 that renders the login form is not an account page.
+            self._note_latency(started.ms)
             self._transition(AuthState.AUTH_EXPIRED, "login_form_on_account_page")
             self._log("AUTH_EXPIRED", status=response.status_code, redirect_to=safe_target(response.url),
                       reason="login_form_rendered", elapsed_ms=started.ms)
             return False
         if response.ok:
-            self._transition(AuthState.AUTHENTICATED, "account_verified")
-            self._log("AUTH_OK", status=response.status_code, redirect_to=safe_target(response.url),
-                      cookie_count=len(self.session.cookies), elapsed_ms=started.ms)
-            return True
+            # Neither marker: no logout link *and* no login form.  This must not
+            # count as a session, but it is not a transport failure either -- the
+            # request succeeded, so it is reported as "not authenticated" and a
+            # bounded login is attempted.
+            self._note_latency(started.ms)
+            self._transition(AuthState.AUTH_EXPIRED, "unrecognized_page")
+            self._log("AUTH_EXPIRED", status=response.status_code, reason="no_auth_marker",
+                      redirect_to=safe_target(response.url), elapsed_ms=started.ms)
+            return False
+        self._note_latency(started.ms)
         self.last_check_error = "http_error"
         self._transition(AuthState.AUTH_FAILED, "http_error")
         self._log("AUTH_CHECK_HTTP_ERROR", status=response.status_code)
@@ -303,6 +387,9 @@ class ArchiveAuthManager:
             else:
                 if outcome is _Outcome.SUCCESS:
                     self._failures = 0
+                    self.last_login_ms = started.ms
+                    self.lag_streak = 0
+                    self.lagging = False
                     self._log("AUTH_LOGIN_SUCCESS", cookie_count=len(self.session.cookies),
                               posts=self._login_posts, elapsed_ms=started.ms)
                     return True
