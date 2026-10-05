@@ -127,6 +127,7 @@ fi
 if [ "$REBUILD_UI" -eq 1 ] || [ ! -f "$OUTDIR/index.html" ]; then
   say "building the static export (webapp/out)"
   [ "$REBUILD_UI" -eq 0 ] && say "webapp/out/index.html missing, so it has to be built"
+  rm -rf "$ROOT/webapp/.next" "$OUTDIR"
   ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
 else
   say "reusing webapp/out (pass --rebuild-ui to force a fresh export)"
@@ -144,6 +145,11 @@ else
     warn "webapp/out is older than the frontend source; the package would ship a"
     warn "stale UI. Rebuilding now (same as --rebuild-ui)."
     printf '%s\n' "$stale" | sed 's/^/      /' >&2
+    # A stale .next cache does not fail cleanly: webpack's wasm hash layer dies
+    # with "TypeError: Cannot read properties of undefined (reading 'length')"
+    # and "Next.js build worker exited with code: 1", naming neither the cache
+    # nor the file that triggered it. Drop it so a rebuild always starts clean.
+    rm -rf "$ROOT/webapp/.next" "$OUTDIR"
     ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
   fi
 fi
