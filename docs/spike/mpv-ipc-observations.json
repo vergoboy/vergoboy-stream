@@ -1,0 +1,45 @@
+{
+  "mpv_version": "mpv v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects",
+  "mode": "headless",
+  "checks": {
+    "spawn_and_connect": true,
+    "file_loaded_event": true,
+    "time_pos_ticks": true,
+    "pause_roundtrip": true,
+    "seek_absolute": true,
+    "seek_event": true,
+    "speed_set": true,
+    "paused_for_cache_readable": true,
+    "core_idle_readable": true,
+    "core_idle_reflects_pause": true,
+    "clean_quit": true,
+    "no_zombie": true,
+    "paused_for_cache_event_possible": true,
+    "buffering_edge_clears": true
+  },
+  "time_pos_sample": {
+    "first": 0.0,
+    "after_1s": 1.041667
+  },
+  "pause_observed_event": true,
+  "seek_result_pos": 12.5,
+  "paused_for_cache_value": false,
+  "core_idle_value": false,
+  "core_idle_when_paused": true,
+  "mpv_exit_code": 0,
+  "events_seen": [
+    "property-change"
+  ],
+  "buffering": {
+    "source": "throttled-local-http",
+    "url": "http://127.0.0.1:46423/spike.mp4",
+    "paused_for_cache_event": {
+      "event": "property-change",
+      "id": 1,
+      "name": "paused-for-cache",
+      "data": true
+    },
+    "got_buffering_edge": true,
+    "buffering_cleared": true
+  }
+}
