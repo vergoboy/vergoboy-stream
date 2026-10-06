@@ -36,6 +36,18 @@ from media_pipeline import (
     build_fallback_chain,
     cleanup_orphaned_partials,
 )
+from media_domain.adapters.http import download_to_file
+from media_domain.services.metadata import (
+    find_text_subtitle_streams,
+    get_duration_s,
+    get_video_height,
+    get_video_width,
+)
+from media_domain.services.url_intake import (
+    check_link_ok,
+    resolve_media_url,
+    url_ext,
+)
 import archive_scraper
 from archive_network import create_direct_media_session, direct_media_environment
 from archive_logging import configure as configure_archive_logging, event as archive_event, redact, reset_request_id, safe_target, set_request_id, timer as ArchiveTimer
@@ -452,150 +464,8 @@ def _room_for_item(item_id: str):
     return None
 
 
-def url_ext(url: str) -> str:
-    clean = url.split("?", 1)[0].split("#", 1)[0]
-    return clean.rsplit(".", 1)[-1].lower() if "." in clean else ""
-
-
 def free_space_mb(path: str) -> float:
     return shutil.disk_usage(path).free / (1024 * 1024)
-
-
-def _download_to_file(url: str, dest_path: str, timeout: int = 25) -> None:
-    with MEDIA_CLIENT.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout,
-                          stream=True) as resp, open(dest_path, "wb") as out:
-        resp.raise_for_status()
-        for chunk in resp.iter_content(1024 * 1024):
-            if chunk:
-                out.write(chunk)
-
-
-def _check_link_ok(url: str, timeout: int = 15) -> bool:
-    """Cheap reachability check for a direct media URL, mirroring what ffmpeg
-    will do at encode time: browser User-Agent, follow redirects, TLS
-    verification, plain GET. Reads a single byte then drops the connection, so
-    even a server that ignores Range/HEAD never transfers the whole file.
-
-    Returns False for HTTP >= 400, TLS/certificate failures, DNS/connection
-    errors and timeouts — i.e. any URL that could never be encoded."""
-    try:
-        started = ArchiveTimer()
-        archive_event("media", "probe_start", proxy_enabled=False, direct=True, **safe_target(url))
-        response = MEDIA_CLIENT.get(url, headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Accept": "video/*,*/*;q=0.8",
-        }, timeout=timeout, stream=True)
-        ok = 200 <= response.status_code < 400
-        next(response.iter_content(1), b"")
-        response.close()
-        archive_event("media", "probe_result", status=response.status_code, elapsed_ms=started.ms,
-                      proxy_enabled=False, direct=True, **safe_target(url))
-        return ok
-    except Exception as exc:
-        archive_event("media", "probe_error", level=logging.WARNING, error_class=type(exc).__name__,
-                      error=str(exc)[:200], proxy_enabled=False, direct=True, **safe_target(url))
-        return False
-
-
-_DIRECT_MEDIA_EXT = {
-    ".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov",
-    ".mp3", ".aac", ".mka", ".ogg", ".flac", ".wav",
-}
-_RESOLVE_VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov")
-
-_UA_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    ),
-}
-
-
-def _is_direct_media_url(url: str) -> bool:
-    ext = url_ext(url)
-    return "." + ext in _DIRECT_MEDIA_EXT if ext else False
-
-
-def _resolve_media_url_remote(url: str, timeout: int = 15) -> str:
-    """Turns a user-pasted link into a URL ffmpeg can actually read.
-
-    Links pasted into "add video" sometimes point at a folder or a directory
-    listing page instead of the media file itself — e.g. the verGoBoy file
-    manager serves its /files/data/… folder URLs as a redirect to the UI. Such
-    URLs can never be encoded, so before queueing an item we inspect the
-    target and, when it turns out to be an HTML/directory page, pick the first
-    playable media file's direct URL from inside it. If nothing resolves, the
-    original URL is returned so the normal "link is broken" flow still applies.
-    """
-    if _is_direct_media_url(url):
-        return url
-
-    html = None
-    try:
-        with MEDIA_CLIENT.get(url, headers=_UA_HEADERS, timeout=timeout) as resp:
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            if ctype.startswith(("video/", "audio/")) or "matroska" in ctype:
-                return url
-            if not ctype.startswith(("text/html", "application/xhtml")):
-                return url
-            html = resp.content.decode("utf-8", errors="ignore")[:1_000_000]
-    except Exception:
-        return url
-
-    # 1) plain HTML directory page → first direct media link
-    if html:
-        for u in _re.findall(r'href="(https?://[^"]+)"', html, _re.I):
-            if u.lower().split("?")[0].endswith(_RESOLVE_VIDEO_EXT):
-                return u
-
-    # 2) verGoBoy-style file manager: /files/data/<folder> is a directory that
-    #    redirects to the UI, so list the folder via its API and take the video.
-    m = _re.match(r"^(https?://[^/]+)/files/data/(.*)$", url)
-    if m:
-        base, folder = m.group(1), urllib.parse.unquote(m.group(2))
-        list_url = f"{base}/files/api/list?p=" + urllib.parse.quote(folder, safe="/")
-        try:
-            with MEDIA_CLIENT.get(list_url, headers=_UA_HEADERS, timeout=timeout) as resp:
-                resp.raise_for_status()
-                data = resp.json()
-            for it in (data or {}).get("items", []) or []:
-                if it.get("type") != "file":
-                    continue
-                name = it.get("name") or ""
-                if not name.lower().endswith(_RESOLVE_VIDEO_EXT):
-                    continue
-                segs = [urllib.parse.quote(s, safe="")
-                        for s in (folder.strip("/") + "/" + name).split("/")]
-                return base + "/files/data/" + "/".join(segs)
-        except Exception:
-            pass
-
-    return url
-
-def _local_mirror(url: str) -> str:
-    """If `url` is a verGoBoy file URL that also exists on this server's local
-    disk (/opt/files/data/...), return the local path. ffmpeg then reads the
-    file from disk instead of over HTTP, so a flaky/overloaded HTTP fetch can
-    never silently truncate a long encode."
-    """
-    if not isinstance(url, str) or not url.startswith("http"):
-        return url
-    m = _re.match(r"^https?://[^/]+/files/data/(.*)$", url)
-    if not m:
-        return url
-    rel = urllib.parse.unquote(m.group(1))
-    local = os.path.join("/opt/files/data", rel)
-    if os.path.exists(local) and os.path.isfile(local):
-        return local
-    return url
-
-
-def _resolve_media_url(url: str, timeout: int = 15) -> str:
-    return _local_mirror(_resolve_media_url_remote(url, timeout=timeout))
-
 
 
 MIN_FREE_MB_FOR_TRANSCODE = 500
@@ -845,7 +715,6 @@ def _current_item(rs) -> dict:
     return playlist[index] or {}
 
 
-TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
 LANG_LABELS = {
     "fa": "فارسی", "per": "فارسی", "fas": "فارسی",
     "en": "انگلیسی", "eng": "انگلیسی",
@@ -882,56 +751,6 @@ def _ffprobe_source(source: str, timeout: int = 20) -> dict:
     except Exception as e:
         log_debug(f"ffprobe exception: {e}")
         return {}
-
-
-def _find_text_subtitle_streams(probe_data: dict) -> list:
-    subs = []
-    for s in probe_data.get("streams", []):
-        if s.get("codec_type") == "subtitle" and s.get("codec_name") in TEXT_SUBTITLE_CODECS:
-            tags = s.get("tags") or {}
-            subs.append({
-                "index": s["index"],
-                "lang": (tags.get("language") or "")[:8],
-                "title": tags.get("title") or "",
-            })
-    return subs
-
-
-def _get_duration_s(probe_data: dict) -> float:
-    try:
-        d = float(probe_data.get("format", {}).get("duration") or 0)
-        if d > 0:
-            return d
-    except (TypeError, ValueError):
-        pass
-    for s in probe_data.get("streams", []):
-        try:
-            d = float(s.get("duration") or 0)
-            if d > 0:
-                return d
-        except (TypeError, ValueError):
-            pass
-    return 0.0
-
-
-def _get_video_height(probe_data: dict) -> int:
-    for s in probe_data.get("streams", []):
-        if s.get("codec_type") == "video" and s.get("height"):
-            try:
-                return int(s["height"])
-            except (TypeError, ValueError):
-                continue
-    return 0
-
-
-def _get_video_width(probe_data: dict) -> int:
-    for s in probe_data.get("streams", []):
-        if s.get("codec_type") == "video" and s.get("width"):
-            try:
-                return int(s["width"])
-            except (TypeError, ValueError):
-                continue
-    return 0
 
 
 def _pick_ladder(source_height: int):
@@ -1281,7 +1100,7 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
 
         dur = duration_s
         if dur is None:
-            dur = _get_duration_s(_ffprobe_source(source))
+            dur = get_duration_s(_ffprobe_source(source))
 
         os.makedirs(rendition_dir, exist_ok=True)
 
@@ -1332,7 +1151,7 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
             return
 
         if dur and dur > 0:
-            actual = _get_duration_s(_ffprobe_source(os.path.join(rendition_dir, "index.m3u8"), timeout=30))
+            actual = get_duration_s(_ffprobe_source(os.path.join(rendition_dir, "index.m3u8"), timeout=30))
             if actual and actual < dur - 5:
                 fail(f"تبدیل ({label}) ناقص بود: فقط {int(actual)} از {int(dur)} ثانیه تولید شد (منبع ناقص/قطع شد).")
                 return
@@ -1405,11 +1224,11 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
         return
 
     probe = _ffprobe_source(source)
-    duration_s = _get_duration_s(probe)
-    height = _get_video_height(probe)
-    width = _get_video_width(probe)
+    duration_s = get_duration_s(probe)
+    height = get_video_height(probe)
+    width = get_video_width(probe)
     aspect = (width / height) if (width and height) else (16 / 9)
-    sub_streams = _find_text_subtitle_streams(probe)
+    sub_streams = find_text_subtitle_streams(probe)
     ladder = _pick_ladder(height)
     default_label, default_height, default_vbr, default_abr = _pick_default_rendition(ladder)
     log_debug(f"Item {item_id}: duration={duration_s}s height={height} ladder={[l[0] for l in ladder]} default={default_label}")
@@ -1939,7 +1758,7 @@ def api_archive_files():
 def _add_url_item(url: str, title: str, name: str, room_code: str = None,
                   added_by_user_id: str = None):
     """Shared logic for the single add-url endpoint and the bulk archive add."""
-    url = _resolve_media_url(url)
+    url = resolve_media_url(MEDIA_CLIENT, url)
     item_id = new_id()
     is_hls = _is_hls(url)
     needs_encode = not is_hls
@@ -2003,7 +1822,7 @@ def api_add_many():
         return jsonify({"error": "سهمیه افزودن ویدیوی تو پر شده؛ با ادمین هماهنگ کن"}), 403
 
     from gevent.pool import Group
-    verdicts = Group().map(lambda it: _check_link_ok(it.get("url", "").strip()), items)
+    verdicts = Group().map(lambda it: check_link_ok(MEDIA_CLIENT, it.get("url", "").strip()), items)
 
     for it, ok in zip(items, verdicts):
         url = (it.get("url") or "").strip()
@@ -2503,7 +2322,7 @@ def api_add_url():
     if not url:
         return jsonify({"error": "لینک خالی است"}), 400
 
-    if url.startswith(("https://", "http://")) and not _check_link_ok(url):
+    if url.startswith(("https://", "http://")) and not check_link_ok(MEDIA_CLIENT, url):
         return jsonify({"error": "این لینک روی سرور منبع پاسخ نمی‌دهد (خراب است)"}), 422
 
     item = _add_url_item(url, title, name, room_code=cur.room_id, added_by_user_id=user.id)
@@ -2732,7 +2551,7 @@ def api_subtitle_url():
     sub_id = new_id()
     raw_path = os.path.join(Config.SUBS_DIR, f"{sub_id}.{ext}")
     try:
-        _download_to_file(url, raw_path, timeout=15)
+        download_to_file(MEDIA_CLIENT, url, raw_path, timeout=15)
     except Exception as e:
         return jsonify({"error": f"دریافت فایل زیرنویس ناموفق بود: {e}"}), 400
 

@@ -34,6 +34,16 @@ dist/
 
 media/
 
+# Safety net: runtime media output must never land inside the media_domain
+# package. The suite writes to Config.MEDIA_DIR (<repo>/media) and a stray
+# rename once dragged those artifacts into the package where they were
+# nearly committed.
+media_domain/avatars/
+media_domain/chat/
+media_domain/hls/
+media_domain/subs/
+media_domain/uploads/
+
 data/
 
 # Build artifacts
