@@ -12,7 +12,19 @@ import shutil
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text as sql_text
+
+try:
+    from sqlalchemy import text as sql_text
+except ModuleNotFoundError as _exc:  # pragma: no cover - only fires on a bare interpreter
+    # The suite lives in ./venv. `python -m pytest` with the system python
+    # (a different minor version, no Flask/SQLAlchemy/gevent) dies right here
+    # on the first import; say what to run instead of leaving a bare
+    # ModuleNotFoundError. Every Makefile target already pins
+    # $(VENV)/bin/python, so this is the only place a wrong interpreter shows.
+    raise SystemExit(
+        f"{_exc}. This looks like a non-venv interpreter — run "
+        "`make test` / `make test-fast`, or `venv/bin/python -m pytest`."
+    ) from None
 
 from tests.support import require_ffmpeg
 

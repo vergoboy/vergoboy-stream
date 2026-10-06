@@ -17,6 +17,8 @@ import tempfile
 import time
 import unittest
 
+import pytest
+
 from media_pipeline import HwAccel, plan
 from media_pipeline.probe import probe
 from media_pipeline.errors import ErrorKind
@@ -615,6 +617,9 @@ class FallbackWalking(unittest.TestCase):
 @unittest.skipUnless(shutil.which("ffprobe"), "ffprobe not installed")
 class RealEncode(unittest.TestCase):
     """End to end: the production argv, run by the production runner."""
+
+    #: Real ffmpeg end to end — excluded from `make test-fast`.
+    pytestmark = pytest.mark.integration
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

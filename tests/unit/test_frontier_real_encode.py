@@ -8,9 +8,14 @@ files is that the two disagree whenever the final segment is partial.
 import os
 import subprocess
 
+import pytest
+
 from config import Config
 
 import app
+
+#: Real ffmpeg encode — excluded from `make test-fast`, kept in `make test`.
+pytestmark = pytest.mark.integration
 
 DUR = 22
 

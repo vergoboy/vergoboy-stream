@@ -17,9 +17,14 @@ import subprocess
 import tempfile
 import unittest
 
+import pytest
+
 from media_pipeline import HwAccel, plan, plan_compat
 from media_pipeline.ffmpeg_cmd import build_direct_play_cmd, build_plan_args, detect_hwaccel
 from media_pipeline.probe import _detect_faststart, probe
+
+#: Everything in this module runs a real ffmpeg — excluded from `make test-fast`.
+pytestmark = pytest.mark.integration
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")

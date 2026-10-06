@@ -33,8 +33,8 @@ test-socket: ## Run the live-socket suite (boots an embedded postgres + real ser
 test-integration: ## Run the real-ffmpeg integration suites
 	$(PYTHON) -m pytest tests/integration $(PYTEST)
 
-test-fast: ## Everything except the socket suite: no postgres, no live server
-	$(PYTHON) -m pytest -m "not socket" $(PYTEST)
+test-fast: ## Unit + socket suites, no real ffmpeg encodes
+	$(PYTHON) -m pytest -m "not integration" $(PYTEST)
 
 coverage: ## Coverage report (the socket suite included)
 	$(PYTHON) -m coverage run -m pytest $(PYTEST)
