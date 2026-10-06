@@ -15,6 +15,7 @@ import urllib.parse
 from archive_logging import event as archive_event, safe_target, timer as ArchiveTimer
 
 from media_domain.adapters.filesystem import local_mirror
+from media_domain.adapters.http import safe_fetch_url
 
 DIRECT_MEDIA_EXT = {
     ".mkv", ".mp4", ".m4v", ".webm", ".avi", ".mov",
@@ -64,15 +65,16 @@ def check_link_ok(client, url: str, timeout: int = 15) -> bool:
     even a server that ignores Range/HEAD never transfers the whole file.
 
     Returns False for HTTP >= 400, TLS/certificate failures, DNS/connection
-    errors and timeouts — i.e. any URL that could never be encoded.
-
-    Note: `client` is followed without any host policy. The S2 SSRF fix lands
-    in its own commit, with its own tests.
+    errors and timeouts — i.e. any URL that could never be encoded — and for
+    URLs violating the S2 fetch policy (non-http schemes, internal addresses,
+    redirect pivots): those are equally not encodable, and must never be
+    fetched at all.
     """
     try:
         started = ArchiveTimer()
         archive_event("media", "probe_start", proxy_enabled=False, direct=True, **safe_target(url))
-        response = client.get(url, headers=_LINK_CHECK_HEADERS, timeout=timeout, stream=True)
+        response = safe_fetch_url(client, url, headers=_LINK_CHECK_HEADERS,
+                                  timeout=timeout, stream=True)
         ok = 200 <= response.status_code < 400
         next(response.iter_content(1), b"")
         response.close()
@@ -101,7 +103,9 @@ def resolve_media_url_remote(client, url: str, timeout: int = 15) -> str:
 
     html = None
     try:
-        with client.get(url, headers=_UA_HEADERS, timeout=timeout) as resp:
+        resp = safe_fetch_url(client, url, headers=_UA_HEADERS, timeout=timeout,
+                              max_bytes=_MAX_HTML_BYTES)
+        with resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             if ctype.startswith(("video/", "audio/")) or "matroska" in ctype:
                 return url
@@ -124,7 +128,8 @@ def resolve_media_url_remote(client, url: str, timeout: int = 15) -> str:
         base, folder = m.group(1), urllib.parse.unquote(m.group(2))
         list_url = f"{base}/files/api/list?p=" + urllib.parse.quote(folder, safe="/")
         try:
-            with client.get(list_url, headers=_UA_HEADERS, timeout=timeout) as resp:
+            with safe_fetch_url(client, list_url, headers=_UA_HEADERS,
+                                timeout=timeout, max_bytes=_MAX_HTML_BYTES) as resp:
                 resp.raise_for_status()
                 data = resp.json()
             for it in (data or {}).get("items", []) or []:

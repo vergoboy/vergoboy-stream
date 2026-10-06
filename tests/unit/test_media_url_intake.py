@@ -19,6 +19,7 @@ would have to be deleted rather than inverted, and would hide the fix.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -33,11 +34,21 @@ from media_domain.services import metadata, url_intake
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """S2 policy needs every host to resolve to a public IP; these tests use
+    unresolvable names like `x` and never open a socket, so give them one."""
+    monkeypatch.setattr(
+        "media_domain.adapters.http._resolve", lambda host: ["93.184.216.34"])
+
+
 class FakeResponse:
     def __init__(self, *, status_code=200, headers=None, content=b"",
                  chunks=None, json_data=None, raise_on_status=False):
         self.status_code = status_code
         self.headers = headers or {}
+        if content == b"" and json_data is not None:
+            content = json.dumps(json_data).encode()  # safe_fetch_url reads .content
         self.content = content
         self._chunks = chunks if chunks is not None else [content]
         self._json = json_data
