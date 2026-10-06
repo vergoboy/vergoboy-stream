@@ -274,6 +274,39 @@ def live_server(request):
     )
     dbmod.init_db()
 
+    # The suite runs the real app module in-process, and Config reads these
+    # paths at call time, so point the whole media + data tree at the throwaway
+    # directory before a socket test can touch it. Without this the socket
+    # suite writes room JSONs into the developer's real data/rooms, reads its
+    # media, and — worse — a cleanup triggered during a test can delete real
+    # uploads/HLS (the exact wipe that empty media stores come from). Values
+    # are restored at session teardown.
+    media_tmp = tmpdir / "media"
+    _media_dirs = {
+        "MEDIA_DIR": media_tmp,
+        "UPLOAD_DIR": media_tmp / "uploads",
+        "SUBS_DIR": media_tmp / "subs",
+        "HLS_DIR": media_tmp / "hls",
+        "CHAT_IMG_DIR": media_tmp / "chat",
+        "AVATAR_DIR": media_tmp / "avatars",
+    }
+    data_tmp = tmpdir / "data"
+    _saved_dirs = {attr: getattr(config_mod.Config, attr) for attr in _media_dirs}
+    _saved_dirs["DATA_DIR"] = config_mod.Config.DATA_DIR
+    _saved_dirs["DATA_FILE"] = config_mod.Config.DATA_FILE
+    for attr, path in _media_dirs.items():
+        setattr(config_mod.Config, attr, str(path))
+    config_mod.Config.DATA_DIR = str(data_tmp)
+    config_mod.Config.DATA_FILE = str(data_tmp / "state.json")
+    for path in (*_media_dirs.values(), data_tmp):
+        path.mkdir(parents=True, exist_ok=True)
+
+    def _restore_dirs() -> None:
+        for attr, value in _saved_dirs.items():
+            setattr(config_mod.Config, attr, value)
+
+    request.addfinalizer(_restore_dirs)
+
     import app as app_module
 
     port = _free_port()
@@ -368,6 +401,7 @@ def live_server(request):
         "client": socketio_client,
         "room_code": room_code,
         "other_room_code": other_room_code,
+        "data_dir": str(data_tmp),
         "owner": {"id": owner.id, "token": dbmod.create_access_token(owner.id)},
         "member": {"id": member.id, "token": dbmod.create_access_token(member.id)},
     }

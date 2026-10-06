@@ -1019,3 +1019,28 @@ def test_a_refresh_token_cannot_be_used_to_connect(resettable, live_server, live
     token = live_server["db"].create_refresh_token(user["id"])
 
     _assert_connect_refused(live_server, token)
+
+
+def test_room_persistence_stays_out_of_the_repo_data_dir(live_server):
+    """The socket suite runs the real app in-process and once wrote room JSON
+    into the developer's real data/rooms (TST*.json appearing there from test
+    runs). The live_server fixture now points Config's data/media tree at a
+    throwaway directory, so a test can never reach the dev machine's real
+    state — this test pins that the redirect is actually in effect.
+    """
+    import json as _json
+    from pathlib import Path
+
+    import app as app_module
+
+    rs = app_module.rooms.get("TSTPERSIST")
+    rs.add_item({"id": "pitem", "type": "file", "title": "persist probe",
+                 "src": "/stream/media/hls/pitem/master.m3u8", "status": "queued"})
+    app_module.safe_save(rs)
+
+    repo_room_file = Path(__file__).resolve().parents[2] / "data" / "rooms" / "TSTPERSIST.json"
+    assert not repo_room_file.exists(), f"socket suite wrote into {repo_room_file}"
+
+    tmp_room_file = Path(live_server["data_dir"]) / "rooms" / "TSTPERSIST.json"
+    assert tmp_room_file.exists()
+    assert _json.loads(tmp_room_file.read_text(encoding="utf-8"))["room_id"] == "TSTPERSIST"
