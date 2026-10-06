@@ -30,11 +30,14 @@ test-unit: ## Run only the fast unit suites (no ffmpeg, no database)
 test-socket: ## Run the live-socket suite (boots an embedded postgres + real server)
 	$(PYTHON) -m pytest tests/socket $(PYTEST)
 
+test-api: ## Run the live-HTTP suite (boots an embedded postgres + real server)
+	$(PYTHON) -m pytest tests/api $(PYTEST)
+
 test-integration: ## Run the real-ffmpeg integration suites
 	$(PYTHON) -m pytest tests/integration $(PYTEST)
 
-test-fast: ## Everything except the socket suite: no postgres, no live server
-	$(PYTHON) -m pytest -m "not socket" $(PYTEST)
+test-fast: ## Everything except the live suites: no postgres, no live server
+	$(PYTHON) -m pytest -m "not socket and not live_api" $(PYTEST)
 
 coverage: ## Coverage report (the socket suite included)
 	$(PYTHON) -m coverage run -m pytest $(PYTEST)

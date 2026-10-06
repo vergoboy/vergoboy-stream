@@ -48,6 +48,7 @@ from media_domain.services.url_intake import (
     resolve_media_url,
     url_ext,
 )
+from playlist_domain.services.items import build_url_item, is_hls_source
 import archive_scraper
 from archive_network import create_direct_media_session, direct_media_environment
 from archive_logging import configure as configure_archive_logging, event as archive_event, redact, reset_request_id, safe_target, set_request_id, timer as ArchiveTimer
@@ -1823,21 +1824,16 @@ def _add_url_item(url: str, title: str, name: str, room_code: str = None,
     """Shared logic for the single add-url endpoint and the bulk archive add."""
     url = resolve_media_url(MEDIA_CLIENT, url)
     item_id = new_id()
-    is_hls = _is_hls(url)
+    is_hls = is_hls_source(url)
     needs_encode = not is_hls
     rs = rooms.get(room_code) if room_code else room
     if rs is None:
         return None
-    item = {
-        "id": item_id, "type": "url",
-        "title": title or url.rsplit("/", 1)[-1].split("?")[0] or "ویدیو",
-        "src": None if needs_encode else url,
-        "subtitles": [], "audio_tracks": [], "added_by": name,
-        "added_at": time.time(),
-        "status": "queued" if needs_encode else "ready",
-        "_room_id": rs.room_id,
-        "added_by_user_id": added_by_user_id,
-    }
+    item = build_url_item(
+        item_id=item_id, url=url, title=title, added_by=name,
+        room_id=rs.room_id, added_by_user_id=added_by_user_id,
+        added_at=time.time(), need_encode=needs_encode,
+    )
     with LOCK:
         rs.add_item(item)
         safe_save(rs)
@@ -2363,10 +2359,6 @@ def api_add_youtube_playlist():
 
 
 VIDEO_EXTS = {"mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi", "ts"}
-
-
-def _is_hls(url: str) -> bool:
-    return url_ext(url) == "m3u8" or "m3u8" in url.split("?")[0].lower()
 
 
 @app.route("/stream/api/add-url", methods=["POST"])
