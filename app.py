@@ -3834,6 +3834,35 @@ def on_watching(data):
     broadcast_presence(rs)
 
 
+@socketio.on("playback_status")
+def on_playback_status(data):
+    """Client reports how *its own* playback is doing.
+
+    The panel's per-member chips need this, and the server cannot work it out:
+    only the client knows whether its decoder stalled or its socket dropped. A
+    client that never reports is left as the neutral "ready" default rather than
+    being assumed broken.
+
+    Deliberately not throttled. Reporting is a few bytes and only happens on a
+    real state change, and a stale chip is worse than a slightly busier presence
+    broadcast -- which is itself already debounced by who is actually watching.
+    """
+    code, _user = _socket_session()
+    if not code:
+        return
+    rs = rooms.get(code)
+    data = data or {}
+    with LOCK:
+        entry = rs.users.get(request.sid)
+        if entry is None:
+            return
+        entry["playback"] = {
+            "state": data.get("state"),
+            "drift_seconds": data.get("drift_seconds", 0.0),
+        }
+    broadcast_presence(rs)
+
+
 @socketio.on("voice_joined")
 def on_voice_joined(data):
     code, _user = _socket_session()

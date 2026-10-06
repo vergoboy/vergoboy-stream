@@ -19,6 +19,55 @@ LOCK = threading.Lock()
 CHAT_LOCK = threading.Lock()
 
 
+#: Playback health a client may report about itself, worst first.
+#:
+#: A client is the only party that knows whether *its* decoder is stalled, so
+#: the panel's per-member chips come from what clients report rather than from
+#: anything the server can measure. The order is the severity order, which is
+#: what makes a person's several tabs reducible to one chip: a person with one
+#: tab reconnecting and two playing cleanly shows as "reconnecting", because
+#: the room cannot help them until the worst tab recovers.
+PLAYBACK_STATES = ("out_of_sync", "reconnecting", "buffering", "ready")
+
+#: Drift at or above this counts as out of sync for a client that reports no
+#: explicit state. Matches the native client's own correction threshold, so the
+#: chip and the engine agree on when a viewer is actually behind.
+SYNC_DRIFT_THRESHOLD = 2.0
+
+
+def worst_playback_status(reports) -> dict:
+    """Reduce one person's per-socket playback reports to a single chip.
+
+    ``reports`` is an iterable of client-reported dicts, each ``{"state": ...,
+    "drift_seconds": float}``. The result is the worst state seen, carrying the
+    largest absolute drift reported alongside it, so the panel can render
+    "out of sync by 4.2s" rather than just a colour.
+
+    An unknown or missing state is not trusted to mean "ready": a client that
+    reports a drift over the threshold is out of sync whatever it called itself,
+    and one that reports nothing usable is ``ready`` with zero drift.
+    """
+    worst_state, worst_drift = "ready", 0.0
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        try:
+            drift = abs(float(report.get("drift_seconds") or 0.0))
+        except (TypeError, ValueError):
+            drift = 0.0
+        state = report.get("state")
+        if drift >= SYNC_DRIFT_THRESHOLD:
+            # Drift the client itself admitted to is authoritative; it outranks
+            # whatever label it attached.
+            state = "out_of_sync"
+        if state not in PLAYBACK_STATES:
+            state = "ready"
+        if PLAYBACK_STATES.index(state) < PLAYBACK_STATES.index(worst_state):
+            worst_state = state
+        worst_drift = max(worst_drift, drift)
+    return {"state": worst_state, "drift_seconds": round(worst_drift, 2)}
+
+
 class RoomState:
     def __init__(self, room_id: str = None):
         # room_id is the room's invite code. When set, state is persisted to a
@@ -80,8 +129,11 @@ class RoomState:
         `id`/`can_control`/`is_owner` back the member-management panel.
         """
         public = {}
+        socket_reports: dict = {}
         for sid, user in self.users.items():
             identity = str(user.get("id") or sid)
+            if user.get("playback"):
+                socket_reports.setdefault(identity, []).append(user["playback"])
             entry = public.get(identity)
             if entry is None:
                 entry = public[identity] = {
@@ -96,6 +148,7 @@ class RoomState:
                     "can_control": False,
                     "is_owner": False,
                     "sockets": 0,
+                    "playback": {"state": "ready", "drift_seconds": 0.0},
                 }
             # OR-merge: a person counts as present/active if ANY of their
             # sockets reports that state.
@@ -114,6 +167,10 @@ class RoomState:
             entry["idle"] = not entry["watching"] and not entry["in_voice"]
             # Browsing = connected to the room, not currently watching.
             entry["browsing"] = not entry["watching"]
+            # One chip per person, reduced from the worst of their sockets.
+            entry["playback"] = worst_playback_status(
+                socket_reports.get(identity, [])
+            )
         return list(public.values())
 
     # ---------- تغییر وضعیت پخش ----------
