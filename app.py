@@ -177,7 +177,9 @@ def _bearer_token() -> str:
     auth = request.headers.get("Authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    t = request.args.get("token") or (request.form.get("token") or "").strip()
+    # No `request.args` here: a token in the query string lands in logs,
+    # history and Referer headers (audit S2), and nothing of ours reads it.
+    t = (request.form.get("token") or "").strip()
     if t:
         return t
     try:
@@ -3754,8 +3756,6 @@ def on_connect(auth=None):
     token = ""
     if isinstance(auth, dict):
         token = (auth.get("token") or "").strip()
-    if not token:
-        token = (request.args.get("token") or "").strip()
     payload = dbmod.decode_token(token) if token else None
     if not payload or payload.get("type") != "access":
         log_debug(f"Socket connect rejected (no/invalid token from {request.sid})")
