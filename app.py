@@ -560,6 +560,57 @@ def _rendition_mode(item: dict, rendition: dict) -> str:
     return str(mode).strip().lower()
 
 
+def _frontier_from_disk(item_id: str, label: str):
+    """Seconds of timeline already encoded on disk for one rung, or None.
+
+    TRANSCODE_PROGRESS lives in memory, so after a restart every unfinished
+    rung looks unmeasurable and the guard pins the whole room at 0 until the
+    encode is re-kicked — even though the segments are all still there.
+    Recovering the frontier from disk keeps seeking usable straight after a
+    restart.
+
+    The playlist is authoritative because ffmpeg writes one #EXTINF per
+    completed segment, and `-hls_flags independent_segments+temp_file` means a
+    listed segment is already fully written. Counting files instead would claim
+    `count * HLS_SEGMENT_SECONDS`, which over-reports by up to a whole segment
+    whenever the last one is partial (measured: 22.0s encoded reported as 24.0)
+    and would hand viewers a seek target inside a hole. The count fallback is
+    therefore deliberately one segment pessimistic.
+
+    None (not 0) when nothing is measurable: "unknown" and "nothing encoded"
+    are different, and only the caller can decide which is safe.
+    """
+    if not item_id or not label:
+        return None
+    rung = os.path.join(Config.HLS_DIR, str(item_id), str(label))
+
+    try:
+        with open(os.path.join(rung, "index.m3u8"), "r") as fh:
+            total = 0.0
+            seen = False
+            for line in fh:
+                if line.startswith("#EXTINF:"):
+                    try:
+                        total += float(line.split(":", 1)[1].split(",", 1)[0])
+                        seen = True
+                    except (IndexError, ValueError):
+                        continue
+        if seen:
+            return total
+    except OSError:
+        pass
+
+    try:
+        names = os.listdir(rung)
+    except OSError:
+        return None
+    segments = sum(1 for n in names
+                   if n.endswith(".ts") and not n.startswith("."))
+    if segments <= 1:
+        return None
+    return (segments - 1) * Config.HLS_SEGMENT_SECONDS
+
+
 def _incomplete_rendition_frontiers(item: dict, progress: dict) -> tuple:
     """``(frontiers_by_label, unknown_advertised)`` for the live seek guard.
 
@@ -587,6 +638,10 @@ def _incomplete_rendition_frontiers(item: dict, progress: dict) -> tuple:
             continue
         info = progress.get(f"{item_id}:{rendition.get('label')}")
         encoded = (info or {}).get("encoded_seconds")
+        if encoded is None:
+            # No live progress: the process may simply have restarted. Prefer
+            # what is provably on disk over declaring the room unsafe.
+            encoded = _frontier_from_disk(item_id, rendition.get("label"))
         if encoded is None:
             unknown = True
             continue
@@ -621,8 +676,16 @@ def seek_frontier(item: dict, progress: dict) -> float:
 
     renditions = item.get("renditions") or []
     if not renditions:
-        # `complete` was handled above, so reaching here means the ladder is not
-        # recorded yet. Nothing is known, so nothing is safe.
+        # No ladder at all. Two very different situations look identical here:
+        # a manually pasted HLS URL has no rungs because the server never
+        # transcodes it, so there is no frontier to enforce and clamping to 0
+        # would pin that room at the start forever; whereas an item that is
+        # about to be encoded has not had its ladder recorded yet, nothing is
+        # playable, and that really is the most unsafe state of all. A ready
+        # item with a src is the former — _add_url_item only leaves src set
+        # when needs_encode was False.
+        if item.get("src") and item.get("status") == "ready":
+            return math.inf
         return 0.0
 
     if not any(r.get("status") in SELECTABLE_RENDITION_STATUSES for r in renditions):
