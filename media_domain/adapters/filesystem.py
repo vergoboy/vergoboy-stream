@@ -16,6 +16,37 @@ DEFAULT_LOCAL_ROOT = "/opt/files/data"
 _FILES_DATA_RE = re.compile(r"^https?://[^/]+/files/data/(.*)$")
 
 
+class UnsafePathError(ValueError):
+    """A path handed to ffprobe/ffmpeg that leaves the allowed roots (audit S2)."""
+
+
+def safe_local_path(path: str, roots) -> str:
+    """Return the `realpath` of `path` if (and only if) it lands inside one of
+    `roots`, else raise.
+
+    This is the local-path half of the gate every source passes through before
+    it becomes an ffprobe/ffmpeg argument: a stored source is data from the DB,
+    and `..`, an absolute path or a symlink can all walk out of the media
+    store. Containment is decided after normalization — checking the literal
+    string first is exactly the mistake that made the old argv buildable.
+    """
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise UnsafePathError("empty or nul path")
+    if "://" in path:
+        raise UnsafePathError(f"not a local path: {path!r}")
+    try:
+        real = os.path.realpath(path)
+    except (OSError, ValueError) as e:
+        raise UnsafePathError(f"unresolvable path: {e}") from e
+    for root in roots:
+        if not isinstance(root, str) or not root:
+            continue
+        real_root = os.path.realpath(root)
+        if real == real_root or real.startswith(real_root + os.sep):
+            return real
+    raise UnsafePathError(f"path outside allowed roots: {path!r}")
+
+
 def local_mirror(url: str, root: str = DEFAULT_LOCAL_ROOT) -> str:
     """If `url` is a verGoBoy file URL that also exists under `root`, return the
     local path; otherwise return `url` unchanged.

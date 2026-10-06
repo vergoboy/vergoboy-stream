@@ -36,12 +36,19 @@ from media_pipeline import (
     build_fallback_chain,
     cleanup_orphaned_partials,
 )
+from media_domain.adapters.filesystem import DEFAULT_LOCAL_ROOT
 from media_domain.adapters.http import download_to_file
 from media_domain.services.metadata import (
     find_text_subtitle_streams,
     get_duration_s,
     get_video_height,
     get_video_width,
+)
+from media_domain.services.source_policy import (
+    MEDIA_PROTO_WHITELIST,
+    UnsafePathError,
+    UnsafeUrlError,
+    validate_media_source,
 )
 from media_domain.services.url_intake import (
     check_link_ok,
@@ -790,17 +797,25 @@ LANG_LABELS = {
 # ffprobe / stream inspection
 # ────────────────────────────────────────────────────────────────────────────
 
+def _media_path_roots() -> tuple:
+    """Roots a local source may live under, computed at call time so test and
+    runtime overrides of Config.HLS_DIR are honoured."""
+    return (Config.MEDIA_DIR, Config.HLS_DIR, DEFAULT_LOCAL_ROOT)
+
+
 def _ffprobe_source(source: str, timeout: int = 20) -> dict:
     log_debug(f"Starting ffprobe on: {_safe_source_for_log(source)}")
     start_time = time.time()
     try:
+        source = validate_media_source(source, _media_path_roots())
         args = [
             "ffprobe", "-v", "error",
             "-print_format", "json",
             "-show_streams", "-show_format",
             "-rw_timeout", str(timeout * 1_000_000),
         ]
-        if isinstance(source, str) and source.startswith(("http://", "https://")):
+        if source.startswith(("http://", "https://")):
+            args += ["-protocol_whitelist", MEDIA_PROTO_WHITELIST]
             args += ["-headers",
                      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
@@ -875,6 +890,7 @@ def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vb
         # Some download mirrors (aparatchi-dlcenter, hollowofthealley, ...) 404
         # or 403 plain ffmpeg/Lavf requests. Send a browser User-Agent so the
         # direct-link encodes behave like the browser's own download does.
+        cmd += ["-protocol_whitelist", MEDIA_PROTO_WHITELIST]
         cmd += ["-headers",
                 "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
@@ -1035,12 +1051,21 @@ def _extract_subtitles_async(item_id: str, source: str, sub_streams: list, reque
     """Separate, lightweight ffmpeg pass per subtitle stream (text streams
     are tiny/fast) so a subtitle problem can never affect video
     playability."""
+    try:
+        source = validate_media_source(source, _media_path_roots())
+    except (UnsafeUrlError, UnsafePathError) as e:
+        log_debug(f"Subtitle extraction refused source: {e}")
+        return
     new_subs = []
     for i, s in enumerate(sub_streams[:4]):
         srt_path = os.path.join(Config.SUBS_DIR, f"{item_id}_{i}_tmp.srt")
         try:
+            cmd = ["ffmpeg", "-y"]
+            if source.startswith(("http://", "https://")):
+                cmd += ["-protocol_whitelist", MEDIA_PROTO_WHITELIST]
+            cmd += ["-i", source, "-map", f"0:{s['index']}", "-c:s", "srt", srt_path]
             subprocess.run(
-                ["ffmpeg", "-y", "-i", source, "-map", f"0:{s['index']}", "-c:s", "srt", srt_path],
+                cmd,
                 capture_output=True, timeout=120, check=True, env=direct_media_environment(),
             )
             if os.path.exists(srt_path) and os.path.getsize(srt_path) > 10:
@@ -1127,6 +1152,12 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
         else:
             broadcast_notify("quality_error", requester_name, room_code=rs.room_id,
                              id=item_id, title=title, label=label)
+
+    try:
+        source = validate_media_source(source, _media_path_roots())
+    except (UnsafeUrlError, UnsafePathError) as e:
+        fail(f"منبع پخش نامعتبر است: {e}")
+        return
 
     free_mb = free_space_mb(Config.MEDIA_DIR)
     if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
