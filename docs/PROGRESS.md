@@ -45,6 +45,19 @@ Notes:
   - 92e94a3: access token no longer accepted from the query string (header /
     form / JSON body / socket auth-dict only). verify-email/reset query
     tokens kept deliberately (single-purpose email tokens).
+- Media-wipe bug (reported 2026-10-06 "image and video is not loading"):
+  - Diagnosis: the whole media/ tree (uploads/hls/subs/chat/avatars) was
+    empty while rooms still referenced it → 404s. Non-returnable deletions.
+  - 3ec15ab: `_cleanup_orphans` counted only in-process-open rooms; a cold
+    room on disk (not yet `rooms.get()`-opened) had its media deleted as
+    "orphan" by any /stream/api/delete or /stream/api/cleanup. Now scans
+    data/rooms/*.json too; genuinely orphaned files still removed.
+  - e8bcf20: live_server (socket suite) runs the real app in-process with
+    real Config, so it wrote TST room JSONs into the dev's real data/rooms
+    and could trigger cleanups against real media/. It now points every
+    Config media/data attr at the throwaway pgserver dir, restored at
+    session teardown; a test pins that persistence stays out of repo data/.
+  - Neg. controls: 2/3 and 1/1 failed against pre-fix code; fast suite 762.
 
 ## ADR log
 
