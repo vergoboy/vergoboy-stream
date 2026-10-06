@@ -5,25 +5,34 @@ Statuses: todo / doing / done / blocked.
 Phases in fixed order: P0 → P1 → P2 → P3 → P4 → P5 → P6. No phase starts
 before its predecessor's gate passed AND the user approved.
 
-## Session 1 (2026-10-06) — reconciliation
+## Session 1 (2026-10-06) — reconciliation + commit housekeeping
 
 | Phase | Step | Status | Commit | Evidence |
 | --- | --- | --- | --- | --- |
-| all | Section 1 reconciliation (first action) | done | n/a | see docs/RECONCILIATION.md; test run: 792 passed, 3 skipped (`venv/bin/python -m pytest -q`) |
-| all | Tree is dirty — stopped and asked (rule 1) | done | n/a | user decided Option A (see RECONCILIATION "Session decisions") |
-| all | docs commit (PROGRESS/RECONCILIATION/QA) | doing | pending | this commit |
-| P1-hk | (a) delete app.py.save | doing | pending | staged, 596 lines removed |
-| P1-hk | (b) frontier clamp + its tests on feat/cinema-redesign | todo | pending | app.py hunks @@ -560/-587/-621 only |
-| P3-early | playback-status + playlist chunks → wip/p3-early | todo | pending | parked, unmerged, counts toward no gate |
-| P1 | branch phase/1-media-and-mpv, suite green | todo | pending | full pytest run required |
-| P1 | test-speed housekeeping (integration marker, test-fast, venv) | todo | pending | decision 6 |
-| P1 | S2 SSRF / safe_local_path / token-in-query (tests first) | todo | pending | url_intake.py:69 defers S2 |
+| all | Section 1 reconciliation (first action) | done | n/a | docs/RECONCILIATION.md; 792 passed, 3 skipped on the dirty tree |
+| all | docs commit (PROGRESS/RECONCILIATION/QA) | done | af57656 | git show --stat |
+| P1-hk | (a) delete app.py.save | done | 5fda377 | 596 lines removed, own commit as ordered |
+| P1-hk | (b) frontier clamp + its tests (3 hunks only) | done | b620294 | app.py +65/-2; tests/unit/test_frontier_{gaps,real_encode}.py |
+| P3-early | playback-status chunk → wip/p3-early | done | 5d32425 | app.py handler + state.py + unit/socket tests, staged hunk-by-hunk |
+| P3-early | playlist slice → wip/p3-early | done | c389d78 | playlist_domain/, tests/api/, boundary-growth, Makefile/pytest.ini live_api |
+| P1 | branch phase/1-media-and-mpv from feat/cinema-redesign | done | (branch at b620294) | clean tree, app.py = 4038 lines at P1 start |
+| P1 | test-speed housekeeping (decision 6) | done | c8eea6d | `make test-fast` = 704 passed, 2 skipped, 20 deselected (405s); `make test` = 724 passed, 2 skipped (410s); bare `python -m pytest` → actionable venv message, exit 1 |
+| P1 | S2 SSRF / safe_local_path / token-in-query (tests first) | todo | pending | next |
 | P1 | capabilities + media token + metadata; MpvBackend; gate | todo | pending | acceptance in RECONCILIATION decision 5 |
 | P0 | baseline audit, ADR 0001/0002, slice map | done | 655e4c1, 0630752, 97e9dd7 | docs/ARCHITECTURE_AUDIT.md, docs/adr/ |
-| P1 | media URL-intake slice extracted + S1 path traversal | done | 931d924, 99ca8e1, da0d01b, 800efad | 792 tests green incl. media tests |
+| P1 | media URL-intake slice extracted + S1 path traversal | done | 931d924, 99ca8e1, da0d01b, 800efad | tests green |
 | P1 | mpv spike + mpv_controller crate (client-side 1a/1b) | done | 0630752, ec6891e | docs/spike/mpv-ipc-observations.json, crate tests |
-| P1 | S2 SSRF, token-via-query-string | todo | pending | part of step "security fixes" above |
 | P2–P6 | — | todo | — | — |
+
+Notes:
+- Decision-6 venv guard: a true re-exec was attempted first and rejected —
+  pytest's fd capture already replaced fd 1/2 by conftest-import time and
+  `/proc/<ppid>/fd` cannot reopen pipes (ENXIO), so the child's output was
+  silently lost. The honest fix: conftest raises SystemExit with the exact
+  command to run; every Makefile target pins $(VENV)/bin/python.
+- `-m integration` marks are honoured on unittest.TestCase classes
+  (verified: 20/726 collected with `-m integration`, RealEncode +
+  RuntimePipeline both in it).
 
 ## ADR log
 
