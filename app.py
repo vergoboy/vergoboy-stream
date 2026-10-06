@@ -1391,23 +1391,47 @@ def request_quality(item_id: str, label: str, requester_name: str):
 # Orphan-file cleanup helpers
 # ────────────────────────────────────────────────────────────────────────────
 
+def _scan_room_items(playlist, upload_refs, sub_refs, hls_ids, seen):
+    """Add every file a playlist owns to the reference sets. Shared by the
+    in-memory registry and the room JSONs still on disk, so both get the same
+    treatment (and the same dedup)."""
+    for item in playlist:
+        if item.get("id") in seen:
+            continue
+        seen.add(item["id"])
+        raw_path = item.get("_raw_path")
+        if raw_path:
+            upload_refs.add(os.path.basename(raw_path))
+        if item.get("renditions") or "/media/hls/" in (item.get("src") or ""):
+            hls_ids.add(item["id"])
+        for s in item.get("subtitles") or []:
+            url = s.get("url") or ""
+            if "/media/subs/" in url:
+                sub_refs.add(url.rsplit("/", 1)[-1])
+
+
 def _collect_referenced_files() -> tuple:
     upload_refs, sub_refs, hls_ids = set(), set(), set()
     seen = set()
     for rs in list(rooms._rooms.values()) + ([room] if room is not None else []):
-        for item in rs.playlist:
-            if item.get("id") in seen:
-                continue
-            seen.add(item["id"])
-            raw_path = item.get("_raw_path")
-            if raw_path:
-                upload_refs.add(os.path.basename(raw_path))
-            if item.get("renditions") or "/media/hls/" in (item.get("src") or ""):
-                hls_ids.add(item["id"])
-            for s in item.get("subtitles") or []:
-                url = s.get("url") or ""
-                if "/media/subs/" in url:
-                    sub_refs.add(url.rsplit("/", 1)[-1])
+        _scan_room_items(rs.playlist, upload_refs, sub_refs, hls_ids, seen)
+    # Rooms on disk that have never been opened in this process still own their
+    # media. On boot the registry is empty, so counting only the registry here
+    # makes cleanup delete every cold room's uploads/HLS — exactly how real
+    # media got wiped by one /stream/api/delete on another item.
+    try:
+        entries = sorted(os.listdir(os.path.join(Config.DATA_DIR, "rooms")))
+    except OSError:
+        entries = []
+    for fname in entries:
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(Config.DATA_DIR, "rooms", fname), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        _scan_room_items(data.get("playlist") or [], upload_refs, sub_refs, hls_ids, seen)
     return upload_refs, sub_refs, hls_ids
 
 
