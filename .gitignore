@@ -9,6 +9,8 @@ __pycache__/
 venv/
 .env
 .env.*
+# ...but keep the placeholder template reviewable
+!.env.example
 
 # IDE
 .vscode/
