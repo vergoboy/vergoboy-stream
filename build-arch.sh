@@ -124,33 +124,68 @@ fi
 
 # ── static export the PKGBUILD expects to copy ───────────────────────────────
 
-if [ "$REBUILD_UI" -eq 1 ] || [ ! -f "$OUTDIR/index.html" ]; then
-  say "building the static export (webapp/out)"
-  [ "$REBUILD_UI" -eq 0 ] && say "webapp/out/index.html missing, so it has to be built"
+export_ui() {
+  say "building the static export (webapp/out) for API origin $API_ORIGIN"
+  # A stale .next cache does not fail cleanly: webpack's wasm hash layer dies
+  # with "TypeError: Cannot read properties of undefined (reading 'length')" and
+  # "Next.js build worker exited with code: 1", naming neither the cache nor the
+  # file that triggered it. Drop it so a rebuild always starts clean.
   rm -rf "$ROOT/webapp/.next" "$OUTDIR"
   ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
+}
+
+if [ "$REBUILD_UI" -eq 1 ] || [ ! -f "$OUTDIR/index.html" ]; then
+  [ "$REBUILD_UI" -eq 0 ] && say "webapp/out/index.html missing, so it has to be built"
+  export_ui
 else
-  say "reusing webapp/out (pass --rebuild-ui to force a fresh export)"
-  # out/ is gitignored, so it is never sourced from the clone -- PKGBUILD copies
-  # it from this working tree. Nothing in the build links it to the frontend
-  # source, so a stale export is packaged silently and the only symptom is a UI
-  # that does not match the code. Warn when the source has moved on.
-  stale="$(find "$ROOT/webapp" -type f \
-    \( -name '*.tsx' -o -name '*.ts' -o -name '*.css' -o -name 'next.config.*' \) \
-    -newer "$OUTDIR/index.html" \
-    -not -path '*/node_modules/*' -not -path '*/.next/*' \
-    -not -path '*/out/*' -not -path '*/target/*' -not -name 'next-env.d.ts' \
-    -printf '%P\n' 2>/dev/null | head -5 || true)"
-  if [ -n "$stale" ]; then
-    warn "webapp/out is older than the frontend source; the package would ship a"
-    warn "stale UI. Rebuilding now (same as --rebuild-ui)."
-    printf '%s\n' "$stale" | sed 's/^/      /' >&2
-    # A stale .next cache does not fail cleanly: webpack's wasm hash layer dies
-    # with "TypeError: Cannot read properties of undefined (reading 'length')"
-    # and "Next.js build worker exited with code: 1", naming neither the cache
-    # nor the file that triggered it. Drop it so a rebuild always starts clean.
-    rm -rf "$ROOT/webapp/.next" "$OUTDIR"
-    ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
+  # out/ is gitignored, so PKGBUILD copies it from this working tree rather than
+  # from the clone, and nothing in the build ties it to how it was produced.
+  # Three ways it can be wrong, none of which the mere existence of index.html
+  # catches -- so verify the properties the package actually depends on.
+  bad=""
+
+  # 1. Build target. next.config.ts sets basePath "/stream" only for the "web"
+  #    target and leaves it empty for "tauri", because the desktop app's origin
+  #    is tauri://localhost. A web export's chunks therefore load as
+  #    /stream/_next/..., which 404s inside the app: the page never hydrates and
+  #    the window stays blank white. Symptom seen in the WebView error report:
+  #      ChunkLoadError: Failed to load chunk /stream/_next/static/chunks/...
+  if grep -q '"/stream/_next/' "$OUTDIR/index.html" 2>/dev/null; then
+    bad="it is a 'web'-target export (basePath /stream); its chunks 404 inside the desktop app"
+  elif ! grep -q '"/_next/static/chunks/' "$OUTDIR/index.html" 2>/dev/null; then
+    bad="it does not look like a static export at all (no '/_next/static/chunks/' in index.html)"
+  fi
+
+  # 2. API origin. It is baked into the chunks at export time, so an export built
+  #    for a different backend is the reason the app "cannot reach the server"
+  #    even though the server is up. This is invisible to a freshness check: the
+  #    export is newer than the source, so it looks perfectly fresh.
+  if [ -z "$bad" ] && [ -n "$API_ORIGIN" ] \
+     && ! grep -rqF "$API_ORIGIN" "$OUTDIR/_next" 2>/dev/null; then
+    bad="it was exported against a different API origin than '$API_ORIGIN'"
+  fi
+
+  # 3. Freshness. Older frontend source than the export means the shipped UI
+  #    does not match the code. next-env.d.ts is excluded because Next rewrites
+  #    it on every run and it carries no application code.
+  if [ -z "$bad" ]; then
+    stale="$(find "$ROOT/webapp" -type f \
+      \( -name '*.tsx' -o -name '*.ts' -o -name '*.css' -o -name 'next.config.*' \) \
+      -newer "$OUTDIR/index.html" \
+      -not -path '*/node_modules/*' -not -path '*/.next/*' \
+      -not -path '*/out/*' -not -path '*/target/*' -not -name 'next-env.d.ts' \
+      -printf '%P\n' 2>/dev/null | head -5 || true)"
+    if [ -n "$stale" ]; then
+      bad="it is older than the frontend source ($(printf '%s' "$stale" | tr '\n' ' '))"
+    fi
+  fi
+
+  if [ -n "$bad" ]; then
+    warn "webapp/out cannot be reused because $bad."
+    warn "Rebuilding it now (same as --rebuild-ui)."
+    export_ui
+  else
+    say "reusing webapp/out (verified: tauri target, API origin $API_ORIGIN, up to date)"
   fi
 fi
 
