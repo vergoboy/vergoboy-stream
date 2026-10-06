@@ -1,0 +1,1 @@
+"""Adapters: the only code in `media` allowed to touch the outside world."""

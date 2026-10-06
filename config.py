@@ -116,7 +116,11 @@ class Config:
     ARCHIVE_LOG_LEVEL = os.environ.get("STREAM_ARCHIVE_LOG_LEVEL", "INFO").upper()
     ARCHIVE_AUTH_ENABLED = os.environ.get("STREAM_ARCHIVE_AUTH_ENABLED", "false").lower() == "true"
     ARCHIVE_LOGIN_URL = os.environ.get("STREAM_ARCHIVE_LOGIN_URL", f"{ARCHIVE_BASE_URL}/account/login/")
-    ARCHIVE_AUTH_CHECK_URL = os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_URL", f"{ARCHIVE_BASE_URL}/account/")
+    # The session check must hit a page that WordPress serves differently to a
+    # logged-in visitor.  /account/ is not one: it renders the login widget for
+    # anonymous *and* authenticated visitors alike and never shows the logout
+    # link, so checking it can never confirm a session.  The site root does.
+    ARCHIVE_AUTH_CHECK_URL = os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_URL", f"{ARCHIVE_BASE_URL}/")
     ARCHIVE_USERNAME = os.environ.get("DIGIMOVIEZ_USERNAME", "")
     ARCHIVE_PASSWORD = os.environ.get("DIGIMOVIEZ_PASSWORD", "")
     # Target form names are explicitly configured rather than guessed.
@@ -124,6 +128,10 @@ class Config:
     ARCHIVE_LOGIN_PASSWORD_FIELD = os.environ.get("STREAM_ARCHIVE_LOGIN_PASSWORD_FIELD", "")
     ARCHIVE_SESSION_FILE = os.environ.get("STREAM_ARCHIVE_SESSION_FILE", os.path.join(BASE_DIR, "data", "digimoviez-session.json"))
     ARCHIVE_AUTH_CHECK_INTERVAL = float(os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_INTERVAL", "120"))
+    # A session check slower than this counts as lagging (normal is 2-4s).
+    ARCHIVE_LAG_THRESHOLD = float(os.environ.get("STREAM_ARCHIVE_LAG_THRESHOLD", "8"))
+    ARCHIVE_MAX_LAG_STREAK = int(os.environ.get("STREAM_ARCHIVE_MAX_LAG_STREAK", "3"))
+    ARCHIVE_LAG_BACKOFF_MAX = float(os.environ.get("STREAM_ARCHIVE_LAG_BACKOFF_MAX", "4"))
     ARCHIVE_REQUEST_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_REQUEST_TIMEOUT", "30"))
     ARCHIVE_LOGIN_RETRY_COUNT = int(os.environ.get("STREAM_ARCHIVE_LOGIN_RETRY_COUNT", "3"))
     ARCHIVE_CONNECT_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_CONNECT_TIMEOUT", "10"))

@@ -151,34 +151,54 @@ def prime_after(n: int) -> int:
     return candidate
 
 
+_QUESTION_TAIL = r"(?:\s+(?:چیست|کدام(?:\s+است)?|چند(?:\s+است|\s+می\s*شود|\s+تاست)?|چه\s+عددی(?:\s+است)?|است|هست))?"
+
+
+def _strip_punctuation(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[؟?!.:]", " ", text)).strip()
+
+
+def solve_knowledge(text: str) -> int | Fraction | None:
+    """Answer only the exact knowledge templates seen on the login page.
+
+    Every template is anchored (``fullmatch``).  A question that merely
+    *mentions* months or fingers is never answered: returning ``None`` makes the
+    caller refuse instead of submitting a guess.
+    """
+    text = _strip_punctuation(normalize(text))
+    if re.fullmatch(r"(?:تعداد )?انگشت(?:ان|ها)? دو دست(?: انسان)?" + _QUESTION_TAIL, text):
+        return 10
+    if re.fullmatch(r"(?:تعداد )?ماه(?:ها| ها| های)? (?:یک|هر) سال(?: شمسی| میلادی| هجری)?" + _QUESTION_TAIL, text) \
+            or re.fullmatch(r"یک سال (?:شمسی |میلادی |هجری )?چند ماه(?: دارد| است| هست)?", text):
+        return 12
+    prime = re.fullmatch(r"(?:چه )?(?:اولین )?عدد اول بعد از (.+?)" + _QUESTION_TAIL, text)
+    if prime:
+        try:
+            return prime_after(parse_number_words(prime.group(1)))
+        except ValueError:
+            return None
+    half = re.fullmatch(r"(?:چه عددی )?نصف (.+?)" + _QUESTION_TAIL, text)
+    if half:
+        try:
+            return Fraction(parse_number_words(half.group(1)), 2)
+        except ValueError:
+            return None
+    return None
+
+
 def solve_general_math(text: str) -> int | Fraction:
+    """Solve a supported knowledge or arithmetic question, else ``ValueError``."""
+    known = solve_knowledge(text)
+    if known is not None:
+        return known.numerator if isinstance(known, Fraction) and known.denominator == 1 else known
     text = normalize(text)
 
-    if "ماه" in text and "سال" in text:
-        return 12
-    if "انگشت" in text and "دو دست" in text:
-        return 10
-
-    half_match = re.search(r"نصف\s+(.+)", text)
-    if half_match:
-        try:
-            value = extract_number(half_match.group(1))
-            return Fraction(value, 2)
-        except Exception:
-            pass
-
-    if "عدد اول" in text and "بعد از" in text:
-        try:
-            part = text.split("بعد از", 1)[1]
-            value = extract_number(part)
-            return prime_after(value)
-        except Exception:
-            pass
-
-    text = re.sub(r"(ضرب\s+در|در|ضرب)", " * ", text)
-    text = re.sub(r"(تقسیم\s+بر|تقسیم)", " / ", text)
-    text = re.sub(r"(بعلاوه|به\s+علاوه|جمع)", " + ", text)
-    text = re.sub(r"(منهای|منها|کم\s+کن|تفریق)", " - ", text)
+    # The one idiom with a trailing verb: "6 در 8 ضرب شود".
+    text = re.sub(r"(?<!\w)ضرب\s+(?:شود|کن|کنید)(?!\w)", " ", text)
+    text = re.sub(r"(?<!\w)(ضرب\s+در|در|ضرب)(?!\w)", " * ", text)
+    text = re.sub(r"(?<!\w)(تقسیم\s+بر|تقسیم)(?!\w)", " / ", text)
+    text = re.sub(r"(?<!\w)(بعلاوه|به\s+علاوه|جمع)(?!\w)", " + ", text)
+    text = re.sub(r"(?<!\w)(منهای|منها|کم\s+کن|تفریق)(?!\w)", " - ", text)
 
     text = re.sub(r"\bضرب\b", " ", text, flags=re.I)
     text = re.sub(r"\bشود\b", " ", text, flags=re.I)
@@ -187,7 +207,7 @@ def solve_general_math(text: str) -> int | Fraction:
     text = re.sub(r"^\s*جمع\b\s*", "", text, flags=re.I)
     text = re.sub(r"^\s*[+\-*/]\s*", "", text)
     text = re.sub(r"(\d+)\s*و\s*(\d+)", r"\1 + \2", text)
-    text = re.sub(r"[+\-*/]\s*$", "", text).strip()
+    text = text.strip()
     text = re.sub(r"\s+", " ", text).strip()
 
     number_pattern = re.compile(

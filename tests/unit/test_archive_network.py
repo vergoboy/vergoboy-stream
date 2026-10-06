@@ -83,8 +83,9 @@ def test_login_search_and_detail_share_only_the_proxied_archive_client(tmp_path)
     collector.search(SearchFilters.from_mapping({"query": "x"}))
     collector.title("https://digimoviez.com/movie/x")
     assert collector.session is collector.auth.session
+    # A text query is answered by AJAX; the ?s= page does not filter by it.
     assert [url for _, url in session.requests] == [
-        "https://digimoviez.com?advanced_search=on&min_release=1888&max_release=2026&min_rate=0.0&max_rate=10.0&s=x",
+        "https://digimoviez.com/wp-admin/admin-ajax.php",
         "https://digimoviez.com/movie/x",
     ]
 

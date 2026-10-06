@@ -37,6 +37,10 @@ os.environ["STREAM_DATABASE_URL"] = (
     "postgresql+psycopg2://pytest:pytest@127.0.0.1:1/pytest_not_used"
 )
 os.environ["STREAM_ENV"] = "development"
+# Same reasoning as the settings above: `import app` (done by the suite that
+# exercises the Flask routes) configures logging at import time and would
+# otherwise create files under the real ~/.local/state/vergoboy-stream/logs.
+os.environ["STREAM_LOG_DIR"] = "/tmp/vergoboy-stream-pytest-logs"
 
 
 @pytest.fixture(scope="session")

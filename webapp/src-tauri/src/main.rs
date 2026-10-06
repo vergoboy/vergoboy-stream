@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    vergoboy_stream_lib::install_crash_logging();
     vergoboy_stream_lib::run();
 }

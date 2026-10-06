@@ -9,6 +9,8 @@ __pycache__/
 venv/
 .env
 .env.*
+# ...but keep the placeholder template reviewable
+!.env.example
 
 # IDE
 .vscode/
@@ -31,6 +33,16 @@ dist/
 *.egg-info/
 
 media/
+
+# Safety net: runtime media output must never land inside the media_domain
+# package. The suite writes to Config.MEDIA_DIR (<repo>/media) and a stray
+# rename once dragged those artifacts into the package where they were
+# nearly committed.
+media_domain/avatars/
+media_domain/chat/
+media_domain/hls/
+media_domain/subs/
+media_domain/uploads/
 
 data/
 
@@ -59,3 +71,7 @@ app.py.save
 .coverage
 .coverage.*
 .pytest_cache/
+
+# Locally built packages and the API-origin override written by build-arch.sh
+packaging/arch/*.pkg.tar.zst
+packaging/arch/.api-origin

@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: https://vergoboy.ir; media-src 'self' https://vergoboy.ir; connect-src 'self' https://vergoboy.ir wss://vergoboy.ir; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:"
+      "csp": "default-src 'self'; img-src 'self' data: blob: https://vergoboy.ir http://127.0.0.1:8801 http://localhost:8801; media-src blob: 'self' https://vergoboy.ir http://127.0.0.1:8801 http://localhost:8801; connect-src 'self' https://vergoboy.ir wss://vergoboy.ir http://127.0.0.1:8801 ws://127.0.0.1:8801 http://localhost:8801 ws://localhost:8801; worker-src blob: 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:"
     }
   },
   "bundle": {

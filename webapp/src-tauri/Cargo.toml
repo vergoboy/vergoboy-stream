@@ -4,6 +4,12 @@ version = "0.1.0"
 description = "vergoboy.ir watch-party desktop/mobile shell"
 edition = "2021"
 
+# The mpv driver lives in its own crate (no Tauri dependency) and is tested
+# separately: `cargo test -p mpv_controller`.
+[workspace]
+members = ["crates/mpv_controller"]
+resolver = "2"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
