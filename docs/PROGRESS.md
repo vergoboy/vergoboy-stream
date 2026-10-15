@@ -21,6 +21,8 @@ readiness, G2 deploy plan, G3 final report. The old P2–P6 roadmap is PAUSED.
 | T0 | dev env: dev lock regains pytest/pytest-cov | done | 4157d1f | additive 155/0; now pins pytest 8.4.2, pytest-cov 6.3.0 |
 | T0 | dev env: `make test-fast` guards the interpreter | done | 11a5f11 | `make test-fast` = 768 passed, 2 skipped, 20 deselected (405s) |
 | T1 | parametrize base path + instance identity | doing | — | plan proposed, awaiting user go |
+| T2 | unblock the Arch package build | done | 12676ed | dropped unused `patchelf` makedepend + dropped stale `$SRCDEST` mirror; `./build-arch.sh` → `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` (3.25 MiB) |
+| T3 | server read-only recon (S1/S2) | doing | — | docs/DEPLOY_LOG.md; port 8802 free, `/opt/w2g` absent, `/stream` baseline HTTP 200 |
 
 Media-wipe post-mortem (requested at T0). The wipe was self-inflicted by our own
 cleanup routine — nginx aliases and paths were never involved.
