@@ -278,19 +278,34 @@ repointed to `/stream` **and** its live instance refreshed — neither is part o
 T4.
 
 User decisions (2026-10-15): deploy `/w2g` now; repoint the `stream` package is
-*not* part of this rebuild; fold the namcap license fix into the next rebuild.
+*not* part of this round; namcap license fix done (`LicenseRef-proprietary`,
+commit `b8fbb31`, both packages rebuilt).
 
-### Packaging — SPDX license identifier (2026-10-15)
+### Packaging — both artifacts rebuilt (2026-10-15)
 
-namcap reported E-class `custom is not a valid SPDX license identifier`, and its
-own message prescribes the `LicenseRef-` prefix for a custom licence, so
-`packaging/arch/PKGBUILD` now says `LicenseRef-proprietary`. Both instances
-share this PKGBUILD, so the fix invalidates both built artifacts and both are
-being rebuilt (stream, then w2g, so the freshest artifact on disk is the one
-T4's follow-up install uses). No server step depends on the packages: T4 ships a
+namcap's E-class (`custom is not a valid SPDX license identifier`) was fixed in
+`packaging/arch/PKGBUILD` (`LicenseRef-proprietary`, commit `b8fbb31`), and both
+packages were rebuilt from the committed `release/w2g-v1` tree:
+
+| artifact | size | pkgname | license | namcap | baked API path |
+| --- | --- | --- | --- | --- | --- |
+| `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` | 3.4 MiB | vergoboy-stream | LicenseRef-proprietary | W-class only | `/api` (domain root) |
+| `vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst` | 3.4 MiB | vergoboy-w2g | LicenseRef-proprietary | W-class only | `/w2g/api` |
+
+Both artifacts pass `bsdtar` integrity. namcap's remaining line is W-class
+("LicenseRef-* requires a license file under /usr/share/licenses/") — the repo
+ships no `LICENSE`, so that needs a `LICENSE` file added to fully clear it; it is
+advisory, not a build failure, and does not block T4.
+
+A side-effect worth noting: `build-arch.sh`'s lock (`packaging/arch/.build.lock`)
+and the 5-way export verification worked as designed — the `w2g` run refused to
+reuse the `stream` export and rebuilt it. There is still unexplained build
+churn (a `stream` build finished after the `w2g` run, leaving `webapp/out` as
+the `stream` export); nothing server-side depends on it, since T4 ships a
 `git archive` release, not a `.pkg.tar.zst`.
 
-## Session 2 (2026-10-15) — main-branch fix batch
+*User decisions (2026-10-15):* deploy `/w2g` now; repoint the `stream` package's
+baked base path is *not* part of this round.
 
 Five fixes off the phase plan, one commit each. No phase gate is involved and
 none of the P0–P6 rows move. Evidence: `make test-fast` = 768 passed, 2
