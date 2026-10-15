@@ -1,5 +1,16 @@
 # Maintainer: vergoboy-stream local build
-pkgname=vergoboy-stream
+#
+# Builds one *instance* of the desktop client. The instance is read from
+# .instance (written by ../build-arch.sh, default "stream"); the two instances
+# differ only in the backend their bundled UI talks to, which is baked into the
+# static export before makepkg runs. The Rust binary is compiled from the same
+# source either way.
+_instance="$(cat "${startdir}/.instance" 2>/dev/null || true)"
+_instance="${_instance:-stream}"
+pkgname="vergoboy-${_instance}"
+# The executable name tracks the package, so the two instances can be installed
+# side by side (and have distinct window classes / desktop entries).
+_pkgbin="$pkgname"
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Private cinema watch-party desktop client'
@@ -116,13 +127,13 @@ build() {
 package() {
   cd "${srcdir}/${pkgname}"
   install -Dm755 "webapp/src-tauri/target/release/vergoboy-stream" \
-    "${pkgdir}/usr/bin/vergoboy-stream"
-  install -Dm644 "packaging/arch/vergoboy-stream.desktop" \
-    "${pkgdir}/usr/share/applications/vergoboy-stream.desktop"
+    "${pkgdir}/usr/bin/${_pkgbin}"
+  install -Dm644 "packaging/arch/${_pkgbin}.desktop" \
+    "${pkgdir}/usr/share/applications/${_pkgbin}.desktop"
   install -Dm644 "webapp/src-tauri/icons/32x32.png" \
-    "${pkgdir}/usr/share/icons/hicolor/32x32/apps/vergoboy-stream.png"
+    "${pkgdir}/usr/share/icons/hicolor/32x32/apps/${_pkgbin}.png"
   install -Dm644 "webapp/src-tauri/icons/128x128.png" \
-    "${pkgdir}/usr/share/icons/hicolor/128x128/apps/vergoboy-stream.png"
+    "${pkgdir}/usr/share/icons/hicolor/128x128/apps/${_pkgbin}.png"
   install -Dm644 "webapp/src-tauri/icons/128x128@2x.png" \
-    "${pkgdir}/usr/share/icons/hicolor/256x256/apps/vergoboy-stream.png"
+    "${pkgdir}/usr/share/icons/hicolor/256x256/apps/${_pkgbin}.png"
 }

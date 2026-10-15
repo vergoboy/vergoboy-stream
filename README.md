@@ -338,6 +338,14 @@ to be copied — just make sure the main app is running.
   follows from those. Both nginx snippets are pasted into the same `server{}`
   block; instance-global locations (`/hls/`, `/whip/`, `/livekit/`) are
   declared once, by the `/stream` snippet.
+- **Desktop client** — `./build-arch.sh` builds one *instance* of the Tauri
+  app: with no arguments it produces `vergoboy-stream-<ver>-<pkgrel>-x86_64.pkg.tar.zst`,
+  `./build-arch.sh --instance w2g` produces `vergoboy-w2g-…`. The two are the
+  same Rust binary carrying a different static export (the instance's API
+  origin and `NEXT_PUBLIC_API_BASE_PATH` are baked in at export time), so they
+  install side by side. `webapp/.out-instance` records which instance the
+  shared `webapp/out` belongs to and the script refuses to reuse it for a
+  different one.
 - **Nginx** — see the comments in `deploy/nginx-stream.conf`. Three things are
   easy to get wrong:
   - `/stream/` serves the static Next.js export from disk, not through Flask;

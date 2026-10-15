@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# vergoboy-stream — build the Arch Linux / pacman .pkg.tar.zst package.
+# vergoboy — build the Arch Linux / pacman .pkg.tar.zst package for one instance.
 #
 #   ./build-arch.sh                 build the package, then verify the artifact
 #   ./build-arch.sh --clean-first   delete previous artifacts and build trees first
 #   ./build-arch.sh --rebuild-ui    rebuild webapp/out even if it already exists
+#   ./build-arch.sh --instance NAME build for instance NAME (default: stream)
 #   ./build-arch.sh --install       pacman -U the artifact afterwards (needs sudo)
 #   ./build-arch.sh --out DIR       also copy the artifacts into DIR
+#
+# An instance is one backend a bundled client talks to. "stream" is the
+# original at https://vergoboy.ir/stream; "w2g" is the second at
+# https://vergoboy.ir/w2g. It selects the package name (vergoboy-<instance>)
+# and the API path baked into the export (API_BASE_PATH), nothing else: the
+# Rust binary is the same source either way.
 #
 # Packaging notes that this script exists to enforce:
 #
 #   * packaging/arch/PKGBUILD sources the app with
-#       source=("vergoboy-stream::git+file://${startdir}/../..")
+#       source=("${pkgname}::git+file://${startdir}/../..")
 #     so makepkg builds a fresh clone of the *committed* tree. Anything left
 #     uncommitted in the working tree — including binary assets such as the
 #     Tauri icons — is silently absent from the package. The preflight below
@@ -32,6 +39,11 @@ PKGDIR="$ROOT/packaging/arch"
 PKGBUILD="$PKGDIR/PKGBUILD"
 OUTDIR="$ROOT/webapp/out"
 
+# Which instance the bundled client talks to. "stream" reproduces the original
+# package exactly, including its historical use of the domain root for API
+# calls (see API_BASE_PATH below), so the default is behaviour-preserving.
+INSTANCE="${INSTANCE:-stream}"
+
 # Keep in sync with build.beforeBuildCommand in webapp/src-tauri/tauri.conf.json.
 # Override to package a build that talks to a local backend instead of
 # production, e.g.
@@ -46,16 +58,23 @@ REBUILD_UI=0
 INSTALL=0
 COPY_OUT=""
 
+# Records which instance the export in webapp/out was produced for, so a reuse
+# can be rejected (and rebuilt) rather than silently packaging the wrong
+# instance's client. out/ itself is a Next output directory and cannot hold a
+# marker of ours without it being served publicly.
+OUT_INSTANCE="$ROOT/webapp/.out-instance"
+
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --clean-first) CLEAN_FIRST=1 ;;
     --rebuild-ui)  REBUILD_UI=1 ;;
+    --instance)    shift || die "--instance needs a name"; INSTANCE="$1" ;;
     --install)     INSTALL=1 ;;
     --out)         shift || die "--out needs a directory"; COPY_OUT="$1" ;;
     -h|--help)     usage; exit 0 ;;
@@ -63,6 +82,16 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# Derived after parsing, so --instance is in effect. The path the instance's API
+# (and Socket.IO) is mounted under, as seen from the client. The desktop app has
+# no mount point of its own, so this is the only thing that distinguishes one
+# instance's package from another. "stream" has historically used the domain
+# root here; "w2g" is served under /w2g.
+case "$INSTANCE" in
+  stream) API_BASE_PATH="${API_BASE_PATH-}" ;;
+  *)      API_BASE_PATH="${API_BASE_PATH:-/$INSTANCE}" ;;
+esac
 
 # ── preflight ────────────────────────────────────────────────────────────────
 
@@ -125,13 +154,18 @@ fi
 # ── static export the PKGBUILD expects to copy ───────────────────────────────
 
 export_ui() {
-  say "building the static export (webapp/out) for API origin $API_ORIGIN"
+  say "building the static export (webapp/out) for instance '$INSTANCE' (API origin '$API_ORIGIN', API base path '${API_BASE_PATH:-/}')"
   # A stale .next cache does not fail cleanly: webpack's wasm hash layer dies
   # with "TypeError: Cannot read properties of undefined (reading 'length')" and
   # "Next.js build worker exited with code: 1", naming neither the cache nor the
   # file that triggered it. Drop it so a rebuild always starts clean.
   rm -rf "$ROOT/webapp/.next" "$OUTDIR"
-  ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" npm run build:tauri )
+  ( cd "$ROOT/webapp" && NEXT_PUBLIC_BUILD_TARGET=tauri \
+      NEXT_PUBLIC_API_ORIGIN="$API_ORIGIN" \
+      NEXT_PUBLIC_API_BASE_PATH="$API_BASE_PATH" \
+      npm run build:tauri )
+  # Only now is the export known to belong to this instance.
+  printf '%s\n' "$INSTANCE" > "$OUT_INSTANCE"
 }
 
 if [ "$REBUILD_UI" -eq 1 ] || [ ! -f "$OUTDIR/index.html" ]; then
@@ -140,11 +174,19 @@ if [ "$REBUILD_UI" -eq 1 ] || [ ! -f "$OUTDIR/index.html" ]; then
 else
   # out/ is gitignored, so PKGBUILD copies it from this working tree rather than
   # from the clone, and nothing in the build ties it to how it was produced.
-  # Three ways it can be wrong, none of which the mere existence of index.html
+  # Five ways it can be wrong, none of which the mere existence of index.html
   # catches -- so verify the properties the package actually depends on.
   bad=""
 
-  # 1. Build target. next.config.ts sets a basePath for the "web" target
+  # 1. Instance. The export is produced per instance (its API base path is baked
+  #    in), and webapp/out is a single shared directory, so building the w2g
+  #    package from a stream export would silently ship a client pointed at the
+  #    wrong backend. The marker is written by export_ui and compared here.
+  if [ "$(cat "$OUT_INSTANCE" 2>/dev/null || true)" != "$INSTANCE" ]; then
+    bad="it was exported for instance '$(cat "$OUT_INSTANCE" 2>/dev/null || echo '?')', not '$INSTANCE'"
+  fi
+
+  # 2. Build target. next.config.ts sets a basePath for the "web" target
   #    (historically "/stream"; a second instance uses "/w2g") and leaves it
   #    empty for "tauri", because the desktop app's origin is tauri://localhost.
   #    A web export's chunks therefore load as <prefix>/_next/..., which 404s
@@ -153,13 +195,15 @@ else
   #      ChunkLoadError: Failed to load chunk /stream/_next/static/chunks/...
   #    The check is deliberately prefix-agnostic — any non-empty basePath is
   #    wrong here, not just the historical one.
-  if grep -qE '"/[^/"]+/_next/' "$OUTDIR/index.html" 2>/dev/null; then
-    bad="it is a 'web'-target export (a basePath is set); its chunks 404 inside the desktop app"
-  elif ! grep -q '"/_next/static/chunks/' "$OUTDIR/index.html" 2>/dev/null; then
-    bad="it does not look like a static export at all (no '/_next/static/chunks/' in index.html)"
+  if [ -z "$bad" ]; then
+    if grep -qE '"/[^/"]+/_next/' "$OUTDIR/index.html" 2>/dev/null; then
+      bad="it is a 'web'-target export (a basePath is set); its chunks 404 inside the desktop app"
+    elif ! grep -q '"/_next/static/chunks/' "$OUTDIR/index.html" 2>/dev/null; then
+      bad="it does not look like a static export at all (no '/_next/static/chunks/' in index.html)"
+    fi
   fi
 
-  # 2. API origin. It is baked into the chunks at export time, so an export built
+  # 3. API origin. It is baked into the chunks at export time, so an export built
   #    for a different backend is the reason the app "cannot reach the server"
   #    even though the server is up. This is invisible to a freshness check: the
   #    export is newer than the source, so it looks perfectly fresh.
@@ -168,7 +212,15 @@ else
     bad="it was exported against a different API origin than '$API_ORIGIN'"
   fi
 
-  # 3. Freshness. Older frontend source than the export means the shipped UI
+  # 4. API base path. Same reasoning one level finer: the origin can match while
+  #    the instance path differs. Only worth checking when non-empty — an empty
+  #    prefix (the historical "stream" layout) has no literal to find.
+  if [ -z "$bad" ] && [ -n "$API_BASE_PATH" ] \
+     && ! grep -rqF "\"$API_BASE_PATH\"" "$OUTDIR/_next" 2>/dev/null; then
+    bad="it was not exported with the API base path '$API_BASE_PATH'"
+  fi
+
+  # 5. Freshness. Older frontend source than the export means the shipped UI
   #    does not match the code. next-env.d.ts is excluded because Next rewrites
   #    it on every run and it carries no application code.
   if [ -z "$bad" ]; then
@@ -188,7 +240,7 @@ else
     warn "Rebuilding it now (same as --rebuild-ui)."
     export_ui
   else
-    say "reusing webapp/out (verified: tauri target, API origin $API_ORIGIN, up to date)"
+    say "reusing webapp/out (verified: instance '$INSTANCE', tauri target, API origin $API_ORIGIN, up to date)"
   fi
 fi
 
@@ -202,20 +254,22 @@ done
 # ── makepkg ──────────────────────────────────────────────────────────────────
 
 # makepkg executes the PKGBUILD from this working tree but clones the *source*
-# from git HEAD, so the origin has to be handed over explicitly: the PKGBUILD
-# needs it to patch the clone's CSP (blob: for hls.js + the local origin).
+# from git HEAD, so these two have to be handed over explicitly: the PKGBUILD
+# needs the origin to patch the clone's CSP (blob: for hls.js + the local
+# origin), and needs the instance to name the package and its files.
 printf '%s\n' "$API_ORIGIN" > "$PKGDIR/.api-origin"
+printf '%s\n' "$INSTANCE"   > "$PKGDIR/.instance"
 
 # makepkg keeps a *bare* git mirror of the source under $SRCDEST (which defaults
-# to the PKGBUILD directory, so $PKGDIR/vergoboy-stream) and checks it out into
-# src/. Both are keyed to the repo's absolute path, so a tree that was copied or
-# moved to another machine leaves a mirror whose origin no longer exists and
-# makepkg aborts before building with
+# to the PKGBUILD directory, named after the package, so $PKGDIR/vergoboy-<instance>)
+# and checks it out into src/. Both are keyed to the repo's absolute path, so a
+# tree that was copied or moved to another machine leaves a mirror whose origin
+# no longer exists and makepkg aborts before building with
 #   ERROR: <dir> is not a clone of file:///…/packaging/arch/../..
 # `makepkg -C` cleans only the checkout, never the mirror, so --clean-first did
 # not clear this either. Drop a mirror that points outside this repo and let
 # makepkg re-clone; leave a matching one alone so repeat builds stay fast.
-SRC_MIRROR="$PKGDIR/vergoboy-stream"
+SRC_MIRROR="$PKGDIR/vergoboy-$INSTANCE"
 if [ -d "$SRC_MIRROR" ]; then
   mirror_origin="$(git -C "$SRC_MIRROR" config --get remote.origin.url 2>/dev/null || true)"
   case "$mirror_origin" in
@@ -228,9 +282,9 @@ if [ -d "$SRC_MIRROR" ]; then
 fi
 
 if [ "$CLEAN_FIRST" -eq 1 ]; then
-  say "removing previous build trees and artifacts"
+  say "removing previous build trees and artifacts for instance '$INSTANCE'"
   rm -rf "$PKGDIR/src" "$PKGDIR/pkg" "$SRC_MIRROR"
-  rm -f "$PKGDIR"/*.pkg.tar.zst
+  rm -f "$PKGDIR/vergoboy-$INSTANCE-"*.pkg.tar.zst
 fi
 
 # -C cleans $srcdir and $pkgdir first, which is what makes a build reproducible:
@@ -247,8 +301,8 @@ say "makepkg -Ccf in packaging/arch (this compiles Rust, expect several minutes)
 # The main package, not the auto-generated -debug one: makepkg finishes the
 # release package first and the debug split after it, so a plain "newest wins"
 # pick hands back the wrong file.
-pkg="$(ls -t "$PKGDIR"/vergoboy-stream-*.pkg.tar.zst 2>/dev/null | grep -v -- '-debug-' | head -1 || true)"
-[ -n "$pkg" ] || die "makepkg reported success but no vergoboy-stream-*.pkg.tar.zst was produced"
+pkg="$(ls -t "$PKGDIR/vergoboy-$INSTANCE-"*.pkg.tar.zst 2>/dev/null | grep -v -- '-debug-' | head -1 || true)"
+[ -n "$pkg" ] || die "makepkg reported success but no vergoboy-$INSTANCE-*.pkg.tar.zst was produced"
 
 say "built $pkg"
 printf '    %s\n' "$(du -h "$pkg" | cut -f1)"
@@ -272,12 +326,12 @@ fi
 
 if [ -n "$COPY_OUT" ]; then
   mkdir -p "$COPY_OUT"
-  cp -f "$PKGDIR"/vergoboy-stream-*.pkg.tar.zst "$COPY_OUT/"
+  cp -f "$PKGDIR/vergoboy-$INSTANCE-"*.pkg.tar.zst "$COPY_OUT/"
   say "copied artifacts to $COPY_OUT"
 fi
 
 if [ "$INSTALL" -eq 1 ]; then
   say "installing with pacman -U (sudo)"
   sudo pacman -U --noconfirm "$pkg"
-  say "installed — launch it with: vergoboy-stream"
+  say "installed — launch it with: vergoboy-$INSTANCE"
 fi
