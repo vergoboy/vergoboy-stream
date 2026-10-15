@@ -85,3 +85,37 @@ and a future ingest-level access control would apply to both.
 MediaMTX path namespace writing `/opt/w2g/hls-live`) and restore a `/w2g/hls/`
 location plus `STREAM_HLS_PLAYBACK_TEMPLATE`.
 
+
+### Two `build-arch.sh` runs cannot overlap
+
+`makepkg.conf` leaves `BUILDDIR` unset, so makepkg's `$srcdir` is
+`packaging/arch/src` — one directory for every instance — and the script calls
+`makepkg -C`, which deletes that whole directory at the start of each run. Two
+concurrent runs (different instances, or even the same one) therefore destroy
+each other's checkout, and both also race over `webapp/out`, which is shared and
+is what gets embedded into the package.
+
+Seen on 2026-10-15: a `./build-arch.sh` for `stream` overlapped a
+`--instance w2g` run. The `w2g` run failed in `build()` twice — once with
+`npx tsc --noEmit` printing its help text (its `tsconfig.json` had gone with
+the shared `$srcdir`), and once mid-Rust with
+`error: could not write output to .../target/release/deps/....rcgu.o: No such
+file or directory` — and its own `-C` in turn deleted the other run's working
+copy. Neither package was corrupted that time (the `stream` artifact was checked afterwards: correct
+name, 0 `/w2g`, 0 `/stream/`, 0 `/api/api`), but nothing guarantees that.
+
+The guard added in T2 (`webapp/.out-instance`, five-way reuse verification)
+catches a *stale* export from the previous run; it cannot catch a *concurrent*
+one.
+
+**Partially fixed:** `build-arch.sh` now takes an exclusive lock
+(`flock` on `packaging/arch/.build.lock`) before it touches anything, and a
+second run waits for the first instead of corrupting it. That covers runs that
+go through the script — the supported path. It does not cover `makepkg` being
+invoked by hand in `packaging/arch`.
+
+*Later:* give each instance its own `BUILDDIR`
+(`BUILDDIR="$PKGDIR/build/$INSTANCE"` before `makepkg`, which also makes the
+`rm -rf "$PKGDIR/src"` lines unnecessary) so that builds of *different*
+instances can genuinely run in parallel, and share `webapp/out` by path rather
+than by convention.

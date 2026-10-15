@@ -27,6 +27,11 @@
 #     makepkg runs. This script builds it with the same variables
 #     src-tauri/tauri.conf.json uses for beforeBuildCommand.
 #   * makepkg must never run as root; it drops privileges into fakeroot itself.
+#   * only one run may exist at a time. makepkg's $srcdir is
+#     packaging/arch/src for every instance (makepkg.conf leaves BUILDDIR
+#     unset), `makepkg -C` deletes it at the start of each build, and
+#     webapp/out is shared too — so a second run wipes the first one's
+#     checkout mid-compile. This script takes a lock rather than corrupt.
 #
 # Nothing here needs root except --install.
 
@@ -98,6 +103,30 @@ esac
 [ "$(id -u)" -eq 0 ] && die "do not run makepkg as root — run this as your normal user"
 [ -f "$PKGBUILD" ] || die "missing $PKGBUILD"
 command -v makepkg >/dev/null 2>&1 || die "makepkg not found — install the 'pacman' package (pacman -S pacman)"
+
+# ── one build at a time ──────────────────────────────────────────────────────
+#
+# Every run shares packaging/arch/src — makepkg's $srcdir, which is the same
+# directory for both instances because makepkg.conf leaves BUILDDIR unset — plus
+# packaging/arch/.instance, .api-origin and webapp/out. `makepkg -C` removes
+# $srcdir outright at the start of every build, so two concurrent runs destroy
+# each other's work: on 2026-10-15 a `./build-arch.sh` (stream) overlapped an
+# `--instance w2g` run and left it with
+#   error: could not write output to .../target/release/deps/....rcgu.o:
+#          No such file or directory
+# (an earlier attempt lost the checkout's tsconfig.json, so `npx tsc --noEmit`
+# printed its help text and "failed"). Neither run is at fault and neither can
+# detect the other: serialize on a lock instead of corrupting.
+#
+# The lock is held for the whole run — export build, makepkg, verification —
+# and is released when the script exits, fd and all. A second run waits rather
+# than failing, so a queued build still produces a package.
+BUILD_LOCK="$PKGDIR/.build.lock"
+exec 9>"$BUILD_LOCK" || die "cannot open $BUILD_LOCK for locking"
+if ! flock -n 9; then
+  warn "another build is running (the checkout and webapp/out are shared) — waiting"
+  flock -w 3600 9 || die "waited an hour for $BUILD_LOCK; another build is stuck (pgrep -af build-arch)"
+fi
 
 # tauri-cli discovers the host triple by running `rustc -vV` and splitting the
 # output on "host:", unwrapping the result. Any rustc that fails to start prints

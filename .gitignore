@@ -79,4 +79,5 @@ app.py.save
 packaging/arch/*.pkg.tar.zst
 packaging/arch/.api-origin
 packaging/arch/.instance
+packaging/arch/.build.lock
 webapp/.out-instance
