@@ -24,7 +24,13 @@ Order agreed with the user: T1 → T2 → G1 → T3 → G2 **STOP** → T4 → G
 | T0 | dev env: `make test-fast` guards the interpreter | done | 11a5f11 | `make test-fast` = 768 passed, 2 skipped, 20 deselected (405s) |
 | T1 | parametrize base path + instance identity | done | dfc2c7a, 30fc78e | ADR 0003; `/w2g` build has 0 `/stream/` refs (229 `/w2g`); full suite green under both `STREAM_BASE_PATH` values — see T1 block |
 | T2 | unblock the Arch package build | done | 12676ed | dropped unused `patchelf` makedepend + dropped stale `$SRCDEST` mirror; `./build-arch.sh` → `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` (3.25 MiB) |
-| T3 | server read-only recon (S1/S2) | doing | — | docs/DEPLOY_LOG.md; port 8802 free, `/opt/w2g` absent, `/stream` baseline HTTP 200 |
+| T2 | native client: per-instance Arch package | done | 7bdc32f, 1bce226, dc520d9 | `./build-arch.sh --instance w2g` → `vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst`; both install side by side — see T2 block |
+| T3 | server read-only recon (S1/S2) | done | — | docs/DEPLOY_LOG.md; port 8802 free, `/opt/w2g` absent, `/stream` baseline HTTP 200 |
+| T3 | deploy plan, read-only (S3) | done | — | docs/DEPLOY_PLAN.md — S0–S11, abort conditions, verification, rollback; **awaits G2 approval** |
+| T4 | provision /opt/w2g, deploy, verify | todo | — | blocked on G2 approval and the SSH password |
+| G1 | local readiness gate (before T3) | done | — | see G1 below |
+| G2 | deploy plan approved by the user | todo | — | presented, awaiting answer |
+| G3 | final report | todo | — | — |
 
 ### T1 — parametrize base path + instance identity
 
@@ -68,6 +74,144 @@ Out-of-scope findings are in **docs/FOLLOWUPS.md** (`run.sh` knows only the
 original instance; `get_state.py` pins an admin UUID; `trigger_add.py` is a
 one-off).
 
+### T2 — native client + per-instance Arch package
+
+One Rust binary, one flag, two packages that install side by side:
+
+| Artifact | Instance | API origin | API base path | Size |
+| --- | --- | --- | --- | --- |
+| `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` | stream | `https://vergoboy.ir` | *(empty → root `/api`)* | 3.25 MiB |
+| `vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst` | w2g | `https://vergoboy.ir` | `/w2g` | 3.25 MiB |
+
+The instance selects only what the embedded static export carries and what the
+package installs as: `NEXT_PUBLIC_API_BASE_PATH`, the package name, and the
+binary/desktop-entry/icon name (`vergoboy-<instance>`). The Rust source is the
+same either way.
+
+| Area | Change | Evidence |
+| --- | --- | --- |
+| `webapp/lib/config.ts` | new `API_BASE_PATH = NEXT_PUBLIC_API_BASE_PATH ?? BASE_PATH`; `API_PREFIX`/`SOCKET_PATH` derive from it. Needed because the desktop target's `BASE_PATH` is empty by design | `npx tsc --noEmit` exit 0; eslint 0 errors |
+| `webapp/app/page.tsx`, `components/RoomBar.tsx` | invite links are absolute URLs a human opens → built from `API_BASE_PATH`; in-app navigation keeps `BASE_PATH` | was `origin + "" + "/?join="` for the desktop target |
+| `build-arch.sh` | `--instance NAME` (default `stream`); instance-keyed artifacts, source mirror and cleanups; `webapp/.out-instance` stamp; reuse check grew from three ways to five | `bash -n` clean; `--help` documents the instance |
+| `packaging/arch/PKGBUILD` | reads `_instance` from `${startdir}/.instance`; `pkgname=vergoboy-$_instance`, installs under `_pkgbin` | both builds produced the right `Name:` metadata |
+| `packaging/arch/vergoboy-w2g.desktop` | second desktop entry (`Name=vergoboy W2G`) | installed by the w2g package |
+| `.gitignore` | `packaging/arch/vergoboy-*/`, `packaging/arch/.instance`, `.build.lock`, `webapp/.out-instance` | `git status` clean after both builds |
+| `docs/FOLLOWUPS.md` | the root-`/api` question for the *shipped stream* client; the shared live namespace; the shared build tree | carried to the deploy plan |
+| `packaging/arch/PKGBUILD` (2) | `_inject_instance`: any instance but `stream` rewrites `identifier` in the cloned `tauri.conf.json` to `ir.vergoboy.<instance>`, reusing the CSP patcher | one line differs on a copy of the real conf, still valid JSON; and confirmed in the compiled binary by disassembly (below) |
+| `build-arch.sh` (2) | exclusive `flock` on `packaging/arch/.build.lock` for the whole run; a second run waits instead of corrupting | see the incident below |
+
+Two things the build cannot get wrong any more, both verified in the logs:
+
+- **Wrong-instance export** — `webapp/out` is shared and gitignored, so it
+  could silently carry the other instance's API path. The export is stamped in
+  `webapp/.out-instance` and the script refused to reuse it in *both*
+  directions during the two builds: `exported for instance '?', not 'w2g'`,
+  then `exported for instance 'w2g', not 'stream'`.
+- **Clobbered artifact** — artifacts, `$SRCDEST` mirror and `--clean-first` are
+  all keyed by instance; both `.pkg.tar.zst` files coexist (the w2g build did
+  not delete or shadow the stream one).
+
+What is baked into each export (grep of the module the package bundles):
+
+```
+stream: let o="https://vergoboy.ir", a="", n="", s=`${n}/api`, i=`${n}/socket.io`
+w2g:    let t="https://vergoboy.ir", a="", o="/w2g", i=`${o}/api`, l=`${o}/socket.io`
+```
+
+i.e. `w2g` calls `/w2g/api/…` and `/w2g/socket.io`, `stream` keeps the domain
+root it has always used; 0 `/stream/` refs and 0 `/api/api` in either.
+
+Why the two packages also needed **distinct app identifiers**: `webapp/lib/auth.ts`
+keeps the session in `localStorage`, and Tauri derives the WebView data
+directory from the identifier. Both packages shipped `ir.vergoboy.stream`, so
+with both installed they would have shared one store — signing in to `/stream`
+would hand the `/w2g` window a token minted with the other instance's
+`STREAM_JWT_SECRET`, which is correctly refused, so each app would quietly log
+the other out. `stream` is deliberately left byte-for-byte unchanged, or the
+already-installed client would lose its storage.
+
+**Incident — two builds at once (fixed here).** The first two attempts at the
+w2g package after the identifier change both failed, and the change was not the
+cause: a `./build-arch.sh` with no `--instance` (so `stream`) was running at the
+same time. `makepkg.conf` leaves `BUILDDIR` unset, so every run's `$srcdir` is
+the same `packaging/arch/src`, and `makepkg -C` deletes it at the start of each
+build. The w2g run lost `tsconfig.json` first (`npx tsc --noEmit` printed its
+help text and "failed"), then lost the Rust output directory mid-compile:
+
+```
+error: could not write output to .../target/release/deps/...rcgu.o: No such file or directory
+```
+
+Confirmed from the process table, not guessed: a `bash ./build-arch.sh` under a
+`fish` shell in `kitty`, started 18:18:44 while the w2g run was compiling, and a
+fresh `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` at 18:21:37. `build-arch.sh`
+now takes an exclusive lock before touching any shared state. The stream
+artifact was then checked for cross-contamination: correct `pkgname`, and 0
+`/w2g`, 0 `/stream/`, 0 `/api/api` in its binary.
+
+**Rebuilt alone, and verified** (`./build-arch.sh --instance w2g`, exit 0):
+
+- `packaging/arch/vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst`, 3.24 MiB,
+  `Name: vergoboy-w2g`, installing `usr/bin/vergoboy-w2g` plus its desktop entry
+  and three icon sizes.
+- The embedded export is the w2g one: `webapp/.out-instance` = `w2g`, and the
+  minified config in `webapp/out/_next` reads
+  ``n="/w2g",s=`${n}/api`,i=`${n}/socket.io` `` — 0 `/stream` refs, 0 `/api/api`.
+- The identifier really is `ir.vergoboy.w2g`. Worth writing down, because it is
+  *not* greppable the obvious way: a 15-byte constant is short enough for LLVM
+  to materialise as immediates instead of a `.rodata` literal, so
+  `strings … | grep ir.vergoboy` finds **nothing** even though the string is
+  there. What is actually emitted:
+
+  ```
+  $ objdump -d --start-address=0x551bf0 --stop-address=0x551c30 usr/bin/vergoboy-w2g
+  551bf0: 48 b9 6f 62 6f 79 2e 77 32 67   movabs $0x6732772e796f626f,%rcx  ; "oboy.w2g"
+  551bfa: 48 89 48 07                       mov    %rcx,0x7(%rax)           ; store at +7
+  551bfe: 48 b9 69 72 2e 76 65 72 67 6f   movabs $0x6f677265762e7269,%rcx  ; "ir.vergo"
+  551c0c: 48 89 08                          mov    %rcx,(%rax)              ; store at +0
+  ```
+
+  Two overlapping stores — offsets `+0` and `+7`, sharing the `o` — spell
+  exactly `ir.vergoboy.w2g`. The 18-byte `ir.vergoboy.stream` is *over* the
+  inline threshold, so it stays a `.rodata` string and greps first try; that
+  asymmetry is why the two binaries do not look alike. Cross-checked both ways:
+  the w2g binary holds `oboy.w2g` once and `vergoboy.stream` zero times, the
+  stream binary the exact reverse. Neither has `/api/api`; the w2g one has no
+  `/stream/`.
+
+### G1 — local readiness gate (passed)
+
+Measured on the tree that will be deployed, not on an earlier state:
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Backend suite, original mount point | `make test-fast` | **780 passed, 2 skipped, 20 deselected, 3 warnings (405 s)**, exit 0 |
+| Backend suite, second mount point | `make test-fast` with `STREAM_BASE_PATH=/w2g STREAM_INSTANCE=w2g` | 768 passed, 2 skipped, 20 deselected (406 s) — T1 evidence; the 12 tests added since read source files, not routes |
+| Type check | `npx tsc --noEmit` | exit 0 |
+| Lint | `npx eslint app components lib` | 0 errors, 14 pre-existing warnings |
+| Legacy UI syntax | `node --check static/js/app.js` | OK |
+| Web export, `/stream` | `NEXT_PUBLIC_BASE_PATH=/stream` | 229 `/stream` refs, 0 `/w2g` |
+| Web export, `/w2g` | `NEXT_PUBLIC_BASE_PATH=/w2g` | **0** `/stream` refs, 229 `/w2g`, 0 `/api/api` |
+| Desktop package, `stream` | `./build-arch.sh --instance stream` | `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst`, 3.25 MiB |
+| Desktop package, `w2g` | `./build-arch.sh --instance w2g` | `vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst`, 3.25 MiB |
+| `/stream` in shipped code | grep across code/build/config | only the documented default (`config.py`), the original instance's own `deploy/*` templates, comments/prose, `run.sh` (FOLLOWUPS) and unrelated words |
+
+The 780 is 768 + the 12 prefix/invite guards in
+`tests/unit/test_client_api_prefix.py`; that guard is the only new backend
+test, and it fails on `30fc78e` by naming all 38 offending call sites.
+
+### T3 — read-only deploy plan
+
+`docs/DEPLOY_PLAN.md`. Nothing in it has been executed. It carries the recon
+facts, the three open questions from `docs/DEPLOY_LOG.md` resolved (own
+`w2g` DB/role; room `w2g-voice`; shared live namespace), and steps S0–S11 with
+the exact command for each: read-only preflight with abort conditions and a
+20 GB disk floor, a release under `/opt/w2g/releases/<UTC-ts>` with an atomically
+repointed `current`, a `0600` secrets file written server-side, `nginx -t`
+before any reload, a one-line nginx `include` whose insertion and idempotency
+were both exercised on a stand-in vhost, a verification pass that re-checks
+`/stream` is untouched, and a rollback.
+
 Media-wipe post-mortem (requested at T0). The wipe was self-inflicted by our own
 cleanup routine — nginx aliases and paths were never involved.
 `_cleanup_orphans()` (app.py) deletes every file under UPLOAD_DIR/SUBS_DIR and
@@ -82,11 +226,16 @@ that 09231c1 now turns into a visible "this video's file was deleted" error.
 3ec15ab fixed the root cause (the collector also scans `data/rooms/*.json`, so a
 cold room owns its media) and e8bcf20 stopped the socket suite from writing into
 the developer's real `data/rooms` and triggering cleanups against real media.
-Confirmation for T4: the deploy scripts will never read or delete `/opt/w2g/media`
-or `/opt/stream/media` — `deploy.sh` writes only under `/opt/w2g/releases/<ts>/`,
-repoints the `/opt/w2g/current` symlink, and rsyncs the static export into
-`/opt/w2g/webapp-out`; `media`, `data` and `hls-live` live outside the release
-tree and are referenced by no `rm`, `rsync --delete`, or cleanup call.
+Contract for the T4 deploy (stated here, not yet implemented — there is no
+`deploy.sh` in the tree): it will never read or delete `/opt/w2g/media` or
+`/opt/stream/media`. It writes only under `/opt/w2g/releases/<ts>/`, repoints the
+`/opt/w2g/current` symlink, and puts the static export at
+`/opt/w2g/current/webapp-out/`. That mirrors the stream layout with one
+deliberate difference: `/opt/stream/webapp-out` sits *outside* its releases and
+is refreshed by `vergoboy-frontend-build.service`, whereas w2g's export lives
+*inside* the release, so flipping `current` swaps the backend and the UI
+together and a rollback moves both back. `media` and `data` live outside the
+release tree and are referenced by no `rm`, `rsync --delete`, or cleanup call.
 
 ## Session 2 (2026-10-15) — main-branch fix batch
 
