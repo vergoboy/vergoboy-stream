@@ -58,7 +58,37 @@ From the read-only recon in `docs/DEPLOY_LOG.md` (host `bolbolestan`, Ubuntu
 | D4 | Static export location | **inside** the release (`$REL/webapp-out`) | unlike `/opt/stream/webapp-out`, which sits outside its releases; flipping `current` then swaps backend and UI together, so a rollback moves both |
 | D5 | Frontend build | on the server, in a reused workspace `/opt/w2g/webapp`, by the same `npm ci` + `NEXT_PUBLIC_BASE_PATH=/w2g npm run build` recipe the stream build unit uses | fallback: build locally and upload `out/`, if the server's npm is unavailable |
 | D6 | nginx integration | one `include` line + a snippet file, not a paste | revert is "remove the line and the file" instead of "un-paste 90 lines" |
-| D7 | OAuth | **off** for v1 | Google/GitHub redirect URIs are registered per app; email+password login works without it. A second OAuth app can be added later without touching this plan |
+| D7 | OAuth | **on** — email+password *and* Google/GitHub, reusing the same apps as the original instance | no code change: `SITE_BASE_URL` already derives from `BASE_PATH`, so w2g's callback is `https://vergoboy.ir/w2g/api/auth/oauth/<provider>/callback`. That URI has to exist provider-side first, and GitHub is the awkward one — see below |
+
+**Prerequisites you own (provider side).** The server half of OAuth needs nothing
+new: `config.py` reads `STREAM_{GOOGLE,GITHUB}_OAUTH_CLIENT_{ID,SECRET}` and
+derives the callback from the instance mount point, so w2g produces the right
+redirect automatically. What the providers have never seen is a second redirect
+URI on the same client:
+
+| Provider | Register this redirect URI | Risk |
+| --- | --- | --- |
+| Google | `https://vergoboy.ir/w2g/api/auth/oauth/google/callback` | none — one client may hold several URIs |
+| GitHub | `https://vergoboy.ir/w2g/api/auth/oauth/github/callback` | **check before relying on it** |
+
+GitHub is the one that bites. An OAuth App has a single callback URL, and any
+app registered before 3 Aug 2026 has *wildcard matching* enabled — which permits
+the redirect path only as a **subdirectory** of the registered callback. A
+callback registered as `https://vergoboy.ir/stream/...` therefore does **not**
+match `/w2g/...`. Do **not** repoint the existing URL: that breaks the working
+`/stream` login. In order of preference:
+
+1. add a second callback URL to the existing app, if it is a GitHub *App*
+   (those allow up to 10);
+2. register a second OAuth app for w2g and give it its own
+   `STREAM_GITHUB_OAUTH_CLIENT_{ID,SECRET}` in S6;
+3. leave GitHub unconfigured at `/w2g` for now — Google alone still counts as
+   OAuth enabled. Set only the Google keys; the GitHub button then answers `503`
+   with the existing "not configured" message instead of bouncing to GitHub.
+
+S0 reports which keys the original instance already carries (names only), S6
+carries them across without printing them, and S10 asserts the redirect URI is
+the `/w2g` one. Nothing here changes if GitHub is deferred.
 | D8 | Release identity | the commit sha of the release candidate, recorded at S2 | `git archive HEAD` — only tracked files, exactly that commit |
 
 ## 4. Target layout
@@ -141,6 +171,13 @@ sudo grep -n 'location' "$CONF"
 echo "--- toolchain ---"
 /usr/bin/python3 -V; /usr/bin/node -v; /usr/bin/npm -v
 test -x /opt/stream/venv/bin/python3 && echo "python3-venv works here (stream has one)"
+echo "--- where does the original keep its env? (S6 reads it) ---"
+sudo systemctl show vergoboy-stream -p EnvironmentFiles
+sudo ls -l /opt/stream/.stream_db.env 2>/dev/null || echo "  no /opt/stream/.stream_db.env"
+echo "--- its env: key NAMES only, never values ---"
+sudo grep -oE '^[A-Z_]+=' /opt/stream/.stream_db.env 2>/dev/null | sort
+echo "--- and specifically, does it already carry OAuth credentials? (names only) ---"
+sudo grep -oE '^STREAM_(GOOGLE|GITHUB)_OAUTH_CLIENT_(ID|SECRET)=' /opt/stream/.stream_db.env 2>/dev/null | sort
 echo "--- stream baseline (must stay like this) ---"
 systemctl is-active vergoboy-stream vergoboy-frontend-build
 curl -sS -o /dev/null -w 'stream HTTP %{http_code}\n' https://vergoboy.ir/stream/
@@ -246,25 +283,47 @@ sudo -u postgres psql -tAc "SELECT rolname FROM pg_roles WHERE rolname='w2g'"
 ### S6 — secrets file
 
 Written with a heredoc on the server, mode `0600`, owner `www-data`, never
-echoed. Non-secret production values are copied from the stream instance's env
-file **without printing it** — a named-key read, e.g.
-`sudo grep -E '^(STREAM_ADMIN_EMAIL|STREAM_ARCHIVE_HTTP_PROXY)=' /opt/stream/.stream_db.env`
-— while the two secrets are generated fresh. `w2g` gets its **own**
-`STREAM_JWT_SECRET` so a token minted by one instance is rejected by the other.
-**This step must share the shell with S5** (it uses `$PGPASS`).
+echoed. w2g gets its **own** `STREAM_SECRET_KEY` and `STREAM_JWT_SECRET`; a short
+whitelist of production values — admin address, mail sender, archive proxy, and
+the four **OAuth** credentials — is carried over verbatim from the original
+instance's env file (the path S0 reported; `/opt/stream/.stream_db.env` assumed
+here). The script prints the *names* it carried and, more importantly, the names
+the original has that w2g does **not**, so a forgotten setting is visible rather
+than silent. **This step must share the shell with S5** (it uses `$PGPASS`).
 
 ```bash
 sudo -u www-data env HOME=/opt/w2g /usr/bin/python3 - <<PY
-import os, secrets
-path = "/opt/w2g/.stream_db.env"
+import os, re, secrets
+src_path, path = "/opt/stream/.stream_db.env", "/opt/w2g/.stream_db.env"
+carry = (
+    "STREAM_ADMIN_EMAIL", "STREAM_MAIL_FROM", "STREAM_ARCHIVE_HTTP_PROXY",
+    "STREAM_GOOGLE_OAUTH_CLIENT_ID", "STREAM_GOOGLE_OAUTH_CLIENT_SECRET",
+    "STREAM_GITHUB_OAUTH_CLIENT_ID", "STREAM_GITHUB_OAUTH_CLIENT_SECRET",
+)
+
+present, carried = set(), {}
+for ln in open(src_path):                    # values live in memory only
+    m = re.match(r"([A-Z_]+)=(.*)\Z", ln.rstrip("\n"))
+    if not m:
+        continue
+    present.add(m.group(1))
+    if m.group(1) in carry and m.group(2):
+        carried[m.group(1)] = m.group(2)
+
 lines = [
-  "STREAM_ENV=production",
-  "STREAM_DATABASE_URL=postgresql+psycopg2://w2g:$PGPASS@127.0.0.1:5432/w2g",
-  "STREAM_SECRET_KEY=" + secrets.token_hex(32),
-  "STREAM_JWT_SECRET=" + secrets.token_hex(32),
-  "STREAM_ADMIN_EMAIL=*** (same admin as the original instance)",
-  "STREAM_ARCHIVE_HTTP_PROXY=http://127.0.0.1:10808",
-]
+    "STREAM_ENV=production",
+    "STREAM_DATABASE_URL=postgresql+psycopg2://w2g:$PGPASS@127.0.0.1:5432/w2g",
+    "STREAM_SECRET_KEY=" + secrets.token_hex(32),
+    "STREAM_JWT_SECRET=" + secrets.token_hex(32),
+] + [k + "=" + v for k, v in carried.items()]
+
+print("carried                 :", " ".join(sorted(carried)) or "(none)")
+print("in source but NOT carried:", " ".join(sorted(present - set(carried))) or "(none)")
+if not {"STREAM_GOOGLE_OAUTH_CLIENT_ID", "STREAM_GOOGLE_OAUTH_CLIENT_SECRET"} <= set(carried):
+    print("NOTE: google oauth unconfigured - that button will answer 503")
+if not {"STREAM_GITHUB_OAUTH_CLIENT_ID", "STREAM_GITHUB_OAUTH_CLIENT_SECRET"} <= set(carried):
+    print("NOTE: github oauth not carried — see the D7 prerequisites")
+
 if os.path.exists(path) and os.path.getsize(path) > 0:
     print("exists — leaving untouched (idempotent)"); raise SystemExit
 open(path, "w").write("\\n".join(lines) + "\\n")
@@ -274,6 +333,11 @@ sudo chown www-data:www-data /opt/w2g/.stream_db.env
 sudo chmod 600 /opt/w2g/.stream_db.env
 sudo grep -c . /opt/w2g/.stream_db.env     # count lines only — never the values
 ```
+
+Read that "in source but NOT carried" line before continuing. Any name there is
+a setting the original instance has and w2g does not; most are instance-specific
+and correctly omitted (the database URL, the instance root, the JWT secret) but
+it has to be a decision, not an oversight.
 
 `STREAM_JWT_SECRET` differs per instance, so a token minted by one instance is
 rejected by the other (`iss`/`aud` carry the instance name — see ADR 0003).
@@ -348,6 +412,16 @@ curl -sS 'https://vergoboy.ir/w2g/socket.io/?EIO=4&transport=polling' | head -c 
 ASSET=$(curl -sS https://vergoboy.ir/w2g/ | grep -o '/w2g/_next/[^"]*\.js' | head -1)
 curl -sS -o /dev/null -w "GET $ASSET -> %{http_code}\n" "https://vergoboy.ir$ASSET"
 
+echo "--- oauth points at the /w2g callback, not the /stream one (D7) ---"
+curl -sS -o /dev/null -D - 'https://vergoboy.ir/w2g/api/auth/oauth/google' \
+  | grep -iE '^(HTTP/|location:)' | head -3
+curl -sS -o /dev/null -D - 'https://vergoboy.ir/w2g/api/auth/oauth/google' \
+  | grep -o 'redirect_uri=[^&]*'
+# expect: redirect_uri=https%3A%2F%2Fvergoboy.ir%2Fw2g%2Fapi%2Fauth%2Foauth%2Fgoogle%2Fcallback
+# a 503 with the Farsi "not configured" JSON instead means the S6 keys did not land
+curl -sS -o /dev/null -w 'GET /w2g/api/auth/oauth/github -> %{http_code}\n' \
+  'https://vergoboy.ir/w2g/api/auth/oauth/github'
+
 echo "--- the original instance is untouched ---"
 curl -sS -o /dev/null -w 'GET /stream/           -> %{http_code}\n' https://vergoboy.ir/stream/
 curl -sS -o /dev/null -w 'GET /stream/api/health -> %{http_code}\n' https://vergoboy.ir/stream/api/health
@@ -388,16 +462,26 @@ loses nothing either way during the first deploy).
 - `nginx -t` gates the reload, so a bad edit leaves the running config alone.
 - Duplicate instance-global locations are impossible: the snippet declares none
   of `/hls/`, `/whip/`, `/livekit/rtc/`.
+- OAuth (D7) shares the provider apps but edits **nothing** on the provider side
+  that `/stream` depends on: Google merely gains a redirect URI, and the existing
+  GitHub callback URL is never repointed. Worst case GitHub is simply left
+  unconfigured at `/w2g`, which cannot affect the original.
 
-## 7. What is still open (for approval)
+## 7. What is still open
 
 1. **SSH password** — key auth is rejected (`Permission denied
    (publickey,password)`), so T4 needs the password supplied inline. It is
    never written to a file, log or commit.
-2. **D7 (OAuth off for v1)** — confirm that email+password login is acceptable
-   for the first public day at `/w2g`.
-3. **D5 (server-side `npm ci`)** — confirm, or switch to building the export
-   locally and uploading `webapp/out` (faster, but the deploy then depends on
-   the operator's machine).
-4. **`/opt/w2g` state ownership** — `www-data`, matching `/opt/stream`. The
-   database role is `w2g`; the files are `www-data`.
+2. **The GitHub redirect URI** (D7, the only real prerequisite left). Google is
+   a safe addition. GitHub needs a decision from the list in §3: a second
+   callback URL, a second OAuth app, or leaving GitHub unconfigured at `/w2g`.
+   Either way the deploy proceeds — this affects only which provider buttons
+   work on day one.
+3. **D5 — confirmed:** server-side `npm ci` in `/opt/w2g/webapp`.
+4. **Ownership — confirmed:** `/opt/w2g` state is `www-data`, as `/opt/stream`;
+   the database role is `w2g`.
+
+S0 also settles the three read-only unknowns carried over from recon: whether
+the shipped `stream` client has root-level `/api/` and `/socket.io` locations,
+whether `sites-enabled/vergoboy.ir.conf` is a symlink, and how many `server{}`
+blocks it holds.
