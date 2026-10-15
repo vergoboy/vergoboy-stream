@@ -7,6 +7,20 @@ from media_pipeline.runner import RunnerConfig
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _normalise_base_path(raw: str) -> str:
+    """Turn a mount point into a URL prefix with no trailing slash.
+
+    ``"/stream"`` -> ``"/stream"``, ``"w2g/"`` -> ``"/w2g"``, ``""``/``"/"``
+    -> ``""`` (served at the domain root). The app both registers its routes
+    and builds every URL it hands to a client under this prefix, so it has to
+    be canonical before anything reads it.
+    """
+    raw = (raw or "").strip()
+    if not raw or raw == "/":
+        return ""
+    return "/" + raw.strip("/")
+
+
 def _livekit_creds():
     """Read LiveKit credentials from the environment or its root-managed config."""
     key = os.environ.get("STREAM_LIVEKIT_API_KEY") or ""
@@ -54,6 +68,33 @@ class Config:
     PORT = int(os.environ.get("STREAM_PORT", "8801"))
 
     # ---------------------------------------------------------------
+    # Deployment identity & mount point
+    #
+    # One codebase serves several independent instances. The original lives
+    # at https://vergoboy.ir/stream from /opt/stream; a second ("w2g") lives
+    # at /w2g from /opt/w2g. The instance is described by three things:
+    #
+    #   INSTANCE      short name; namespaces JWTs and the LiveKit room
+    #   BASE_PATH     public URL prefix every route and URL is built under
+    #   INSTANCE_ROOT directory the media/data trees live in
+    #
+    # The defaults reproduce the single original instance exactly, so an
+    # unset environment changes nothing.
+    # ---------------------------------------------------------------
+    INSTANCE = os.environ.get("STREAM_INSTANCE", "stream").strip().lower() or "stream"
+    BASE_PATH = _normalise_base_path(os.environ.get("STREAM_BASE_PATH", "/stream"))
+    INSTANCE_ROOT = os.path.abspath(
+        os.path.expanduser(os.environ.get("STREAM_INSTANCE_ROOT") or BASE_DIR)
+    )
+
+    # Tokens are stamped with these and a token whose iss/aud disagrees is
+    # refused on decode. The per-instance STREAM_JWT_SECRET already makes a
+    # w2g token useless on /stream; these claims make that explicit and keep
+    # the two token families from ever being confused with one another.
+    JWT_ISSUER = INSTANCE
+    JWT_AUDIENCE = INSTANCE
+
+    # ---------------------------------------------------------------
     # Accounts, rooms & admin (PostgreSQL, same stack as arman-music)
     # ---------------------------------------------------------------
     DATABASE_URL = _required_env("STREAM_DATABASE_URL")
@@ -70,8 +111,9 @@ class Config:
     # Email verification & OAuth login
     # ---------------------------------------------------------------
     # Public base URL of the frontend (used in verification links and
-    # OAuth redirect URIs).
-    SITE_BASE_URL = os.environ.get("STREAM_SITE_URL", "https://vergoboy.ir/stream")
+    # OAuth redirect URIs). Derived from the mount point so a second
+    # instance does not need the domain hardcoded again.
+    SITE_BASE_URL = os.environ.get("STREAM_SITE_URL", f"https://vergoboy.ir{BASE_PATH}")
     SITE_ORIGIN = f"{urlsplit(SITE_BASE_URL).scheme}://{urlsplit(SITE_BASE_URL).netloc}"
     CORS_ORIGINS = tuple(
         origin.strip()
@@ -126,7 +168,7 @@ class Config:
     # Target form names are explicitly configured rather than guessed.
     ARCHIVE_LOGIN_USERNAME_FIELD = os.environ.get("STREAM_ARCHIVE_LOGIN_USERNAME_FIELD", "")
     ARCHIVE_LOGIN_PASSWORD_FIELD = os.environ.get("STREAM_ARCHIVE_LOGIN_PASSWORD_FIELD", "")
-    ARCHIVE_SESSION_FILE = os.environ.get("STREAM_ARCHIVE_SESSION_FILE", os.path.join(BASE_DIR, "data", "digimoviez-session.json"))
+    ARCHIVE_SESSION_FILE = os.environ.get("STREAM_ARCHIVE_SESSION_FILE", os.path.join(INSTANCE_ROOT, "data", "digimoviez-session.json"))
     ARCHIVE_AUTH_CHECK_INTERVAL = float(os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_INTERVAL", "120"))
     # A session check slower than this counts as lagging (normal is 2-4s).
     ARCHIVE_LAG_THRESHOLD = float(os.environ.get("STREAM_ARCHIVE_LAG_THRESHOLD", "8"))
@@ -139,13 +181,13 @@ class Config:
     ARCHIVE_TOTAL_TIMEOUT = float(os.environ.get("STREAM_ARCHIVE_TOTAL_TIMEOUT", "60"))
     ARCHIVE_REQUEST_RETRY_COUNT = int(os.environ.get("STREAM_ARCHIVE_REQUEST_RETRY_COUNT", "3"))
 
-    MEDIA_DIR = os.path.join(BASE_DIR, "media")
+    MEDIA_DIR = os.path.join(INSTANCE_ROOT, "media")
     UPLOAD_DIR = os.path.join(MEDIA_DIR, "uploads")   # raw/original uploads before encode
     SUBS_DIR = os.path.join(MEDIA_DIR, "subs")
     HLS_DIR = os.path.join(MEDIA_DIR, "hls")          # per-item progressive multi-bitrate HLS output
     CHAT_IMG_DIR = os.path.join(MEDIA_DIR, "chat")    # chat-uploaded images
     AVATAR_DIR = os.path.join(MEDIA_DIR, "avatars")   # user-uploaded avatars
-    DATA_DIR = os.path.join(BASE_DIR, "data")
+    DATA_DIR = os.path.join(INSTANCE_ROOT, "data")
     DATA_FILE = os.path.join(DATA_DIR, "state.json")
     # name(lowercased) -> avatar_url map, persisted so uploaded avatars survive
     # server restarts (chat messages themselves stay in-memory only).
@@ -267,7 +309,7 @@ class Config:
         and not _is_dummy_livekit_value(LIVEKIT_API_KEY)
         and not _is_dummy_livekit_value(LIVEKIT_API_SECRET)
     )
-    LIVEKIT_ROOM = os.environ.get("STREAM_LIVEKIT_ROOM", "stream-voice")
+    LIVEKIT_ROOM = os.environ.get("STREAM_LIVEKIT_ROOM", f"{INSTANCE}-voice")
     LIVEKIT_TOKEN_TTL = int(os.environ.get("STREAM_LIVEKIT_TOKEN_TTL", "14400"))
 
     @classmethod

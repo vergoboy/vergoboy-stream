@@ -14,6 +14,12 @@ import pytest
 
 import app
 import app_logging
+from config import Config
+
+# Routes are registered under the instance mount point (Config.BASE_PATH), so
+# the tests must not pin that value — otherwise a second instance's build runs
+# them against paths nothing is listening on.
+BASE = Config.BASE_PATH
 
 
 @pytest.fixture()
@@ -63,7 +69,7 @@ def _detach_handlers() -> None:
 
 
 def test_client_error_route_is_registered_and_reports(client):
-    response = client.post("/stream/api/log/client", json={
+    response = client.post(f"{BASE}/api/log/client", json={
         "kind": "unhandledrejection",
         "message": "TypeError: player is null",
         "stack": "TypeError: player is null\n    at Player.tsx:88",
@@ -79,7 +85,7 @@ def test_client_error_route_is_registered_and_reports(client):
 
 
 def test_client_error_route_rejects_a_non_object_body(client):
-    response = client.post("/stream/api/log/client", json=["nope"])
+    response = client.post(f"{BASE}/api/log/client", json=["nope"])
     assert response.status_code == 400
     assert response.get_json()["error"]
 
@@ -87,12 +93,12 @@ def test_client_error_route_rejects_a_non_object_body(client):
 def test_client_error_route_accepts_an_empty_body(client):
     # The reporter must never be the thing that throws; a malformed report
     # should still be accepted and logged as an empty one.
-    response = client.post("/stream/api/log/client", json={})
+    response = client.post(f"{BASE}/api/log/client", json={})
     assert response.status_code == 201
 
 
 def test_diagnostics_route_answers(client):
-    response = client.get("/stream/api/log/diagnostics")
+    response = client.get(f"{BASE}/api/log/diagnostics")
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["log_dir"]
@@ -101,8 +107,8 @@ def test_diagnostics_route_answers(client):
 
 
 def test_diagnostics_route_reflects_a_recorded_crash(client):
-    client.post("/stream/api/log/client", json={"kind": "window.onerror", "message": "visible now"})
-    payload = client.get("/stream/api/log/diagnostics").get_json()
+    client.post(f"{BASE}/api/log/client", json={"kind": "window.onerror", "message": "visible now"})
+    payload = client.get(f"{BASE}/api/log/diagnostics").get_json()
     assert any("visible now" in block for block in payload["recent_crashes"])
 
 
@@ -111,13 +117,13 @@ def test_diagnostics_route_survives_the_log_directory_being_missing(client, monk
     # that is precisely the situation where someone needs to read diagnostics.
     monkeypatch.setattr(app_logging, "CRASH_LOG", str(logdir_path() / "gone" / "crash.log"))
     monkeypatch.setattr(app_logging, "ERROR_LOG", str(logdir_path() / "gone" / "error.log"))
-    response = client.get("/stream/api/log/diagnostics")
+    response = client.get(f"{BASE}/api/log/diagnostics")
     assert response.status_code == 200
     assert response.get_json()["recent_errors"] == []
 
 
 def test_client_error_route_records_the_remote_address(client):
-    client.post("/stream/api/log/client", json={"kind": "window.onerror", "message": "who am i"})
+    client.post(f"{BASE}/api/log/client", json={"kind": "window.onerror", "message": "who am i"})
     body = read_log("crash.log")
     assert "client_ip = 127.0.0.1" in body
 
@@ -182,7 +188,7 @@ def test_client_error_route_is_not_guarded_by_auth(client):
     # The reporter runs before any login exists and must never be rejected:
     # an auth failure on this route would silently discard the crash report
     # that explains the auth failure.
-    response = client.post("/stream/api/log/client", json={"kind": "window.onerror", "message": "x"})
+    response = client.post(f"{BASE}/api/log/client", json={"kind": "window.onerror", "message": "x"})
     assert response.status_code == 201
 
 

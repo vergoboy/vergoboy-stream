@@ -1,7 +1,7 @@
 """Cleanup must never delete media owned by rooms that are still on disk.
 
 The wipe bug (failing-before/passing-after): on boot the in-memory registry is
-empty, and /stream/api/delete and /stream/api/cleanup collect "referenced
+empty, and the /api/delete and /api/cleanup handlers collect "referenced
 files" only from rooms that happen to be open in-process. A room JSON sitting
 in data/rooms — the developer's real room they will reconnect to — was counted
 as owning nothing, so its uploads/HLS/subs were deleted as "orphans". That is
@@ -42,9 +42,9 @@ def _write_cold_room(data_rooms, code="COLD99"):
             "type": "file",
             "title": "a cold room's item",
             "_raw_path": "/media/uploads/cold-upload.mp4",
-            "src": "/stream/media/hls/colditem/master.m3u8",
+            "src": f"{Config.BASE_PATH}/media/hls/colditem/master.m3u8",
             "renditions": [{"label": "720p", "status": "complete"}],
-            "subtitles": [{"id": "s1", "url": "/stream/media/subs/cold.vtt"}],
+            "subtitles": [{"id": "s1", "url": f"{Config.BASE_PATH}/media/subs/cold.vtt"}],
         }],
     }))
     return room_file
