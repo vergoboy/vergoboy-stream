@@ -5,13 +5,15 @@ Statuses: todo / doing / done / blocked.
 Phases in fixed order: P0 → P1 → P2 → P3 → P4 → P5 → P6. No phase starts
 before its predecessor's gate passed AND the user approved.
 
-## Session 3 (2026-10-15) — w2g delivery: T0 reconcile
+## Session 3 (2026-10-15) — w2g delivery: T0 reconcile, T1 parametrize
 
 Mission (from the master instructions): a second instance at
 https://vergoboy.ir/w2g served from /opt/w2g, leaving the existing
 https://vergoboy.ir/stream, /opt/stream, its unit, DB and port untouched.
 Branch `release/w2g-v1` cut from `main` at 8cb0873. Three hard gates: G1 local
 readiness, G2 deploy plan, G3 final report. The old P2–P6 roadmap is PAUSED.
+
+Order agreed with the user: T1 → T2 → G1 → T3 → G2 **STOP** → T4 → G3.
 
 | Track | Step | Status | Commit | Evidence |
 | --- | --- | --- | --- | --- |
@@ -20,9 +22,51 @@ readiness, G2 deploy plan, G3 final report. The old P2–P6 roadmap is PAUSED.
 | T0 | dev env: venv rebuilt with uv, py3.12 | done | n/a | `venv/bin/python -V` = Python 3.12.15 |
 | T0 | dev env: dev lock regains pytest/pytest-cov | done | 4157d1f | additive 155/0; now pins pytest 8.4.2, pytest-cov 6.3.0 |
 | T0 | dev env: `make test-fast` guards the interpreter | done | 11a5f11 | `make test-fast` = 768 passed, 2 skipped, 20 deselected (405s) |
-| T1 | parametrize base path + instance identity | doing | — | plan proposed, awaiting user go |
+| T1 | parametrize base path + instance identity | done | dfc2c7a, 30fc78e | ADR 0003; `/w2g` build has 0 `/stream/` refs (229 `/w2g`); full suite green under both `STREAM_BASE_PATH` values — see T1 block |
 | T2 | unblock the Arch package build | done | 12676ed | dropped unused `patchelf` makedepend + dropped stale `$SRCDEST` mirror; `./build-arch.sh` → `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` (3.25 MiB) |
 | T3 | server read-only recon (S1/S2) | doing | — | docs/DEPLOY_LOG.md; port 8802 free, `/opt/w2g` absent, `/stream` baseline HTTP 200 |
+
+### T1 — parametrize base path + instance identity
+
+Decision record: **docs/adr/0003-multi-instance-base-path.md**. Three env vars,
+all defaulting to the original instance (unset environment ⇒ nothing changes):
+`STREAM_BASE_PATH` (`/stream`), `STREAM_INSTANCE` (`stream`),
+`STREAM_INSTANCE_ROOT` (the checkout dir). Full mechanism and the alternatives
+rejected are in the ADR; the four default choices the user approved were:
+route prefix as a constant + f-strings, per-instance `STREAM_JWT_SECRET` with
+`iss`/`aud` from `STREAM_INSTANCE`, `INSTANCE_ROOT` defaulting to `BASE_DIR`,
+and package name `vergoboy-w2g`.
+
+| Area | Change | Evidence |
+| --- | --- | --- |
+| `config.py` | `INSTANCE`/`BASE_PATH`/`INSTANCE_ROOT`, `JWT_ISSUER`/`JWT_AUDIENCE`, `SITE_BASE_URL` derived; `media/`,`data/` under `INSTANCE_ROOT`; `LIVEKIT_ROOM` default `<instance>-voice` | `_normalise_base_path` handles `""`, `/x`, `x`, `/x/` |
+| `app.py` | `BP = Config.BASE_PATH`; 59 `@app.route(f"{BP}/…")` + the bare `{BP}` via `add_url_rule` (60 rules, was 60); `static_url_path`, CORS resources, `SocketIO(path=…)` all follow `BP` | url_map under `/w2g`: `['/w2g','/w2g/']`, 61 rules, **no** `/stream` rule |
+| `db.py` | `_sign` stamps `iss`/`aud`; `decode_token` rejects a mismatch but still accepts a token carrying neither (no forced logout on upgrade) | lenient path exercised by the auth-placement tests |
+| `state.py` | HLS URL test uses `f"{Config.BASE_PATH}/media/hls/"` | tests/unit/test_state_missing_media.py |
+| `templates/index.html`, `static/js/app.js` | legacy UI receives the prefix at render time (`window.__STREAM_BASE_PATH__`), fallback `/stream` | `node --check static/js/app.js` |
+| `webapp/lib/config.ts`, `next.config.ts` | one exported `BASE_PATH`/`API_PREFIX`/`SOCKET_PATH`; `next.config.ts` imports it so build and runtime cannot disagree | `npx tsc --noEmit` exit 0 |
+| `webapp/{app,components,lib}` | 4 page files + `api.ts`/`auth.ts`/`ClientErrorReporter.tsx` use the prefix | `npx eslint app components lib` = 0 errors (14 pre-existing warnings) |
+| `tests/` | `conftest.py` derives `socketio_path` from `Config.BASE_PATH` (was hardcoded `stream/socket.io`); 5 more files parametrized | was the cause of 30 `/w2g` failures — now 42 passed |
+| `get_state.py`, `trigger_add.py` | derive root from the script's own dir (override `STREAM_INSTANCE_ROOT`), port/prefix from `config` — no `/opt/stream` left | `py_compile` clean |
+| `build-arch.sh` | web-export guard is now prefix-agnostic (any non-empty `basePath` is wrong for the tauri bundle) | `grep -qE '"/[^/"]+/_next/'` |
+| `deploy/` | new `nginx-w2g.conf` + `vergoboy-w2g.service` (port 8802, `STREAM_BASE_PATH=/w2g`, `STREAM_INSTANCE_ROOT=/opt/w2g`); `nginx-stream.conf` notes it is the original instance | both snippets paste into the same `server{}`; global `/hls/`,`/whip/`,`/livekit/` kept once |
+| `README.md` | documents `STREAM_BASE_PATH`/`_INSTANCE`/`_INSTANCE_ROOT`, the per-instance LiveKit room, and the three-way build | — |
+
+Acceptance (T1): grep of `/stream` across code/build/config files shows only the
+documented default in config files (`config.py`, `deploy/*`), prose in docs and
+in the two operator scripts, and unrelated words (`archive_scraper.py` "stream
+links", `auth.ts` "media/streams"). The web export built twice from one tree:
+`out-stream` = 229 `/stream` refs / 0 `/w2g`; `out-w2g`
+(`NEXT_PUBLIC_BASE_PATH=/w2g`) = 0 `/stream` refs / 229 `/w2g`.
+
+Backend suite green under both mount points: `make test-fast` = 768 passed, 2
+skipped, 20 deselected (406s) by default, and the same with
+`STREAM_BASE_PATH=/w2g STREAM_INSTANCE=w2g`. `npx tsc --noEmit` exit 0; eslint
+over `app components lib` = 0 errors (14 pre-existing warnings).
+
+Out-of-scope findings are in **docs/FOLLOWUPS.md** (`run.sh` knows only the
+original instance; `get_state.py` pins an admin UUID; `trigger_add.py` is a
+one-off).
 
 Media-wipe post-mortem (requested at T0). The wipe was self-inflicted by our own
 cleanup routine — nginx aliases and paths were never involved.
