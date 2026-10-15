@@ -5,7 +5,7 @@ import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useLocalStorage } from "@/lib/useLocalStorage";
 import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
-import { BASE_PATH } from "@/lib/config";
+import { API_BASE_PATH, BASE_PATH } from "@/lib/config";
 import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
 import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, mayManage, finishOAuthLogin } from "@/lib/auth";
@@ -494,7 +494,7 @@ function PageInner() {
   const copyInvite = () => {
     const origin = process.env.NEXT_PUBLIC_API_ORIGIN || window.location.origin;
     navigator.clipboard
-      ?.writeText(`${origin}${basePath}/?join=${roomCode}`)
+      ?.writeText(`${origin}${API_BASE_PATH}/?join=${roomCode}`)
       .then(() => {
         setChipCopied(true);
         window.setTimeout(() => setChipCopied(false), 1800);

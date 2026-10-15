@@ -14,11 +14,19 @@ export const BASE_PATH =
     ? ""
     : process.env.NEXT_PUBLIC_BASE_PATH || "/stream";
 
-// The backend serves every endpoint under BASE_PATH. Callers append the part
-// after /api, e.g. `${API_PREFIX}/auth/login` or `${API_PREFIX}/upload`.
-export const API_PREFIX = `${BASE_PATH}/api`;
+// Where the backend mounts its API, as opposed to where these assets are
+// served from. The two differ only for the desktop ("tauri") target, which has
+// no mount point of its own — its assets load from tauri://localhost, hence the
+// empty BASE_PATH above — but can still talk to an instance served under a
+// path. NEXT_PUBLIC_API_BASE_PATH names that instance's path (e.g. "/w2g");
+// unset, it follows BASE_PATH, so the browser build is unchanged.
+export const API_BASE_PATH = process.env.NEXT_PUBLIC_API_BASE_PATH ?? BASE_PATH;
 
-export const SOCKET_PATH = `${BASE_PATH}/socket.io`;
+// The backend serves every endpoint under API_BASE_PATH. Callers append the
+// part after /api, e.g. `${API_PREFIX}/auth/login` or `${API_PREFIX}/upload`.
+export const API_PREFIX = `${API_BASE_PATH}/api`;
+
+export const SOCKET_PATH = `${API_BASE_PATH}/socket.io`;
 
 export function apiUrl(path: string): string {
   return `${API_ORIGIN}${path}`;
