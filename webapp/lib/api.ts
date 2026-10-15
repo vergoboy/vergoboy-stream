@@ -1,4 +1,4 @@
-import { apiUrl } from "./config";
+import { apiUrl, API_PREFIX } from "./config";
 import { authFetch, friendlyError, getAccessToken } from "./auth";
 import type { AdminUser, AuthRoom, AuthUser } from "./types";
 
@@ -78,7 +78,7 @@ export function uploadVideo(
     fd.append("title", title);
     fd.append("name", name);
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", apiUrl("/stream/api/upload"));
+    xhr.open("POST", apiUrl(API_PREFIX + "/api/upload"));
     const token = getAccessToken();
     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
     xhr.upload.addEventListener("progress", (ev) => {
@@ -138,23 +138,23 @@ export type YoutubeScanPlaylist = {
 
 export const api = {
   addUrl: (url: string, title: string, name: string) =>
-    postJson<UploadResult>("/stream/api/add-url", { url, title, name }),
+    postJson<UploadResult>(API_PREFIX + "/api/add-url", { url, title, name }),
 
   youtubeFormats: (url: string) =>
     postJson<YoutubeScanVideo | YoutubeScanPlaylist>(
-      "/stream/api/youtube-formats",
+      API_PREFIX + "/api/youtube-formats",
       { url },
       120000
     ),
 
   addYoutube: (url: string, format_id: string, title: string, name: string, sub_lang = "") =>
-    postJson<UploadResult>("/stream/api/add-youtube", { url, format_id, title, name, sub_lang }),
+    postJson<UploadResult>(API_PREFIX + "/api/add-youtube", { url, format_id, title, name, sub_lang }),
 
   addYoutubePlaylist: (url: string, title: string, name: string) =>
-    postJson<{ added: number }>("/stream/api/add-youtube-playlist", { url, title, name }),
+    postJson<{ added: number }>(API_PREFIX + "/api/add-youtube-playlist", { url, title, name }),
 
   newLiveKey: () =>
-    authFetch("/stream/api/live/new-key", { method: "POST" }).then((r) => r.json()) as Promise<{
+    authFetch(API_PREFIX + "/api/live/new-key", { method: "POST" }).then((r) => r.json()) as Promise<{
       key: string;
       push_url: string;
       server_url?: string;
@@ -163,16 +163,16 @@ export const api = {
     }>,
 
   addLive: (playback_url: string, title: string, name: string, key = "") =>
-    postJson<UploadResult>("/stream/api/add-live", { playback_url, title, name, key }),
+    postJson<UploadResult>(API_PREFIX + "/api/add-live", { playback_url, title, name, key }),
 
   requestQuality: (item_id: string, label: string, name: string) =>
-    postJson<{ ok: true }>("/stream/api/request-quality", { item_id, label, name }),
+    postJson<{ ok: true }>(API_PREFIX + "/api/request-quality", { item_id, label, name }),
 
   removeItem: (itemId: string, name: string) =>
-    authFetch(`/stream/api/playlist/${itemId}?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
+    authFetch(API_PREFIX + `/api/playlist/${itemId}?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
 
   cleanup: () =>
-    authFetch("/stream/api/cleanup", { method: "POST" }).then((r) => r.json()) as Promise<{
+    authFetch(API_PREFIX + "/api/cleanup", { method: "POST" }).then((r) => r.json()) as Promise<{
       total: number;
       removed: Record<string, string[]>;
     }>,
@@ -184,71 +184,71 @@ export const api = {
     fd.append("label", label);
     fd.append("lang", "fa");
     fd.append("name", name);
-    return postForm<{ id: string; url: string }>("/stream/api/subtitle-upload", fd);
+    return postForm<{ id: string; url: string }>(API_PREFIX + "/api/subtitle-upload", fd);
   },
 
   subtitleUrl: (item_id: string, url: string, label: string, name: string) =>
-    postJson<{ id: string; url: string }>("/stream/api/subtitle-url", { item_id, url, label, lang: "fa", name }),
+    postJson<{ id: string; url: string }>(API_PREFIX + "/api/subtitle-url", { item_id, url, label, lang: "fa", name }),
 
   addAudioTrack: (item_id: string, url: string, label: string, name: string) =>
-    postJson<{ ok: true }>("/stream/api/audio-track", { item_id, url, label, name }),
+    postJson<{ ok: true }>(API_PREFIX + "/api/audio-track", { item_id, url, label, name }),
 
   chatHistory: () =>
-    authFetch("/stream/api/chat/history").then((r) => r.json()) as Promise<{ messages: import("./types").ChatMessage[] }>,
+    authFetch(API_PREFIX + "/api/chat/history").then((r) => r.json()) as Promise<{ messages: import("./types").ChatMessage[] }>,
 
   chatClear: (name: string) =>
-    authFetch(`/stream/api/chat/clear?name=${encodeURIComponent(name)}`, { method: "POST" }),
+    authFetch(API_PREFIX + `/api/chat/clear?name=${encodeURIComponent(name)}`, { method: "POST" }),
 
   chatImage: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    return postForm<{ url: string }>("/stream/api/chat/image", fd);
+    return postForm<{ url: string }>(API_PREFIX + "/api/chat/image", fd);
   },
 
   avatarUpload: (file: File, name: string) => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("name", name);
-    return postForm<{ url: string }>("/stream/api/avatar", fd);
+    return postForm<{ url: string }>(API_PREFIX + "/api/avatar", fd);
   },
 
   voiceToken: (name: string, avatarUrl: string | null) =>
     postJson<{ url: string; token: string; room: string; identity: string }>(
-      "/stream/api/voice/token",
+      API_PREFIX + "/api/voice/token",
       { name, avatar_url: avatarUrl }
     ),
 
   archiveAuthStatus: () =>
-    authFetch("/stream/api/archive/auth/status").then(async (r) => {
+    authFetch(API_PREFIX + "/api/archive/auth/status").then(async (r) => {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new ArchiveApiError(data.error || `archive/auth/status failed (${r.status})`, data.kind, data.manual_session_helpful, data.detail);
       return data as ArchiveAuthStatus;
     }),
   archiveAuthCheck: () =>
-    postJson<ArchiveAuthStatus>("/stream/api/archive/auth/check", {}),
+    postJson<ArchiveAuthStatus>(API_PREFIX + "/api/archive/auth/check", {}),
   archiveSearch: (filters: import("./types").ArchiveSearchFilters) =>
-    postJson<{ results: import("./types").ArchiveResult[] }>("/stream/api/archive/search", { filters }),
+    postJson<{ results: import("./types").ArchiveResult[] }>(API_PREFIX + "/api/archive/search", { filters }),
 
   archiveFilters: () =>
-    authFetch("/stream/api/archive/filters").then(async (r) => {
+    authFetch(API_PREFIX + "/api/archive/filters").then(async (r) => {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || "خطا در دریافت فیلترها");
       return data as import("./types").ArchiveFilterOptions;
     }),
 
   archiveTitle: (source: string, url: string) =>
-    postJson<import("./types").ArchiveTitle>("/stream/api/archive/title", { source, url }),
+    postJson<import("./types").ArchiveTitle>(API_PREFIX + "/api/archive/title", { source, url }),
 
   archiveFiles: (url: string) =>
-    postJson<{ files: import("./types").ArchiveFile[] }>("/stream/api/archive/files", { url }),
+    postJson<{ files: import("./types").ArchiveFile[] }>(API_PREFIX + "/api/archive/files", { url }),
 
   addMany: (items: { title: string; url: string }[], name: string) =>
-    postJson<{ added: number; skipped: number; dead: string[] }>("/stream/api/add-many", { items, name }),
+    postJson<{ added: number; skipped: number; dead: string[] }>(API_PREFIX + "/api/add-many", { items, name }),
 
   // ── Auth / rooms / admin ──────────────────────────────────────────────
 
   me: async () => {
-    const res = await authFetch("/stream/api/auth/me");
+    const res = await authFetch(API_PREFIX + "/api/auth/me");
     const data = (await res.json().catch(() => ({}))) as {
       user?: AuthUser;
       room?: AuthRoom | null;
@@ -260,34 +260,34 @@ export const api = {
   },
 
   roomJoin: (code: string) =>
-    postJson<{ room: AuthRoom; user: AuthUser }>("/stream/api/room/join", { code }),
+    postJson<{ room: AuthRoom; user: AuthUser }>(API_PREFIX + "/api/room/join", { code }),
 
-  roomMine: () => postJson<{ room: AuthRoom; user: AuthUser }>("/stream/api/room/mine", {}),
+  roomMine: () => postJson<{ room: AuthRoom; user: AuthUser }>(API_PREFIX + "/api/room/mine", {}),
 
   roomMembers: () =>
     postJson<{ owner_id: string; online: import("./types").RoomMember[]; banned: import("./types").RoomBannedUser[] }>(
-      "/stream/api/room/members",
+      API_PREFIX + "/api/room/members",
       {}
     ),
 
-  roomPromote: (userId: string) => postJson<{ ok: true; can_control: boolean }>("/stream/api/room/members/promote", { user_id: userId }),
+  roomPromote: (userId: string) => postJson<{ ok: true; can_control: boolean }>(API_PREFIX + "/api/room/members/promote", { user_id: userId }),
 
-  roomDemote: (userId: string) => postJson<{ ok: true; can_control: boolean }>("/stream/api/room/members/demote", { user_id: userId }),
+  roomDemote: (userId: string) => postJson<{ ok: true; can_control: boolean }>(API_PREFIX + "/api/room/members/demote", { user_id: userId }),
 
-  roomBan: (userId: string) => postJson<{ ok: true; already?: boolean }>("/stream/api/room/members/ban", { user_id: userId }),
+  roomBan: (userId: string) => postJson<{ ok: true; already?: boolean }>(API_PREFIX + "/api/room/members/ban", { user_id: userId }),
 
-  roomUnban: (userId: string) => postJson<{ ok: true }>("/stream/api/room/members/unban", { user_id: userId }),
+  roomUnban: (userId: string) => postJson<{ ok: true }>(API_PREFIX + "/api/room/members/unban", { user_id: userId }),
 
 
   roomInfo: (code: string) =>
-    authFetch(`/stream/api/room/info?code=${encodeURIComponent(code)}`).then(async (r) => {
+    authFetch(API_PREFIX + `/api/room/info?code=${encodeURIComponent(code)}`).then(async (r) => {
       const data = (await r.json().catch(() => ({}))) as { room?: AuthRoom; error?: string };
       if (!r.ok) throw new Error(data.error || "اتاق پیدا نشد");
       return data;
     }),
 
   adminStats: async () => {
-    const res = await authFetch("/stream/api/admin/stats");
+    const res = await authFetch(API_PREFIX + "/api/admin/stats");
     const data = (await res.json().catch(() => ({}))) as { users?: number; rooms?: number; online?: number; media?: number; error?: string };
     if (!res.ok) throw new Error(data.error || "دسترسی ادمین لازم است");
     return {
@@ -299,17 +299,17 @@ export const api = {
   },
 
   adminUsers: async () => {
-    const res = await authFetch("/stream/api/admin/users");
+    const res = await authFetch(API_PREFIX + "/api/admin/users");
     const data = (await res.json().catch(() => ({}))) as { users?: AdminUser[]; error?: string };
     if (!res.ok) throw new Error(data.error || "دسترسی ادمین لازم است");
     return { users: data.users ?? [] };
   },
 
   adminUpdateUser: (userId: string, patch: { role?: string; can_control?: boolean; youtube_allowed?: boolean; upload_quota?: number; is_active?: boolean }) =>
-    postJson<{ user: AdminUser }>(`/stream/api/admin/users/${userId}`, patch),
+    postJson<{ user: AdminUser }>(API_PREFIX + `/api/admin/users/${userId}`, patch),
 
   adminDeleteUser: async (userId: string): Promise<void> => {
-    const res = await authFetch(`/stream/api/admin/users/${userId}`, { method: "DELETE" });
+    const res = await authFetch(API_PREFIX + `/api/admin/users/${userId}`, { method: "DELETE" });
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     if (!res.ok) throw new Error(data.error || "حذف کاربر ناموفق بود");
   },
