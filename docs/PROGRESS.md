@@ -5,6 +5,31 @@ Statuses: todo / doing / done / blocked.
 Phases in fixed order: P0 → P1 → P2 → P3 → P4 → P5 → P6. No phase starts
 before its predecessor's gate passed AND the user approved.
 
+## Session 2 (2026-10-15) — main-branch fix batch
+
+Five fixes off the phase plan, one commit each. No phase gate is involved and
+none of the P0–P6 rows move. Evidence: `make test-fast` = 768 passed, 2
+skipped, 20 deselected (405s); `npx tsc --noEmit` clean; eslint over
+`app/ components/ lib/` = 0 errors (14 pre-existing warnings).
+
+| Area | Step | Status | Commit | Evidence |
+| --- | --- | --- | --- | --- |
+| ui | Latin numerals throughout the Persian UI | done | 9cf68c3 | 11 files; fa-IR → fa-IR-u-nu-latn for date/time stamps |
+| ui | avatar falls back to the name initial on a failed image | done | 2afc0c2 | Avatar.tsx tracks the failed src, draws the initial |
+| web | stale session healed (mount `/me` + socket `connect_error`) | done | 158d199 | page.tsx +20, useRoomState.ts +11 |
+| state | vanished media flagged as an error on load | done | 09231c1 | state.py +32; tests/unit/test_state_missing_media.py (6 tests) |
+| build | PKGBUILD pins rustc 1.97.1, caps CARGO_BUILD_JOBS=4 | done | 95da02d | 1.99.0 SIGSEGV / 1.97.1 GPF workaround |
+
+Notes:
+- 09231c1 is the follow-through on the media wipe: 3ec15ab stopped *new*
+  deletions, this surfaces items the wipe already blighted as a friendly error
+  card instead of an endless spinner on a 404 master.m3u8.
+- `_source` semantics are reused from app.py:1350 — an absolute path means
+  "check the file exists"; anything else with an http(s) scheme is treated as
+  re-fetchable and left "complete" for the on-demand encoder.
+- The 768 (was 762 after e8bcf20) is the 6 new tests in
+  tests/unit/test_state_missing_media.py.
+
 ## Session 1 (2026-10-06) — reconciliation + commit housekeeping
 
 | Phase | Step | Status | Commit | Evidence |
