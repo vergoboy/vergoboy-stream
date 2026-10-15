@@ -89,9 +89,39 @@ open(path, "w", encoding="utf-8").write(raw)
 EOF
 }
 
+# Tauri derives the WebView's data directory -- and therefore the localStorage
+# the client keeps its session in -- from the app identifier. Two packages both
+# claiming ir.vergoboy.stream share that one store, so signing in to /stream
+# hands the /w2g window a token its own backend rejects (distinct
+# STREAM_JWT_SECRET), and the two apps silently log each other out. Every
+# non-original instance gets its own identifier; "stream" is left byte-identical
+# so the shipped client's existing session storage stays where it is.
+_inject_instance() {
+  local conf="$1"
+  [ "$_instance" = "stream" ] && return 0
+  INSTANCE_INJECT="$_instance" python3 - "${conf}" <<'EOF' || return 1
+import json, os, re, sys
+
+path = sys.argv[1]
+instance = os.environ["INSTANCE_INJECT"]
+raw = open(path, encoding="utf-8").read()
+
+patched, count = re.subn(
+    r'("identifier"\s*:\s*)"ir\.vergoboy\.[^"]*"',
+    lambda m: m.group(1) + json.dumps("ir.vergoboy." + instance),
+    raw,
+    count=1,
+)
+if count != 1:
+    sys.exit("no identifier key found in " + path)
+open(path, "w", encoding="utf-8").write(patched)
+EOF
+}
+
 build() {
   cd "${srcdir}/${pkgname}/webapp"
   _inject_csp src-tauri/tauri.conf.json || return 1
+  _inject_instance src-tauri/tauri.conf.json || return 1
   npm ci
   npx tsc --noEmit
   # Next 16 cannot read its TypeScript child's stdout in makepkg's isolated
