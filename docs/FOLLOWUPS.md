@@ -46,3 +46,42 @@ admin CLI.
 `archive_scraper.py:327` mentions "download/stream links" — the word, not the
 mount point. Only listed here so a future `grep /stream` sweep does not chase
 it.
+
+## From T2 (per-instance desktop package) — 2026-10-15
+
+### The desktop client still targets the API at the domain root
+
+`vergoboy-stream`'s bundled export calls `https://vergoboy.ir/api/…` and
+`…/socket.io`, not `/stream/api/…`: for the `tauri` target `BASE_PATH` is empty
+(the app's own assets load from `tauri://localhost`), and the package predates
+`NEXT_PUBLIC_API_BASE_PATH`, so its API base path is empty too. That is only
+correct if nginx serves a **root-level** `/api/` — the recon in
+`docs/DEPLOY_LOG.md` was filtered to lines containing "stream" and would not
+have shown one.
+
+*Why not now:* it is a question about live server state, not about this tree,
+and changing it would alter behaviour for the already-installed client. The
+`w2g` package does not depend on the answer — it names `/w2g` explicitly.
+
+*Later:* confirm with a read-only `grep -n 'location' .../vergoboy.ir.conf`,
+then either keep the root path (there is a proxy) or build the stream package
+with `NEXT_PUBLIC_API_BASE_PATH=/stream` and re-release it.
+
+### Live streaming shares one namespace between instances
+
+The RTMP ingest is configured server-side to write a single directory
+(`config.py` documents it as `/opt/stream/hls-live`, served by the
+instance-global `/hls/` location). `w2g` therefore plays live streams from the
+same `/hls/` URL as the original rather than its own `/w2g/hls/`, which would
+alias a directory nothing writes.
+
+Consequence: both instances publish into `live/{key}` on the same ingest. Keys
+are 10 hex characters (`uuid.uuid4().hex[:10]`) generated independently per
+instance, so a collision is negligible — but the namespaces are not isolated:
+anyone who can reach `/hls/live/{key}/` can play a stream from either instance,
+and a future ingest-level access control would apply to both.
+
+*Later:* give `w2g` its own ingest path prefix (a second RTMP application or a
+MediaMTX path namespace writing `/opt/w2g/hls-live`) and restore a `/w2g/hls/`
+location plus `STREAM_HLS_PLAYBACK_TEMPLATE`.
+

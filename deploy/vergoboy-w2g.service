@@ -25,8 +25,14 @@ Environment="STREAM_INSTANCE_ROOT=/opt/w2g"
 Environment="STREAM_SITE_URL=https://vergoboy.ir/w2g"
 Environment="STREAM_LIVEKIT_URL=wss://vergoboy.ir/livekit"
 Environment="STREAM_LIVEKIT_ROOM=w2g-voice"
-# Own live namespace, so the two instances can never collide on a stream key.
-Environment="STREAM_HLS_PLAYBACK_TEMPLATE=https://vergoboy.ir/w2g/hls/live/{key}/index.m3u8"
+# Live namespace: deliberately NOT overridden. The RTMP ingest writes one
+# instance-global directory (config.py HLS_PLAYBACK_URL_TEMPLATE →
+# https://vergoboy.ir/hls/live/{key}/index.m3u8, served by the instance-global
+# /hls/ location declared in nginx-stream.conf). Pointing w2g at its own
+# /w2g/hls/ would hand out playlists nothing ever writes, so both instances
+# share the live namespace until the ingest is split per instance — see
+# docs/FOLLOWUPS.md. Stream keys are 10 hex chars generated independently per
+# instance, so a collision is negligible.
 EnvironmentFile=/opt/w2g/.stream_db.env
 
 ExecStart=/opt/w2g/current/venv/bin/python3 /opt/w2g/current/app.py
