@@ -83,11 +83,26 @@ build() {
   # Git worktree. Use this checkout's freshly built, independently typechecked
   # static export, while Tauri/Rust is still built from the source worktree.
   cp -a "${startdir}/../../webapp/out" ./out
-  # rustc's MIR optimizer recurses deeply over the glib/gtk bindings and, under
-  # makepkg's default RUSTFLAGS (-C debuginfo=2 -C prefer-dynamic), intermittently
-  # exhausts the stack -- SIGSEGV in optimized_mir / encode_metadata. Spawned codegen
-  # workers need RUST_MIN_STACK; the main thread instead takes its stack from
-  # RLIMIT_STACK at exec time, so both have to be raised. Virtual memory only.
+  # Pin the toolchain. Since the rustc 1.99.0 update (Oct 2026) this release build
+  # intermittently SIGSEGVs inside rustc itself -- SEGV_MAPERR in hashbrown while
+  # MetadataDecodeContext decodes a dependency's optimized_mir during
+  # collect_and_partition_mono_items (coredump path: collect_items_rec -> instance_mir
+  # -> optimized_mir -> decode). It is not a stack overflow (fault far below the
+  # crashing thread's SP; the old RUST_MIN_STACK/ulimit workaround below does not
+  # touch it), it needs the full glib/gtk/tauri dep graph, and it has produced no
+  # coredump with 1.97.1 (the toolchain that built every pre-Oct-4 package).
+  export RUSTUP_TOOLCHAIN=1.97.1
+  # 1.97.1 also intermittently GPFs in librustc_driver (kernel: "general protection
+  # fault ... in librustc_driver") when the 16-way parallel opt-3 release codegen
+  # oversubscribes RAM and starts thrashing swap. Reproduced on kernel log,
+  # deterministic-enough that the same crate/toolchain compiles cleanly in
+  # isolation (and the full graph at -j2, verified). Cap codegen concurrency well
+  # below the memory ceiling; lower to 2 if a host still faults.
+  export CARGO_BUILD_JOBS=4
+  # Older rustc recursion issues (SIGSEGV in optimized_mir / encode_metadata under
+  # deep MIR optimization): spawned codegen workers need RUST_MIN_STACK; the main
+  # thread instead takes its stack from RLIMIT_STACK at exec time. Both raised
+  # here. Virtual memory only.
   ulimit -s 65536 2>/dev/null || true
   export RUST_MIN_STACK=33554432
   env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
