@@ -83,6 +83,17 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
       });
       socket.on("disconnect", () => setConnected(false));
 
+      // A rejected handshake (expired/invalid token) arrives as
+      // connect_error("unauthorized"). Refreshing the access token makes
+      // saveAuth update it, which re-runs this effect with the fresh token
+      // and reconnects. Retrying the dead token would spin forever.
+      let refreshed = false;
+      socket.on("connect_error", (err) => {
+        if (refreshed || !(err instanceof Error) || err.message !== "unauthorized" || socketRef.current !== socket) return;
+        refreshed = true;
+        import("./auth").then(({ refreshAccessToken }) => refreshAccessToken());
+      });
+
       socket.on("state_sync", (data: RoomStateSync) => {
         recvLocalRef.current = Date.now() / 1000;
         setRoom(data);

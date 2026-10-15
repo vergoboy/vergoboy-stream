@@ -120,6 +120,26 @@ function PageInner() {
     if (user?.current_room_id) setRoomCode(user.current_room_id);
   }, [user?.current_room_id]);
 
+  // Heal stale sessions at mount: the stored access token may be expired; a
+  // /me call refreshes it (authFetch auto-refreshes on 401) and re-syncs the
+  // profile and room. If the session is gone, refreshAccessToken clears it and
+  // the login screen appears instead of the socket hanging forever.
+  const meOnceRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || !user || meOnceRef.current) return;
+    meOnceRef.current = true;
+    api
+      .me()
+      .then((res) => {
+        if (res.user) updateUser(res.user);
+        if (res.room?.id) setRoomCode(res.room.id);
+      })
+      .catch(() => {
+        /* non-401 errors just mean the backend is unreachable — the stored
+           session is kept and the socket keeps trying */
+      });
+  }, [hydrated, user]);
+
   // Mark our pages so the browser screen-share feature can detect when one of
   // them is being captured and drop its audio (prevents the room's own sound
   // from feeding back into an external stream).
