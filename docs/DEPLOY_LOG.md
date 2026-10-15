@@ -120,3 +120,52 @@ the built-in `pg_*` roles.
    `/hls/`? Global `/hls/` already points at `/opt/stream/hls-live/`.
 3. Which DB/role for `/w2g` — new `w2g` database+role, or reuse the `stream`
    one? (Default: new, to keep the two instances independent.)
+
+---
+
+## Session 2 (2026-10-16) — T4 S0 read-only preflight
+
+```sh
+SSHPASS='***' sshpass -e ssh ubuntu@45.135.242.135 'bash -s' <<'REMOTE'
+# S0 preflight (read-only; abort conditions: disk<20G, 8802 busy, nginx -t fail,
+# vergoboy-stream not active, vhost sha256 mismatch)
+df -BG --output=avail /opt | tail -1
+ss -ltn | grep -E ':8802\b' && { echo "OCCUPIED — abort"; exit 1; } || echo free
+ls -ld /opt/w2g 2>/dev/null || echo absent
+sudo nginx -t
+CONF=$(sudo readlink -f /etc/nginx/sites-enabled/vergoboy.ir.conf); echo "CONF=$CONF"
+sudo sha256sum "$CONF"
+sudo grep -c '^server' "$CONF"
+sudo grep -n 'location' "$CONF"
+/usr/bin/python3 -V; /usr/bin/node -v; /usr/bin/npm -v
+test -x /opt/stream/venv/bin/python3 && echo "python3-venv works here"
+sudo systemctl show vergoboy-stream -p EnvironmentFiles
+sudo grep -oE '^[A-Z_]+=' /opt/stream/.stream_db.env | sort || true
+sudo grep -oE '^STREAM_(GOOGLE|GITHUB)_OAUTH_CLIENT_(ID|SECRET)=' /opt/stream/.stream_db.env | sort || true
+systemctl is-active vergoboy-stream vergoboy-frontend-build
+curl -sS -o /dev/null -w 'stream HTTP %{http_code}\n' https://vergoboy.ir/stream/
+REMOTE
+```
+
+### S0 findings
+
+| Check | Result | Verdict |
+| --- | --- | --- |
+| Disk `/opt` free | **26G** | ≥ 20 GB floor ✓ |
+| Port 8802 | **free** | ✓ |
+| `/opt/w2g` | **absent** | ✓ |
+| `nginx -t` | **syntax OK / test successful** | ✓ (proxy_headers_hash warnings are pre-existing) |
+| vhost real path | `/etc/nginx/sites-available/vergoboy.ir.conf` | symlink resolves |
+| vhost sha256 | `b219168ef215708461a9cfb66815b368d23fa7a826b91ddf8ed5f8d697ff2e9f` | **matches T3 baseline** ✓ |
+| `server{}` count | **4** (ports 80, 443×2, 9000) | **deviates from plan's assumption of 1** — the /stream locations live in the line-15 443 block; S9 must insert the include into *that* block, not `rfind("}")` of the whole file |
+| root `/api` location | → `proxy_pass http://127.0.0.1:5000` | **resolves open question 1**: root `/api` is another app (port 5000), not vergoboy-stream (8801); no root `/socket.io` |
+| root `/socket.io` | absent | ✓ (only `/stream/socket.io`) |
+| toolchain | Python 3.12.3, Node v18.19.1, npm 9.2.0 | ✓; stream venv exists at /opt/stream/venv |
+| original env file | `/opt/stream/.stream_db.env`, `0600 www-data` | path confirmed for S6 |
+| env key names | STREAM_DATABASE_URL, STREAM_GITHUB_OAUTH_CLIENT_{ID,SECRET}, STREAM_GOOGLE_OAUTH_CLIENT_{ID,SECRET}, STREAM_JWT_SECRET | OAuth credential names present (values never logged) |
+| stream baseline | both units `active`; `GET /stream/` → **HTTP 200** | ✓ unchanged |
+
+### Deviations handled at S9
+
+The plan's S9 python inserts the include before `rfind("}")` (the last brace of the file), which with 4 server blocks would land in the wrong block. I will instead insert `include /etc/nginx/snippets/vergoboy-w2g.conf;` into the server block that contains `location /stream/api/` (the line-15 443 vhost), immediately before that block's closing brace — verified by re-reading the file after insertion and by `nginx -t`.
+
