@@ -5,6 +5,43 @@ Statuses: todo / doing / done / blocked.
 Phases in fixed order: P0 → P1 → P2 → P3 → P4 → P5 → P6. No phase starts
 before its predecessor's gate passed AND the user approved.
 
+## Session 3 (2026-10-15) — w2g delivery: T0 reconcile
+
+Mission (from the master instructions): a second instance at
+https://vergoboy.ir/w2g served from /opt/w2g, leaving the existing
+https://vergoboy.ir/stream, /opt/stream, its unit, DB and port untouched.
+Branch `release/w2g-v1` cut from `main` at 8cb0873. Three hard gates: G1 local
+readiness, G2 deploy plan, G3 final report. The old P2–P6 roadmap is PAUSED.
+
+| Track | Step | Status | Commit | Evidence |
+| --- | --- | --- | --- | --- |
+| T0 | reconcile: HEAD, tree, branches, tags | done | n/a | HEAD 8cb0873; tree clean; `wc -l app.py` = 4093; only tag `pre-mpv-baseline` |
+| T0 | branch release/w2g-v1 cut from main | done | n/a | `git branch --show-current` |
+| T0 | dev env: venv rebuilt with uv, py3.12 | done | n/a | `venv/bin/python -V` = Python 3.12.15 |
+| T0 | dev env: dev lock regains pytest/pytest-cov | done | 4157d1f | additive 155/0; now pins pytest 8.4.2, pytest-cov 6.3.0 |
+| T0 | dev env: `make test-fast` guards the interpreter | done | 11a5f11 | `make test-fast` = 768 passed, 2 skipped, 20 deselected (405s) |
+| T1 | parametrize base path + instance identity | doing | — | plan proposed, awaiting user go |
+
+Media-wipe post-mortem (requested at T0). The wipe was self-inflicted by our own
+cleanup routine — nginx aliases and paths were never involved.
+`_cleanup_orphans()` (app.py) deletes every file under UPLOAD_DIR/SUBS_DIR and
+every dir under HLS_DIR that is not "referenced", and `_collect_referenced_files()`
+built that reference set only from rooms open *in-process* (`rooms._rooms`) plus
+the single `room`. On a fresh boot the registry is empty, so the first
+`POST /stream/api/cleanup` — or any `/stream/api/delete?...cleanup=1` — classified
+every cold room's uploads, subtitles and HLS dirs as orphans and removed them,
+even though those rooms still existed as JSON in `data/rooms/`. The files were
+simply gone, so clients got a 404 on `master.m3u8`: the endless-spinner shape
+that 09231c1 now turns into a visible "this video's file was deleted" error.
+3ec15ab fixed the root cause (the collector also scans `data/rooms/*.json`, so a
+cold room owns its media) and e8bcf20 stopped the socket suite from writing into
+the developer's real `data/rooms` and triggering cleanups against real media.
+Confirmation for T4: the deploy scripts will never read or delete `/opt/w2g/media`
+or `/opt/stream/media` — `deploy.sh` writes only under `/opt/w2g/releases/<ts>/`,
+repoints the `/opt/w2g/current` symlink, and rsyncs the static export into
+`/opt/w2g/webapp-out`; `media`, `data` and `hls-live` live outside the release
+tree and are referenced by no `rm`, `rsync --delete`, or cleanup call.
+
 ## Session 2 (2026-10-15) — main-branch fix batch
 
 Five fixes off the phase plan, one commit each. No phase gate is involved and
