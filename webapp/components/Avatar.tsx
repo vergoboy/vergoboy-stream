@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { nameHueColor, nameInitial } from "@/lib/format";
 import { mediaUrl } from "@/lib/config";
 
@@ -14,14 +16,18 @@ export function Avatar({
   size?: number;
   className?: string;
 }) {
-  if (url) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const src = url ? mediaUrl(url) : null;
+  const broken = src != null && failedSrc === src;
+  if (src && !broken) {
     return (
       // eslint-disable-next-line @next/next/no-img-element -- dynamic, remote-origin avatar; next/image gives no benefit since images.unoptimized is set
       <img
-        src={mediaUrl(url)}
+        src={src}
         alt={name}
         width={size}
         height={size}
+        onError={() => setFailedSrc(src)}
         className={`rounded-full object-cover shrink-0 ${className}`}
         style={{ width: size, height: size }}
       />
