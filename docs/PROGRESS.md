@@ -26,8 +26,8 @@ Order agreed with the user: T1 → T2 → G1 → T3 → G2 **STOP** → T4 → G
 | T2 | unblock the Arch package build | done | 12676ed | dropped unused `patchelf` makedepend + dropped stale `$SRCDEST` mirror; `./build-arch.sh` → `vergoboy-stream-0.1.0-1-x86_64.pkg.tar.zst` (3.25 MiB) |
 | T2 | native client: per-instance Arch package | done | 7bdc32f, 1bce226, dc520d9 | `./build-arch.sh --instance w2g` → `vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst`; both install side by side — see T2 block |
 | T3 | server read-only recon (S1/S2) | done | — | docs/DEPLOY_LOG.md; port 8802 free, `/opt/w2g` absent, `/stream` baseline HTTP 200 |
-| T3 | deploy plan, read-only (S3) | done | — | docs/DEPLOY_PLAN.md — S0–S11, abort conditions, verification, rollback; **awaits G2 approval** |
-| T4 | provision /opt/w2g, deploy, verify | todo | — | blocked on G2 approval and the SSH password |
+| T3 | deploy plan, read-only (S3) | done | — | docs/DEPLOY_PLAN.md — S0–S11, abort conditions, verification, rollback; **G2 approved 2026-10-15** |
+| T4 | provision /opt/w2g, deploy, verify | blocked | — | G2 approved 2026-10-15; blocked on the SSH password — read-only S0 is the first step |
 | G1 | local readiness gate (before T3) | done | — | see G1 below |
 | G2 | deploy plan approved by the user | todo | — | presented, awaiting answer |
 | G3 | final report | todo | — | — |
@@ -236,6 +236,59 @@ is refreshed by `vergoboy-frontend-build.service`, whereas w2g's export lives
 *inside* the release, so flipping `current` swaps the backend and the UI
 together and a rollback moves both back. `media` and `data` live outside the
 release tree and are referenced by no `rm`, `rsync --delete`, or cleanup call.
+
+### Pre-T4 — desktop client reports "cannot connect" (2026-10-15)
+
+Reported from the installed app, not from a test. Diagnosed by probing the live
+site from the workstation; no server access was used.
+
+* The app in question is **`vergoboy-stream`** (the only instance installed; its
+  data lives in `~/.local/share/ir.vergoboy.stream`). `vergoboy-w2g` is not
+  installed at all.
+* The sentence is `friendlyError()` in `webapp/lib/auth.ts`, which prints it only
+  when `fetch()` itself rejects — a webview-level networking refusal, never an
+  HTTP status.
+* **Cause 1 (ours, packaging):** `build-arch.sh:97` bakes an *empty* API base
+  path for the `stream` instance, so `webapp/lib/config.ts` yields
+  `API_PREFIX="/api"` and the shipped client calls `https://vergoboy.ir/api/…`.
+* **Cause 2 (live state, pre-existing):** the domain root `/api/` is **not**
+  this app. `GET /api/auth/me` → 404 carrying `Access-Control-Allow-Origin: *`
+  (a different co-located service), and the CORS preflight
+  `OPTIONS /api/auth/me` → **404**: a non-2xx preflight rejects the fetch, which
+  is precisely the reported sentence. Our backend answers only under
+  `/stream/api/*` — `GET /stream/api/auth/me` → 401 JSON, and
+  `/stream/api/auth/oauth/google` → 302 to Google with
+  `redirect_uri=https://vergoboy.ir/stream/api/auth/oauth/google/callback`.
+  (That resolves the root-`/api/` question in `docs/FOLLOWUPS.md` and
+  independently confirms the redirect-URI shape D7 predicts for
+  `/w2g`. The nginx `location` inventory at S0 still has to confirm there is no
+  root proxy that *should* exist.)
+* **Cause 2b (server, pre-existing):** the running `/stream` build emits no CORS
+  at all — `OPTIONS /stream/api/auth/me` → 404 with no
+  `Access-Control-Allow-Origin`, not even for `https://vergoboy.ir`. The tree's
+  current code does both that (`app.py:131`: flask-cors on `{BP}/api/*`, origins
+  `SITE_ORIGIN` + `tauri://localhost` in production) and has
+  `{BP}/api/health` (app.py:1584), so the live deployment predates both. The
+  browser client never needed CORS because it is same-origin.
+
+Consequence for the plan: the `w2g` client has neither defect (`/w2g` is baked in
+explicitly) and the code T4 deploys *is* the current code, so **T4 is the route to
+a working desktop client**. The `stream` client would need its baked base path
+repointed to `/stream` **and** its live instance refreshed — neither is part of
+T4.
+
+User decisions (2026-10-15): deploy `/w2g` now; repoint the `stream` package is
+*not* part of this rebuild; fold the namcap license fix into the next rebuild.
+
+### Packaging — SPDX license identifier (2026-10-15)
+
+namcap reported E-class `custom is not a valid SPDX license identifier`, and its
+own message prescribes the `LicenseRef-` prefix for a custom licence, so
+`packaging/arch/PKGBUILD` now says `LicenseRef-proprietary`. Both instances
+share this PKGBUILD, so the fix invalidates both built artifacts and both are
+being rebuilt (stream, then w2g, so the freshest artifact on disk is the one
+T4's follow-up install uses). No server step depends on the packages: T4 ships a
+`git archive` release, not a `.pkg.tar.zst`.
 
 ## Session 2 (2026-10-15) — main-branch fix batch
 

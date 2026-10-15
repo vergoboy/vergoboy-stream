@@ -67,6 +67,31 @@ and changing it would alter behaviour for the already-installed client. The
 then either keep the root path (there is a proxy) or build the stream package
 with `NEXT_PUBLIC_API_BASE_PATH=/stream` and re-release it.
 
+**Update 2026-10-15 — answered by live probe, and this is the "cannot
+connect" bug.** The root path does **not** reach this app. The installed
+`vergoboy-stream` client calls the domain root, where `GET /api/auth/me`
+returns 404 with `Access-Control-Allow-Origin: *` (a different co-located
+service) and the CORS preflight `OPTIONS /api/auth/me` returns **404** — a
+non-2xx preflight makes `fetch()` reject, which is precisely the sentence the
+app shows. Our backend answers only under `/stream/api/*`:
+`GET /stream/api/auth/me` → 401 JSON, and
+`/stream/api/auth/oauth/google` → 302 to Google with
+`redirect_uri=https://vergoboy.ir/stream/api/auth/oauth/google/callback`.
+
+Second, independent defect on the same path: the running `/stream` build sends
+no CORS headers at all (`OPTIONS /stream/api/auth/me` → 404, no
+`Access-Control-Allow-Origin`, not even for `https://vergoboy.ir`), while the
+tree's current code registers flask-cors on `{BP}/api/*` with
+`tauri://localhost` in production. So repointing the package is necessary but
+not sufficient: the live instance must also run code that answers the preflight.
+Details in `docs/PROGRESS.md` § "Pre-T4".
+
+*Later:* (a) build the stream package with `NEXT_PUBLIC_API_BASE_PATH=/stream`
+(one line in `build-arch.sh:97`) and re-release it; (b) refresh the live
+`/stream` deployment to code that answers CORS, which needs the user's approval
+since it touches the existing instance; (c) still read the vhost's `location`
+inventory at S0 in case a root-level proxy is meant to exist.
+
 ### Live streaming shares one namespace between instances
 
 The RTMP ingest is configured server-side to write a single directory
