@@ -144,14 +144,17 @@ else
   # catches -- so verify the properties the package actually depends on.
   bad=""
 
-  # 1. Build target. next.config.ts sets basePath "/stream" only for the "web"
-  #    target and leaves it empty for "tauri", because the desktop app's origin
-  #    is tauri://localhost. A web export's chunks therefore load as
-  #    /stream/_next/..., which 404s inside the app: the page never hydrates and
-  #    the window stays blank white. Symptom seen in the WebView error report:
+  # 1. Build target. next.config.ts sets a basePath for the "web" target
+  #    (historically "/stream"; a second instance uses "/w2g") and leaves it
+  #    empty for "tauri", because the desktop app's origin is tauri://localhost.
+  #    A web export's chunks therefore load as <prefix>/_next/..., which 404s
+  #    inside the app: the page never hydrates and the window stays blank white.
+  #    Symptom seen in the WebView error report:
   #      ChunkLoadError: Failed to load chunk /stream/_next/static/chunks/...
-  if grep -q '"/stream/_next/' "$OUTDIR/index.html" 2>/dev/null; then
-    bad="it is a 'web'-target export (basePath /stream); its chunks 404 inside the desktop app"
+  #    The check is deliberately prefix-agnostic — any non-empty basePath is
+  #    wrong here, not just the historical one.
+  if grep -qE '"/[^/"]+/_next/' "$OUTDIR/index.html" 2>/dev/null; then
+    bad="it is a 'web'-target export (a basePath is set); its chunks 404 inside the desktop app"
   elif ! grep -q '"/_next/static/chunks/' "$OUTDIR/index.html" 2>/dev/null; then
     bad="it does not look like a static export at all (no '/_next/static/chunks/' in index.html)"
   fi
