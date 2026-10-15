@@ -70,7 +70,7 @@ export function ChatPanel({
       )}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="m-0 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">
-          چت فقط در حافظه‌ی سرور نگه داشته می‌شه؛ خودش هر ۲۴ ساعت پاک می‌شه، یا با دکمه‌ی روبه‌رو الان پاکش کن.
+          چت فقط در حافظه‌ی سرور نگه داشته می‌شه؛ خودش هر 24 ساعت پاک می‌شه، یا با دکمه‌ی روبه‌رو الان پاکش کن.
         </p>
         <button
           onClick={clearChat}
@@ -101,7 +101,7 @@ export function ChatPanel({
                     {m.name}
                   </span>
                   <span className="font-mono text-[10px] text-[color:var(--color-ink-dim)]" dir="ltr">
-                    {new Date(m.ts * 1000).toLocaleTimeString("fa-IR")}
+                    {new Date(m.ts * 1000).toLocaleTimeString("fa-IR-u-nu-latn")}
                   </span>
                 </div>
                 <div

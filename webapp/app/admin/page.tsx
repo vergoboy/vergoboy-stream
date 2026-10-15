@@ -24,7 +24,7 @@ interface Stats {
 function fmtDate(iso?: string | null): string {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleDateString("fa-IR");
+    return new Date(iso).toLocaleDateString("fa-IR-u-nu-latn");
   } catch {
     return "—";
   }

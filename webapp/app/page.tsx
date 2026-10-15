@@ -343,8 +343,8 @@ function PageInner() {
           ...(hasPlayable
             ? ([
                 { type: "item", id: "play-pause", label: room.playing ? "توقف" : "پخش", icon: room.playing ? Pause : Play, hint: "K" },
-                { type: "item", id: "seek-back", label: "۱۰ ثانیه عقب", icon: Undo2, hint: "J" },
-                { type: "item", id: "seek-forward", label: "۱۰ ثانیه جلو", icon: Redo2, hint: "L" },
+                { type: "item", id: "seek-back", label: "10 ثانیه عقب", icon: Undo2, hint: "J" },
+                { type: "item", id: "seek-forward", label: "10 ثانیه جلو", icon: Redo2, hint: "L" },
                 { type: "sep" },
                 { type: "item", id: "prev", label: "قبلی", icon: SkipBack, disabled: !canManage, hint: "P" },
                 { type: "item", id: "next", label: "بعدی", icon: SkipForward, disabled: !canManage, hint: "N" },

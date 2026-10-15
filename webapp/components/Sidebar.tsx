@@ -80,7 +80,7 @@ export function Sidebar({
                 dangerouslySetInnerHTML={{
                   __html: `${notifyText(n, playlist)}<span class="mt-0.5 block font-mono text-[10.5px] text-[color:var(--color-ink-dim)]" dir="ltr">${new Date(
                     n.ts * 1000
-                  ).toLocaleTimeString("fa-IR")}</span>`,
+                  ).toLocaleTimeString("fa-IR-u-nu-latn")}</span>`,
                 }}
               />
             ))}

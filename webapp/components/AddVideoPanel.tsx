@@ -147,7 +147,7 @@ function FileForm({ myName }: { myName: string }) {
   return (
     <form onSubmit={submit} className="flex flex-col gap-2.5">
       <label className={labelClass}>عنوان (اختیاری)</label>
-      <input className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="مثلا: قسمت ۱ — فصل دوم" />
+      <input className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="مثلا: قسمت 1 — فصل دوم" />
       <label className={labelClass}>فایل ویدیو</label>
       <div
         onDragEnter={handleDrag}
@@ -235,7 +235,7 @@ function VideoForm({ myName, initialUrl = "", autoScan = false }: { myName: stri
     setLoading(true);
     setPreview(null);
     setPlaylist(null);
-    setStatus({ msg: "در حال اسکن لینک… (۱۵–۶۰ ثانیه)" });
+    setStatus({ msg: "در حال اسکن لینک… (15–60 ثانیه)" });
     try {
       const data = await api.youtubeFormats(url.trim());
       if (data.type === "playlist") {
@@ -262,7 +262,7 @@ function VideoForm({ myName, initialUrl = "", autoScan = false }: { myName: stri
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!url.trim()) return;
-    setStatus({ msg: "در حال دریافت لینک مستقیم با کیفیت انتخابی… (۱۵–۳۰ ثانیه)" });
+    setStatus({ msg: "در حال دریافت لینک مستقیم با کیفیت انتخابی… (15–30 ثانیه)" });
     try {
       const data = await api.addYoutube(url.trim(), formatId, customTitle || preview?.title || "", myName, subLang);
       setStatus({ msg: `«${data.title}» اضافه شد — دانلود و آماده‌سازی در پس‌زمینه ادامه داره` });

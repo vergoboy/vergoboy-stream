@@ -23,7 +23,7 @@ export function ShortcutsModal({ open, onClose }: { open: boolean; onClose: () =
     { keys: [formatKey(sc.pip)], desc: SHORTCUT_LABELS.pip },
     { keys: [formatKey(sc.shortcuts)], desc: SHORTCUT_LABELS.shortcuts },
     { keys: [formatKey(sc.settings)], desc: SHORTCUT_LABELS.settings },
-    { keys: ["1", "…", "9"], desc: "رفتن به ۱۰٪–۹۰٪ فیلم" },
+    { keys: ["1", "…", "9"], desc: "رفتن به 10٪–90٪ فیلم" },
     { keys: ["0"], desc: "رفتن به ابتدای فیلم" },
     { keys: ["Esc"], desc: "بستن این پنجره / خروج از تمام‌صفحه" },
   ];

@@ -1530,7 +1530,7 @@ export function Player({
                       </div>
                       <span className="font-mono text-xs text-[color:var(--color-amber)]">{defProgress?.pct ?? 0}%</span>
                     </div>
-                    <p className="text-[12px] text-white/45">معمولاً تا ۲ دقیقه‌ی دیگه پخشش شروع می‌شه 🍿</p>
+                    <p className="text-[12px] text-white/45">معمولاً تا 2 دقیقه‌ی دیگه پخشش شروع می‌شه 🍿</p>
                   </>
                 )}
               </div>
@@ -1753,7 +1753,7 @@ function SkipFlash({ side, onDone }: { side: -1 | 1; onDone: () => void }) {
       className={`pointer-events-none absolute inset-y-0 z-[5] flex w-1/3 items-center justify-center ${side === 1 ? "right-0 rounded-l-[100%]" : "left-0 rounded-r-[100%]"} bg-white/10`}
       style={{ opacity: 0 }}
     >
-      <span className="rounded-full bg-black/55 px-4 py-2 text-[14px] font-bold text-white">{side === 1 ? "۱۰ ثانیه جلو ⏩" : "⏪ ۱۰ ثانیه عقب"}</span>
+      <span className="rounded-full bg-black/55 px-4 py-2 text-[14px] font-bold text-white">{side === 1 ? "10 ثانیه جلو ⏩" : "⏪ 10 ثانیه عقب"}</span>
     </div>
   );
 }

@@ -278,7 +278,7 @@ export function AuthGate() {
                   onChange={(e) => setPassword(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && submit()}
                   maxLength={128}
-                  placeholder="رمز عبور (حداقل ۶ کاراکتر)"
+                  placeholder="رمز عبور (حداقل 6 کاراکتر)"
                   autoComplete={mode === "login" ? "current-password" : "new-password"}
                   className="w-full rounded-2xl border border-[color:var(--color-border)] bg-white/5 px-4 py-3 text-center text-[14.5px] text-[color:var(--color-ink)] outline-none focus:border-[color:var(--color-amber)]"
                 />

@@ -52,8 +52,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 
 export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
   playPause: "پخش / مکث",
-  seekBack: "۱۰ ثانیه عقب",
-  seekForward: "۱۰ ثانیه جلو",
+  seekBack: "10 ثانیه عقب",
+  seekForward: "10 ثانیه جلو",
   volumeUp: "صدا بیشتر",
   volumeDown: "صدا کمتر",
   mute: "بی‌صدا / باصدا",

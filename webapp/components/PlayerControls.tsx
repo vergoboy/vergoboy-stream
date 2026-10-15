@@ -162,10 +162,10 @@ export function PlayerControls(p: ControlsProps) {
                 <SkipForward className="h-[18px] w-[18px] fill-current" />
               </IconBtn>
             )}
-            <IconBtn label="۱۰ ثانیه عقب" onClick={() => p.onSkip(-10)} hideOnPhone>
+            <IconBtn label="10 ثانیه عقب" onClick={() => p.onSkip(-10)} hideOnPhone>
               <Undo2 className="h-[18px] w-[18px]" />
             </IconBtn>
-            <IconBtn label="۱۰ ثانیه جلو" onClick={() => p.onSkip(10)} hideOnPhone>
+            <IconBtn label="10 ثانیه جلو" onClick={() => p.onSkip(10)} hideOnPhone>
               <Redo2 className="h-[18px] w-[18px]" />
             </IconBtn>
           </>

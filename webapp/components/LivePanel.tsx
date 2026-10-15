@@ -269,7 +269,7 @@ export function LivePanel({ myName, canAdd, canManage, onLiveStarted }: { myName
 
       <div className="grid gap-6 md:grid-cols-2">
         <div>
-          <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">۱) ساخت کلید استریم</h4>
+          <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">1) ساخت کلید استریم</h4>
           <p className="mb-3 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">یک کلید بساز و در نرم‌افزار پخشت (OBS و ...) آدرس Server و کلید رو جدا در دو فیلد وارد کن.</p>
           <button
             onClick={async () => setKey(await api.newLiveKey())}
@@ -308,7 +308,7 @@ export function LivePanel({ myName, canAdd, canManage, onLiveStarted }: { myName
         </div>
 
         <div>
-          <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">۲) یا وارد کردن دستی</h4>
+          <h4 className="mb-1.5 text-[14.5px] font-bold text-[color:var(--color-ink)]">2) یا وارد کردن دستی</h4>
           <p className="mb-3 text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">اگه از قبل آدرس HLS پخش زنده رو داری، مستقیم وارد کن.</p>
           <form
             onSubmit={async (e) => {
