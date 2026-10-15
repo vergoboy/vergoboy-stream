@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 
 from config import Config
 
@@ -238,6 +239,7 @@ class RoomState:
                 self.shuffle = bool(d.get("shuffle", False))
                 self.shuffle_order = d.get("shuffle_order", []) or []
                 self._migrate_playlist()
+                self._revalidate_missing_media()
         except Exception as e:
             print("[state] load error:", e)
 
@@ -267,6 +269,36 @@ class RoomState:
                 if "is_default" not in r:
                     r["is_default"] = (not has_default and i == 0)
                     changed = True
+        if changed:
+            self.save()
+
+    def _revalidate_missing_media(self):
+        """A 'complete' item whose encoded HLS output (and its source) have
+        vanished from disk can never play again — flag it as an error so the
+        frontend shows a friendly card instead of an endless spinner. An item
+        stays 'complete' when it could still be re-encoded (local source file
+        present, or a re-fetchable remote URL). Persists once, so the state
+        survives restarts."""
+        changed = False
+        for item in self.playlist:
+            if item.get("status") not in ("complete", "ready"):
+                continue
+            src = item.get("src") or ""
+            if not src.startswith("/stream/media/hls/"):
+                continue
+            master = os.path.join(Config.HLS_DIR, str(item.get("id", "")), "master.m3u8")
+            if os.path.exists(master):
+                continue
+            source = item.get("_source") or ""
+            if os.path.isabs(source):
+                reencodable = os.path.exists(source)
+            else:
+                reencodable = urlsplit(source).scheme in ("http", "https")
+            if reencodable:
+                continue
+            item["status"] = "error"
+            item["error"] = "فایل این ویدیو حذف شده — دوباره اضافه‌ش کن."
+            changed = True
         if changed:
             self.save()
 
