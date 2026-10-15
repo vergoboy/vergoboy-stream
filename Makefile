@@ -12,31 +12,43 @@ PYTHON ?= $(VENV)/bin/python
 PYTEST ?= -q
 
 .DEFAULT_GOAL := help
-.PHONY: help test test-unit test-socket test-integration test-fast coverage \
+.PHONY: help check-venv test test-unit test-socket test-integration test-fast coverage \
         fixtures-argv fixtures-probe verify-argv clean package-arch
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
+# The venv is the one thing make cannot build; uv can. Every test target depends
+# on this, so a missing or wrong interpreter says exactly how to fix it instead
+# of surfacing as a bare "No such file or directory" that hides a broken
+# symlink. conftest separately rejects a venv that cannot import the suite.
+check-venv:
+	@test -x "$(PYTHON)" || { \
+		echo "error: $(PYTHON) is missing or not executable."; \
+		echo "  create the project venv with:"; \
+		echo "      uv venv --python 3.12 $(VENV)"; \
+		echo "      uv pip install --python $(PYTHON) -r requirements-dev.lock.txt"; \
+		exit 1; }
+
 ## ── tests ────────────────────────────────────────────────────────────────────
 
-test: ## Run the whole suite (unit + integration + socket)
+test: check-venv ## Run the whole suite (unit + integration + socket)
 	$(PYTHON) -m pytest $(PYTEST)
 
-test-unit: ## Run only the fast unit suites (no ffmpeg, no database)
+test-unit: check-venv ## Run only the fast unit suites (no ffmpeg, no database)
 	$(PYTHON) -m pytest tests/unit $(PYTEST)
 
-test-socket: ## Run the live-socket suite (boots an embedded postgres + real server)
+test-socket: check-venv ## Run the live-socket suite (boots an embedded postgres + real server)
 	$(PYTHON) -m pytest tests/socket $(PYTEST)
 
-test-integration: ## Run the real-ffmpeg integration suites
+test-integration: check-venv ## Run the real-ffmpeg integration suites
 	$(PYTHON) -m pytest tests/integration $(PYTEST)
 
-test-fast: ## Unit + socket suites, no real ffmpeg encodes
+test-fast: check-venv ## Unit + socket suites, no real ffmpeg encodes
 	$(PYTHON) -m pytest -m "not integration" $(PYTEST)
 
-coverage: ## Coverage report (the socket suite included)
+coverage: check-venv ## Coverage report (the socket suite included)
 	$(PYTHON) -m coverage run -m pytest $(PYTEST)
 	$(PYTHON) -m coverage report -m
 
