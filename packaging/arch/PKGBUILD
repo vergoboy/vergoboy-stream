@@ -16,7 +16,7 @@ pkgrel=1
 pkgdesc='Private cinema watch-party desktop client'
 arch=('x86_64')
 url='https://vergoboy.ir'
-license=('custom')
+license=('LicenseRef-proprietary')
 # No -debug split. A Rust binary has no separate debug ELF for makepkg to split
 # off, so the generated -debug package carries no symbols and every build prints
 #   Error while writing index for '.../usr/bin/vergoboy-stream': No debugging symbols
