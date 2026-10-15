@@ -203,9 +203,30 @@ done
 # needs it to patch the clone's CSP (blob: for hls.js + the local origin).
 printf '%s\n' "$API_ORIGIN" > "$PKGDIR/.api-origin"
 
+# makepkg keeps a *bare* git mirror of the source under $SRCDEST (which defaults
+# to the PKGBUILD directory, so $PKGDIR/vergoboy-stream) and checks it out into
+# src/. Both are keyed to the repo's absolute path, so a tree that was copied or
+# moved to another machine leaves a mirror whose origin no longer exists and
+# makepkg aborts before building with
+#   ERROR: <dir> is not a clone of file:///…/packaging/arch/../..
+# `makepkg -C` cleans only the checkout, never the mirror, so --clean-first did
+# not clear this either. Drop a mirror that points outside this repo and let
+# makepkg re-clone; leave a matching one alone so repeat builds stay fast.
+SRC_MIRROR="$PKGDIR/vergoboy-stream"
+if [ -d "$SRC_MIRROR" ]; then
+  mirror_origin="$(git -C "$SRC_MIRROR" config --get remote.origin.url 2>/dev/null || true)"
+  case "$mirror_origin" in
+    *"$ROOT"*) : ;;
+    *)
+      warn "dropping stale source mirror ($SRC_MIRROR -> ${mirror_origin:-unknown origin})"
+      rm -rf "$SRC_MIRROR" "$PKGDIR/src"
+      ;;
+  esac
+fi
+
 if [ "$CLEAN_FIRST" -eq 1 ]; then
   say "removing previous build trees and artifacts"
-  rm -rf "$PKGDIR/src" "$PKGDIR/pkg"
+  rm -rf "$PKGDIR/src" "$PKGDIR/pkg" "$SRC_MIRROR"
   rm -f "$PKGDIR"/*.pkg.tar.zst
 fi
 

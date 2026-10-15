@@ -13,7 +13,11 @@ license=('custom')
 # and it ships a misleadingly named package next to the real one.
 options=('!debug')
 depends=('webkit2gtk-4.1' 'gtk3' 'librsvg' 'openssl' 'libayatana-appindicator')
-makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file' 'patchelf')
+# No 'patchelf'. build() runs `tauri build --no-bundle`, and tauri only calls
+# patchelf from its *bundling* step (AppImage/deb rpath fixups: `patchelf
+# --set-rpath ...`). Declaring it anyway made makepkg abort on a host that did
+# not have it installed, for a tool the build never runs.
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file')
 source=("${pkgname}::git+file://${startdir}/../..")
 sha256sums=('SKIP')
 
