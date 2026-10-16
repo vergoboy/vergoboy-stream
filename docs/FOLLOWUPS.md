@@ -228,3 +228,30 @@ than by convention.
 - **opendkim private key perms warning** (`opendkim-testkey` from root says
   "unsafe permissions"): cosmetic — file is `opendkim:opendkim 0640`, signing
   works; only noticed because the check ran as root.
+
+## From Session 6 (VPN proxy) — 2026-10-16
+
+- **Scope boundary the operator chose:** only archive HTTP + yt-dlp go through
+  the new proxy. `ffmpeg`/`ffprobe` still run with `direct_media_environment()`
+  (proxy env stripped on purpose), so **server-side probes/fetches of blocked
+  hosts still fail**: adding a `digimoviez.com` media URL for playback, or any
+  googlevideo fetch by ffmpeg, will time out direct. Widening this = a small
+  URL-aware proxy option in the media env builder + tests — do it when
+  archive/YouTube *playback* is actually needed, not before.
+- **`/stream` left alone** (frozen until its own deploy): its config.py
+  already reads one of the two vars, but no proxy vars were added to its env
+  and its service was not restarted. Wire + restart in its next deploy.
+- **Cross-dependencies (accepted, loud):** `build_config.py` imports
+  `/opt/noisy/egress/build_configs.py` and reads
+  `/opt/noisy/secrets/subscription.txt` — if noisy moves or rekeys, the import
+  fails loudly (never silently wrong). After a subscription change: re-run the
+  builder, gate with `sing-box check`, `compose up -d`.
+- **No route switcher exposed:** the `urltest` group failovers at runtime
+  (hysteria2 ↔ grpc); the watchdog asserts exit-IP ≠ host IP, not a pinned
+  value. If a pinned exit is ever needed (allowlists), record it in
+  `proxy-status` first — don't guess.
+- **`digimoviez.ir` is dead** (SERVFAIL delegation from clean resolvers,
+  poisoned to `10.10.34.35` locally); the app targets `.com` — nothing to do,
+  but don't "fix" probes back to `.ir`.
+- The two loopback listeners have **no auth**: any local user/account can use
+  the proxy. Acceptable on this single-operator box; revisit if multi-user.

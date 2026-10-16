@@ -459,3 +459,83 @@ receiver. Gmail Spam placement is therefore **Gmail-side reputation and
 engagement** (cold IP + earlier header-less mail history), not configuration.
 Levers remain the ones in FOLLOWUPS: Postmaster Tools, "Not spam" warm-up,
 or a smarthost relay.
+
+---
+
+## Session 6 (2026-10-16) — VPN proxy for the apps, built like /opt/noisy
+
+**Request:** read `/opt/noisy`, create a proxy/VPN like it for this project.
+**Decisions (operator):** scope = **archive scraper + yt-dlp only** (the media
+pipeline stays direct by the app's own design); credentials = **reuse noisy's
+subscription**.
+
+### Why it was needed (measured, read-only first)
+
+| Path from this host | Result |
+| --- | --- |
+| `youtube.com`, `redirector.googlevideo.com`, `digimoviez.com`, `animex.click` direct | timeout / connection reset |
+| host DNS answers | censor infra: `2001:4188:2:600::/64` AAAA, A `10.10.34.35` (private) |
+| existing `xray.service` socks5 `127.0.0.1:1080` → YouTube | TLS reset |
+| noisy's tunnel (`docker exec noisy-restreamer`) | exit `194.5.192.35`, YouTube `204` ✓ |
+
+The app already had the hook points: `STREAM_ARCHIVE_HTTP_PROXY` defaulted to
+`http://127.0.0.1:10808` **with nothing listening**, `STREAM_YTDLP_PROXY`
+empty, and `app.py` already passes `--proxy` to yt-dlp when set.
+
+### What was built — `/opt/vergoboy-proxy/`
+
+`build_config.py` **imports** `/opt/noisy/egress/build_configs.py` in place
+(never copied) and reads `/opt/noisy/secrets/subscription.txt`, rendering a
+**userspace** sing-box config — no TUN, host routing untouched:
+
+- inbounds: HTTP `:10808`, SOCKS `:10809`, published **127.0.0.1-only** in
+  compose (loopback boundary = the port publish, see gotcha below)
+- outbounds: `urltest` failover over the subscription's sing-box-capable
+  entries — currently `vpn-hysteria2` + `vpn-grpc` (the rest are XHTTP/ML-KEM,
+  xray-only); YouTube needed **no** xray special-case (noisy's TUN does, ours
+  tested green through the native pair)
+- DNS: bootstrap via `dns-local`; everything else via `dns-tunnel`
+  (`udp 1.1.1.1 detour auto`) so poisoned censor answers never reach routing
+- private/multicast CIDR → direct; `cap_drop: ALL`, `no-new-privileges`,
+  mem/cpu/pids limits, pinned image `ghcr.io/sagernet/sing-box:v1.14.2`
+
+**Gotcha (measured):** first start, every probe died with `RST` and **zero**
+sing-box logs — the config bound `127.0.0.1` *inside the container*, but
+docker-proxy forwards to the container's **eth0**, never its loopback. In-
+container listen is `0.0.0.0`; host-loopback-only is guaranteed by the
+`127.0.0.1:` publish. Documented at the exact spot in `build_config.py`.
+
+**Watchdog** (`vergoboy-proxy-watchdog.timer`, every 60s, root): probes the
+exit IP **through the proxy** (never DNS — DNS answers whether or not the
+tunnel carries traffic). Host-IP answer = restart immediately; two empty
+probes = restart (wedge); container absent = report only, does not fight an
+operator. Exit IP is deliberately **not** pinned: urltest failover changes it
+legitimately; the invariant asserted is "≠ host IP".
+
+**Wrong-domain detour:** initial probes used `digimoviez.ir` — that domain is
+dead (clean resolvers: `SERVFAIL … No Reachable Authority`; host: poisoned to
+`10.10.34.35`). The app's real targets are `digimoviez.com` and
+`animex.click` (`ARCHIVE_BASE_URL`, `AX_BASE`).
+
+### Wiring and verification
+
+`/opt/w2g/.stream_db.env` → backup `.bak.20261016T125652Z`, appended
+`STREAM_ARCHIVE_HTTP_PROXY=http://127.0.0.1:10808` and
+`STREAM_YTDLP_PROXY=http://127.0.0.1:10808` (0600 `www-data` kept),
+`vergoboy-w2g` restarted.
+
+| Check | Result |
+| --- | --- |
+| vars in running process (`/proc/<MainPID>/environ`) | both present |
+| exit IP via HTTP + SOCKS inbound | `194.5.192.35` (host `45.135.242.135`) |
+| `youtube.com/generate_204` / `www.youtube.com` via proxy | 204 / 200 |
+| `redirector.googlevideo.com` via proxy | answered (404 on `/` = live) |
+| `digimoviez.com` / `animex.click` via proxy | 200 / 301 |
+| yt-dlp as `www-data`, `--proxy …10808`, same venv the app uses | extracted `jNQXAC9IVRw \| Me at the zoo` |
+| `https://vergoboy.ir/w2g/api/health` after restart | 200 |
+| `/stream/` untouched | 200 |
+| watchdog: success / stopped-container / recovery branches | all as designed |
+| `sing-box check` on the generated config | OK (gated before `up`) |
+
+Ops entry points: `sudo /opt/vergoboy-proxy/proxy-status`, unit docs in
+`deploy/vergoboy-proxy/README.md`.
