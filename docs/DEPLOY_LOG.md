@@ -539,3 +539,56 @@ dead (clean resolvers: `SERVFAIL … No Reachable Authority`; host: poisoned to
 
 Ops entry points: `sudo /opt/vergoboy-proxy/proxy-status`, unit docs in
 `deploy/vergoboy-proxy/README.md`.
+
+---
+
+## Session 7 (2026-10-16) — archive search broken: site retired `ajaxsearch`
+
+**Symptom:** every archive search showed «دیجی‌موویز درخواست را رد کرد».
+
+### Diagnosis chain (each step measured)
+
+1. The string maps to `KIND_HTTP_ERROR` (`app.py`) — a 4xx from digimoviez.
+2. Journal: post-proxy searches reach the site (642 ms) and get
+   **`HTTP 400`** on `POST /wp-admin/admin-ajax.php` (earlier 11:53 entries
+   were the pre-proxy `proxy_unavailable` — a different, already-fixed error).
+3. Replay of the exact request: **400, body `0`, WP headers** = WordPress
+   "no handler for this action" — not Cloudflare (its ray/header show pass-
+   through) and not the VPN: **identical 400 from a completely unrelated
+   network direct**.
+4. `action=heartbeat` (core, guest-capable) → **200** — admin-ajax itself is
+   fine; only the action is gone.
+5. The site updated to WordPress 7.1.2 + theme `digimoviez-2`; its homepage
+   has no ajax search form anymore (plain `GET /?s=`), but
+   `themes/digimoviez-2/assets/main.js` still posts two actions —
+   `ajaxsearch` (dead for guests) and **`ajaxsearchheader`** (the header's).
+6. `action=ajaxsearchheader&s=interstellar` → **200**, JSON string of HTML,
+   real cards. Extra payload fields (our `type`) ignored — verified.
+
+### Fix (tests first, commit `876d303`)
+
+Fixture captured from the live response
+(`tests/fixtures/archive/ajax_search_header_interstellar.json`) + two tests
+that failed on the old code, then four minimal edits in `archive_scraper.py`:
+
+| Was | Now |
+| --- | --- |
+| `SEARCH_AJAX_ACTION = "ajaxsearch"` | `"ajaxsearchheader"` |
+| `CARD_CLASSES` (3 legacy names) | + `text_adv_se` (new `<li>` card; marker slicing spans the li) |
+| title from `<h2>` only | `<h2>` priority, `<h3 class="title">` fallback |
+| rating `rate_num`/`<strong>` only | + `rate_container`/`<span>` |
+
+Suite: **590 passed** (2 pre-existing skips).
+
+### Deploy + verification
+
+Release patched with backup `archive_scraper.py.bak.20261016T131859Z`,
+`vergoboy-w2g` restarted (active, health 200). End-to-end as `www-data`
+against the **deployed** code with the production env (proxy wiring):
+
+```
+results: 3
+ - Interstellar 2014 | https://digimoviez.com/interstellar-2014/ | rating 8.7 | year 2014
+ - Tenet 2020        | https://digimoviez.com/tenet-2020/        | rating 7.3 | year 2020
+ - Black Beauty 2020 | https://digimoviez.com/black-beauty-2020/ | rating 6.4 | year 2020
+```

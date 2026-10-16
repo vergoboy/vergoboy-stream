@@ -255,3 +255,19 @@ than by convention.
   but don't "fix" probes back to `.ir`.
 - The two loopback listeners have **no auth**: any local user/account can use
   the proxy. Acceptable on this single-operator box; revisit if multi-user.
+
+## From Session 7 (archive endpoint drift) — 2026-10-16
+
+- Digimoviez is a moving target: its WP/theme updates rename AJAX actions
+  and card markup (this was the second markup generation the parser knows).
+  If search ever returns 0 cards or «درخواست را رد کرد» again, first replay
+  `action=ajaxsearchheader` through the proxy and re-capture the fixture —
+  compare `CARD_CLASSES`/heading/rating against the live body before
+  touching anything else.
+- The site's other actions in `main.js` (`loginAjax`, `favoriteAjax`,
+  `commentsAjax`, …) are not used by the collector; nothing to do unless a
+  feature starts using them.
+- The old comment "the `?s=` page does not filter by the query" was verified
+  *against the old site*; the current `?s=` page looks query-specific but
+  the collector still goes through ajax (single shot, no pagination) —
+  revisit only if `ajaxsearchheader` dies too.
