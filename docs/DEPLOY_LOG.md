@@ -638,3 +638,54 @@ echoed):
 No code changed — configuration only. If the site password changes, update
 `DIGIMOVIEZ_PASSWORD` in the env and restart; the failed-login cooldown
 (300 s) and `max_login_posts=3` bound any lockout risk.
+
+---
+
+## Session 8 (2026-10-16) — playback broken: atomic runner vs progressive HLS
+
+**Symptom:** clicking play on an archive movie showed «ارتباط با سرور برقرار
+نشد؛ اتصال اینترنت را بررسی کن» (a `friendlyError` TypeError — hls.js reports
+a manifest `networkError` through the same funnel).
+
+**Measured diagnosis:**
+
+1. Server healthy (health 200 local+public, disk 24 G free).
+2. Archive flow worked end to end: detail (106 links) → playlist created →
+   ffprobe OK (0.4 s, `dl8.deserver.top` reachable directly — no proxy
+   needed) → ffmpeg encoding happily.
+3. nginx access log (`vergoboy_access.log`): the player polled
+   `/w2g/media/hls/<id>/1080p/index.m3u8` → **404, 30+ times**, while ffmpeg
+   wrote into `1080p.partial/` right next to it.
+4. Root cause: **regression from the atomic-output runner.** `/stream`'s old
+   code wrote HLS straight into the final dir (playlists grow in place →
+   `on_ready`'s "ready after 20 s" was truly playable). The new `EncodeRunner`
+   builds in `<label>.partial` and renames only on success, but `on_ready`
+   still flipped the item to `ready` and pointed the player at a final path
+   that stayed **empty for the whole encode**.
+
+**Fix (commit `8a65e25`, tests first — 5 `ProgressiveOutputTests`, suite 640
+passed):**
+
+- `expose_partial_output()` in `media_pipeline/runner.py`: when no finished
+  output exists, `final_dir -> final_dir.partial` symlink makes the growing
+  playlists/segments servable at the URL the player already uses; a real dir
+  (re-encode) is left alone; a leftover symlink from a failed attempt is
+  reused. `_promote` unlinks the symlink before the atomic swap (rmtree
+  refuses symlinks); `fail()` in `app.py` drops it with the partial.
+
+**Deploy + verification:** release patched (backups `.bak.20261016T140030Z`),
+restarted. The interrupted Batman item was stale ("ready", output deleted by
+boot cleanup, resume only re-kicks "queued") → dropped its garbage dir,
+requeued in `rooms/4JE9D9.json`, restarted: resume re-kicked the encode with
+the new code and within 90 s:
+
+```
+1080p -> .../1080p.partial          (symlink)
+master.m3u8          200   130 B
+1080p/index.m3u8     200  3115 B   (was 404 — playlist already at seg_102)
+1080p/seg_000.ts     200   3.3 MB
+both via https://vergoboy.ir       200/200
+```
+
+Early playback during encode now works on /w2g exactly like /stream, with
+the atomic promote still guaranteeing a clean final artifact at completion.
