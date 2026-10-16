@@ -592,3 +592,49 @@ results: 3
  - Tenet 2020        | https://digimoviez.com/tenet-2020/        | rating 7.3 | year 2020
  - Black Beauty 2020 | https://digimoviez.com/black-beauty-2020/ | rating 6.4 | year 2020
 ```
+
+### Session 7 addendum (2026-10-16) — archive autologin enabled
+
+**Symptom:** every gated detail page answered 401 «برای دیدن لینک‌های دانلود
+باید وارد حساب دیجی‌موویز شوید» — `KIND_AUTH_REQUIRED`, because
+`STREAM_ARCHIVE_AUTH_ENABLED` was absent (default `false`) and no credentials
+were configured. The auth machinery itself was never the problem.
+
+**Compatibility proof before touching the server** (offline, against the live
+login page fetched through the proxy):
+
+- `parse_login_form` recognizes the site's `dashboard_form`: fields
+  `username`/`password`, hidden `login_security_str` + `_wp_http_referer`,
+  challenge `secureq_key`/`secureq_ans`, same-origin action → `/account/login/`.
+- `solve_question_text` answers the served Persian arithmetic
+  («۸ ضرب در ۵ چند می شود؟» → 40).
+
+**Wiring** — env append on `/opt/w2g/.stream_db.env` (backup
+`.stream_db.env.bak.20261016T132717Z`, re-chmod 0600 www-data, no value ever
+echoed):
+
+| Key | Value |
+| --- | --- |
+| `STREAM_ARCHIVE_AUTH_ENABLED` | `true` |
+| `STREAM_ARCHIVE_LOGIN_USERNAME_FIELD` | `username` |
+| `STREAM_ARCHIVE_LOGIN_PASSWORD_FIELD` | `password` |
+| `DIGIMOVIEZ_USERNAME` / `DIGIMOVIEZ_PASSWORD` | user's account (server-side only) |
+
+**Verification (all measured):**
+
+1. Standalone as `www-data` with the production env: `ensure_authenticated()`
+   → `AUTHENTICATED` (4 cookies, 9.3 s); the previously gated
+   `/batman-knightfall-part-1-knightfall-2026/` → **1 group, 106 download
+   links** (`dl8.deserver.top`).
+2. Service watchdog (started at boot via `auth.start()`) did the same by
+   itself at 13:29:19 UTC: guest check → expired → login form parsed →
+   arithmetic challenge solved → 1 POST → **`AUTH_LOGIN_SUCCESS` (15 s)** →
+   `AUTH_SESSION_PERSISTED`.
+3. Session file: `/opt/w2g/data/digimoviez-session.json`, 433 bytes,
+   `-rw------- www-data`.
+4. Next tick (13:31:40): **`AUTH_OK` in 1.7 s with no new POST** — session
+   reuse, no relogin loop.
+
+No code changed — configuration only. If the site password changes, update
+`DIGIMOVIEZ_PASSWORD` in the env and restart; the failed-login cooldown
+(300 s) and `max_login_posts=3` bound any lockout risk.
