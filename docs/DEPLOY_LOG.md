@@ -325,3 +325,81 @@ Disk after rollout: 25 G free (still above the 20 G floor).
 - `/opt/w2g/wheelhouse/` must be refreshed whenever `requirements.lock.txt`
   changes (host cannot reach `files.pythonhosted.org`).
 
+---
+
+## Session 4 (2026-10-16) — OAuth credentials swapped, mail fixed
+
+### OAuth (operator-supplied credentials)
+
+The operator supplied fresh OAuth credentials for the `/w2g` instance (values
+never logged — written directly into the secrets file by key name):
+
+```sh
+sudo python3 - <<'PY'   # replaces the four STREAM_{GOOGLE,GITHUB}_OAUTH_* values in place
+… update keys: STREAM_GOOGLE_OAUTH_CLIENT_ID STREAM_GOOGLE_OAUTH_CLIENT_SECRET
+               STREAM_GITHUB_OAUTH_CLIENT_ID STREAM_GITHUB_OAUTH_CLIENT_SECRET …
+PY
+sudo chown www-data:www-data /opt/w2g/.stream_db.env && sudo chmod 600 …
+sudo systemctl restart vergoboy-w2g
+```
+
+Verified: both authorise endpoints 302 with the **new** client ids
+(`774272794013-23rotbe0…` for Google, `Ov23li2gVBfhIf1Ngvwf…` for GitHub) and
+`redirect_uri=…%2Fw2g%2Fapi%2Fauth%2Foauth%2F…callback`. The redirect URIs must
+still be registered on the two provider consoles (they are app-side allow-lists,
+not something the server can set).
+
+### Mail — root cause and fix
+
+Symptom: "sending email is not working". Diagnosis chain, all read-only first:
+
+| Check | Finding |
+| --- | --- |
+| listener on :25 | **none** (`ss -ltn`) — `smtplib.SMTP(127.0.0.1,25)` in `mail.py` → connection refused |
+| `systemctl status postfix` | `active (exited)` — the stock unit is a **stub** (`ExecStart=/bin/true`) |
+| actual owner of master | `postfix@-.service` (postmulti instance `-`) — **failed** |
+| journal for `postfix@-` | ran Sep 26 16:12 (boot, via `postfix-instance-generator`) → **died 2026-09-28 02:08** after the global OOM (dmesg: `Out of memory: Killed process … java`, docker) took proxymap/master down → unit stuck `failed`, no restart policy |
+| consequence | **mail dead box-wide since Sep 28** — `/stream` password-reset, roundcube submission (:587), everything; last successful delivery Sep 25 |
+| outbound :25 | fine historically (`status=sent` to gmail through Sep 25) — not a provider block |
+| `dpkg -V postfix` | clean — stub unit is stock, nothing tampered |
+
+Fix (no config edits, fully reversible):
+
+```sh
+sudo postfix stop                  # hand back the manually-started master
+sudo systemctl reset-failed postfix@-.service
+sudo systemctl start postfix@-.service
+```
+
+Verified: `postfix@-` **active (running)**, master pid present, listeners on
+**:25 and :587** (the latter is roundcube's submission path — also restored).
+
+### Test script
+
+`scripts/test_email.py` (committed; deployed to `/opt/w2g/scripts/`) sends a
+real message through `mail.send_email` — the exact path password-reset uses —
+loading the instance env file and the unit defaults:
+
+```sh
+sudo -u www-data python3 /opt/w2g/scripts/test_email.py
+# app dir /opt/w2g/current · from info@vergoboy.ir · to very.good.booyy@gmail.com
+# RESULT: accepted by postfix (mail.send_email -> True).  exit 0
+```
+
+Delivery confirmed independently in the log:
+
+```
+postfix/smtp[…]: … to=<very.good.booyy@gmail.com>,
+  relay=gmail-smtp-in.l.google.com[…] :25, dsn=2.0.0, status=sent (250 2.0.0 OK … gsmtp)
+Mail queue is empty
+```
+
+Recipient note: the registered/admin address is `very.good.booyy@gmail.com`
+(confirmed in the `stream` DB users table); the request text showed an extra
+"o" (`goood`) — a typo, the real address was used.
+
+> **Boot/robustness:** the generator re-queues `postfix@-.service` at every
+> boot, so a reboot starts mail again; but a repeat global OOM will kill master
+> and leave the unit `failed` with nothing restarting it — same silent failure
+> as Sep 28. See docs/FOLLOWUPS.md.
+

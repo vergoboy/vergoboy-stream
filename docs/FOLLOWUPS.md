@@ -184,3 +184,28 @@ than by convention.
   brace-matching rewrite desynced once. The executed, verified procedure is the
   one in `docs/DEPLOY_LOG.md` Session 3 (anchor on `location /stream/_next/ {`,
   `nginx -t` gates the reload, `.bak.<ts>` restore).
+
+## From Session 4 (mail + OAuth) — 2026-10-16
+
+- **postfix has no supervision: the next global OOM kills mail silently again.**
+  Evidence: `postfix@-.service` started at the Sep 26 boot (the
+  `postfix-instance-generator` re-queues it into `postfix.service.wants` every
+  boot — so *boots* are covered), then the Sep 28 global OOM (a docker `java`)
+  killed proxymap/master; the unit has no `Restart=` and sat `failed` for
+  **2.5 weeks** — every password-reset and roundcube submission silently failed
+  until found here. A plain `Restart=` on a postmulti forking unit is not a
+  reliable fix (systemd tracks no main pid: `GuessMainPID=no`). Cheap options,
+  in order of preference: (a) an `OOMScoreAdjust=-1000` drop-in for
+  `postfix@.service` so the OOM killer spares it, (b) a 5-minute timer that
+  `systemctl start postfix@-` when `ss -ltn` shows no :25, (c) fixing the real
+  memory hog (docker without limits — the Sep 28 kill was `java`, 10 GB RSS).
+- **`/stream` and roundcube were fixed as a side effect** of bringing postfix
+  back — both depend on the same local :25/:587. Worth knowing when someone
+  reports "webmail can't send" again: check `systemctl status postfix@-`
+  first.
+- **New OAuth apps for `/w2g`**: the server now sends
+  `…/w2g/api/auth/oauth/{google,github}/callback` redirect URIs with the fresh
+  client ids, but each provider console must still *allow-list* them
+  (Google: Cloud console → credentials; GitHub: OAuth app callback URL —
+  remember the pre-Aug-2026 subdirectory-matching caveat from G2, a `/stream`
+  callback will not accept `/w2g`).
