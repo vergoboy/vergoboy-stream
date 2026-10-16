@@ -271,3 +271,26 @@ than by convention.
   *against the old site*; the current `?s=` page looks query-specific but
   the collector still goes through ajax (single shot, no pagination) —
   revisit only if `ajaxsearchheader` dies too.
+
+## From Session 9 (Cloudflare wall on digimoviez) — 2026-10-16
+
+### Programmatic bypass for the Turnstile wall — only if it persists
+
+Since 2026-10-16 ~15:30 UTC digimoviez.com serves a Turnstile challenge to
+every non-headed client on every available network (proxy exit and
+residential alike). FlareSolverr 3.5.2 cannot solve it (120 s timeout; the
+widget never clears in headless Chromium), `curl_cffi` fingerprints do not
+help, and the sing-box proxy's second outbound exits from the same IP.
+
+*Why not now:* the wall may be the site's temporary anti-attack mode, and
+every solver path is an arms-race dependency (nodriver/camoufox-class
+automation that actually clicks the widget, ~1 GB image, per-request
+brittleness). The classification fix means the honest 503 shows meanwhile
+and autologin resumes by itself the moment the edge lifts the challenge.
+
+*Later, if the wall stays up for days:* trial a Turnstile-clicking solver
+(camoufox or a nodriver-based FlareSolverr fork) as a container on
+`vergoboy-proxy_default` with `PROXY=http://vergoboy-proxy:10808`, feeding
+the minted cookies into the archive session. The upstream flaresolverr
+image (1.07 GB) is already on the server for such a trial; drop it with
+`docker rmi ghcr.io/flaresolverr/flaresolverr:latest` if not wanted.

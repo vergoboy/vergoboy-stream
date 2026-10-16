@@ -689,3 +689,55 @@ both via https://vergoboy.ir       200/200
 
 Early playback during encode now works on /w2g exactly like /stream, with
 the atomic promote still guaranteeing a clean final artifact at completion.
+
+## Session 9 (2026-10-16) — archive walled: Cloudflare Turnstile, not an expired session
+
+**Symptom:** every archive search on /w2g returned «نشست دیجی‌موویز منقضی
+شده؛ دوباره وارد شوید» — and relogging could not help.
+
+**Measured diagnosis:**
+
+1. Journal: `AUTH_EXPIRED ... status: 403` on the session check +
+   `AUTH_LOGIN_FAILED reason: HTTPError` on every login attempt. Last
+   success 15:28 UTC; first failure 15:30 UTC.
+2. Live curl through the archive proxy (exit 194.5.192.35): every endpoint
+   (`/`, `/account/login/`, `wp-admin/admin-ajax.php`) answers **403** with
+   `cf-mitigated: challenge` and a "Just a moment…" page. Same from a
+   residential path. The server cannot reach digimoviez at all without the
+   proxy (status 000), so the proxy stays mandatory.
+3. `curl_cffi` with Chrome TLS fingerprints: still 403 — not a JA3 gate.
+   Headless Chromium through the proxy: the page loads, but the
+   **Turnstile widget never clears** (explicit-render `cf-turnstile-response`
+   present in the DOM). FlareSolverr 3.5.2 (probe container on the proxy's
+   own network, exit verified 194.5.192.35): `Error solving the challenge`
+   after 120 s.
+4. The sing-box proxy's second outbound (vless-grpc) exits from the **same**
+   194.5.192.35 — no alternate egress exists.
+5. Headless Chromium from the workstation (residential path) also stays on
+   «Just a moment…»: the wall defeats every programmatic client on every
+   network available; only real headed browsers pass it.
+
+**Classification bug (fixed, commit `393d6e4`, tests first):** `check()`
+read the 403 as "redirected to login" → AUTH_EXPIRED → the misleading
+message, then hammered the equally walled login form on every request.
+`tests/unit/test_archive_site_challenge.py` pins the correction:
+
+* `_is_cloudflare_challenge()` — the `cf-mitigated` header, with the page's
+  `challenges.cloudflare.com` CSP as the header-stripped fallback.
+* `check()` → AUTH_FAILED/`site_challenge` returning `None` (transport
+  failure): `ensure_authenticated()` never opens the walled login form.
+* `KIND_SITE_CHALLENGE` → **503** «دیجی‌موویز پشت محافظ کلادفلر است؛ چند
+  دقیقه بعد دوباره تلاش کنید», deliberately not in
+  `ARCHIVE_MANUAL_SESSION_KINDS` — importing a browser session cannot help
+  when the edge blocks before WordPress.
+* A genuine expiry still auto-relogs, pinned by test. Suite: 813 passed.
+
+**Deploy + verification:** backups `.bak.20261016T190521Z`, installed
+checksums match the commit, restart clean, health 200. Journal after
+restart: one `AUTH_CHECK_SITE_CHALLENGE` per watchdog cycle (609/676 ms),
+**zero** login attempts — the opposite of the pre-fix pattern.
+
+**Bypass status:** no standard tool passes this wall (probe containers
+removed; the 1.07 GB flaresolverr image is kept for a future trial — see
+FOLLOWUPS). The state machine recovers by itself the moment the edge lifts
+the challenge; no manual step is possible or needed.
