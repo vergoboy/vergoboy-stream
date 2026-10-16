@@ -342,6 +342,24 @@ magic="$(od -An -tx1 -N4 "$pkg" | tr -d ' \n')"
 [ "$magic" = "28b52ffd" ] || die "artifact is not zstd-compressed (leading bytes: $magic)"
 say "zstd magic OK ($magic), $(file -b "$pkg" 2>/dev/null || echo 'file(1) unavailable')"
 
+# A dev-shell binary — the failure mode this gate exists for. Tauri picks
+# between its embedded assets and `build.devUrl` at *compile* time: without
+# the `custom-protocol` cargo feature the `tauri` crate builds with
+# `#[cfg(dev)]`, `get_app_url()` returns devUrl (http://localhost:3000/), and
+# the window shows nothing but WebKit's "Could not connect to localhost:
+# Connection refused" page (reproduced 2026-10-16 on a hand-built binary that
+# was installed as the real package). `npm run tauri build` — what the
+# PKGBUILD runs — passes the feature; a raw `cargo build --release` does not.
+# A production binary embeds the whole static export ("_next/static" appears
+# in its ELF about two dozen times for this UI); a dev binary embeds none of
+# it. Check the binary *as shipped*, since that is what pacman installs.
+pkg_bin="usr/bin/vergoboy-$INSTANCE"
+embedded_assets="$(bsdtar -xOf "$pkg" "$pkg_bin" 2>/dev/null | grep -ac '_next/static' || true)"
+if [ "${embedded_assets:-0}" -lt 1 ]; then
+  die "$pkg_bin embeds no frontend assets — a dev-shell build (compiled without tauri's 'custom-protocol' feature, so it loads devUrl http://localhost:3000/ and shows 'Could not connect to localhost: Connection refused'). Rebuild through this script; never 'cargo build --release' by hand."
+fi
+say "production binary OK ($pkg_bin embeds the static export: $embedded_assets asset references)"
+
 if command -v pacman >/dev/null 2>&1; then
   say "package metadata"
   pacman -Qip "$pkg" | sed 's/^/    /'

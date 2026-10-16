@@ -101,8 +101,9 @@ same either way.
 | `build-arch.sh` (2) | exclusive `flock` on `packaging/arch/.build.lock` for the whole run; a second run waits instead of corrupting | see the incident below |
 | `packaging/arch/PKGBUILD` (3) | installs a repo-root `LICENSE` under `/usr/share/licenses/$pkgname/` — clears namcap's `LicenseRef-*` file requirement, which printed as `E:` on every run since `b8fbb31` | rebuild 2026-10-16: namcap output has no ` E: ` line; `pacman -Qlp` lists `usr/share/licenses/vergoboy-stream/LICENSE` |
 | `build-arch.sh` (3) | verification captures namcap output and `die`s on ` E: ` (namcap exits 0 anyway, and the pipeline's status was sed's — errors scrolled by green); merged the unreachable second `die` after "no usable rustc", whose advice never printed | `bash -n` clean; gate logic checked both ways (E → fail, W-only → pass); verify run `EXIT=0` |
+| `build-arch.sh` (4) | dev-shell gate: extract `usr/bin/vergoboy-<instance>` from the artifact and require embedded frontend assets (`_next/static`); a binary built by raw `cargo build --release` (no `custom-protocol` feature) embeds none and boots WebKit's "Could not connect to localhost: Connection refused" page | gate checked both ways: hand-built binary 0 hits → would die; both packaged artifacts 28/30 hits → pass |
 
-Two things the build cannot get wrong any more, both verified in the logs:
+Three things the build cannot get wrong any more, all verified in the logs:
 
 - **Wrong-instance export** — `webapp/out` is shared and gitignored, so it
   could silently carry the other instance's API path. The export is stamped in
@@ -112,6 +113,17 @@ Two things the build cannot get wrong any more, both verified in the logs:
 - **Clobbered artifact** — artifacts, `$SRCDEST` mirror and `--clean-first` are
   all keyed by instance; both `.pkg.tar.zst` files coexist (the w2g build did
   not delete or shadow the stream one).
+- **Dev-shell binary** — Tauri chooses between its embedded assets and
+  `build.devUrl` at *compile* time (`cfg(dev)` in tauri's build script is
+  `!custom_protocol`). `npm run tauri build` passes the feature; a raw
+  `cargo build --release` does not, and such a binary boots
+  `http://localhost:3000/` → "Could not connect to localhost: Connection
+  refused". That is exactly what a hand-built package shipped on 2026-10-16
+  (the LD_PRELOAD connect log showed `::1:3000`/`127.0.0.1:3000` from
+  WebKitNetworkProcess at launch, and a screenshot of the window caught the
+  error page; the packaged artifact instead dials `45.135.242.135:443` and
+  renders the login UI). The verification step now extracts the binary from
+  the `.pkg.tar.zst` and refuses one without embedded `_next/static` assets.
 
 What is baked into each export (grep of the module the package bundles):
 
