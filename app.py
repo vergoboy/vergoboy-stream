@@ -35,6 +35,7 @@ from media_pipeline import (
     ErrorKind,
     build_fallback_chain,
     cleanup_orphaned_partials,
+    expose_partial_output,
 )
 from media_domain.adapters.filesystem import DEFAULT_LOCAL_ROOT
 from media_domain.adapters.http import download_to_file
@@ -1142,6 +1143,8 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
 
     def fail(msg: str):
         log_debug(f"Rendition encode failed [{item_id}/{label}]: {msg}")
+        if os.path.islink(rendition_dir):
+            os.unlink(rendition_dir)  # the progressive symlink, not a directory
         shutil.rmtree(rendition_dir, ignore_errors=True)
         item = set_rendition_status("error", msg)
         rs = _room_for_item(item_id)
@@ -1203,7 +1206,10 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
         if dur is None:
             dur = get_duration_s(_ffprobe_source(source))
 
-        os.makedirs(rendition_dir, exist_ok=True)
+        # Expose the in-progress output at the final path (symlink into the
+        # .partial dir the runner writes into) so on_ready's "ready" really is
+        # playable; _promote swaps in the real directory on success.
+        expose_partial_output(rendition_dir)
 
         def on_ready(elapsed_s):
             item = set_rendition_status("ready")
