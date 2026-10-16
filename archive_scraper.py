@@ -73,11 +73,17 @@ KIND_VALIDATION = "validation"
 CARD_CLASS = "item_def_loop"
 # The live theme emits ``item_dubbled`` for page cards and ``item_small_loop``
 # for the AJAX search results; ``item_def_loop`` is the older markup and is still
-# accepted so already-stored fixtures keep parsing.
-CARD_CLASSES = ("item_small_loop", "item_dubbled", CARD_CLASS)
+# accepted so already-stored fixtures keep parsing. ``text_adv_se`` is the
+# header search's card since the site's WP 7.1.2 update (2026-10): one ``<li>``
+# per result, title block first, poster and rate divs following it — slicing
+# between consecutive markers spans the whole ``li``.
+CARD_CLASSES = ("item_small_loop", "item_dubbled", CARD_CLASS, "text_adv_se")
 # Free-text search is answered by this endpoint; the ``?s=`` page renders a
-# generic "dubbed" list and does not filter by the query at all.
-SEARCH_AJAX_ACTION = "ajaxsearch"
+# generic "dubbed" list and does not filter by the query at all. The site's
+# WP 7.1.2 update retired ``ajaxsearch`` for guests — it answers 400 with body
+# "0" from any network — while its own header now posts ``ajaxsearchheader``,
+# which honours the same free-text term (extra payload fields are ignored).
+SEARCH_AJAX_ACTION = "ajaxsearchheader"
 PAGINATION_CLASS = "alphapageNavi"
 MAX_SEARCH_PAGES = 3
 _TITLE_PREFIX = re.compile(r"^دانلود\s+(?:فیلم|سریال)\s+")
@@ -538,7 +544,11 @@ def _parse_search_card(block: str, base_url: str) -> dict[str, Any] | None:
         # skips the section/nav links that share the card block's tail.
         if url[len(base_url) + 1:].count("/") != 1:
             continue
-        heading = re.search(r"(?is)<h2[^>]*>(.*?)</h2>", inner)
+        # h2 is the historical title heading; the header search cards use h3
+        # (``<h3 class="title lato_font">``), so h2 keeps priority where a
+        # block contains both.
+        heading = (re.search(r"(?is)<h2[^>]*>(.*?)</h2>", inner)
+                   or re.search(r"(?is)<h3[^>]*>(.*?)</h3>", inner))
         title = ""
         if heading:
             title = _TITLE_PREFIX.sub("", _clean(re.sub(r"(?s)<[^>]+>", " ", heading.group(1))))
@@ -550,7 +560,11 @@ def _parse_search_card(block: str, base_url: str) -> dict[str, Any] | None:
         return {
             "source": "digimoviez", "kind": "movie", "title": title, "url": url,
             "poster": _absolute(base_url, poster) if poster else None,
-            "rating": _field(r'<div[^>]+class="[^"]*(?:rate_num|imdb_rate_dubbled)[^"]*"[^>]*>\s*<strong>([\d.]+)</strong>', block),
+            # The header search's rate box is ``rate_container`` with a
+            # ``<span>`` behind an inline SVG; the page cards keep
+            # ``rate_num``/``imdb_rate_dubbled`` with ``<strong>``.
+            "rating": _field(r'<div[^>]+class="[^"]*(?:rate_num|imdb_rate_dubbled|rate_container)[^"]*"[^>]*>'
+                             r'.*?<(?:strong|span)[^>]*>([\d.]+)</(?:strong|span)>', block),
             "year": _field(r'\b((?:19|20)\d{2})\b', title),
         }
     return None
