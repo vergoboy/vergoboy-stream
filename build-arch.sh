@@ -158,8 +158,9 @@ if ! rustc_works; then
     warn "toolchain at $HOME/.cargo/bin instead. Compare 'pacman -Q rust' with 'rustup show'."
   else
     rustc -vV 2>&1 | grep -i "shared librar" >&2 || true
-    die "no usable rustc: 'rustc -vV' does not report a host triple."
-    die "fix the distro toolchain (sudo pacman -Syu) or install rustup, then retry."
+    # One die only: die() exits immediately, so a second call with the
+    # actionable advice would never be printed.
+    die "no usable rustc: 'rustc -vV' does not report a host triple — fix the distro toolchain (sudo pacman -Syu) or install rustup, then retry."
   fi
 fi
 
@@ -348,7 +349,18 @@ fi
 
 if command -v namcap >/dev/null 2>&1; then
   say "namcap"
-  namcap "$pkg" | sed 's/^/    /'
+  # namcap exits 0 even when it prints errors, and in a pipeline the status
+  # here would be sed's anyway — so capture its output and gate on the
+  # " E: " markers ourselves. An error that merely scrolls past is not a
+  # lint gate: on 2026-10-16 every run printed
+  #   E: Uncommon license identifiers ... require license files ...
+  # while exiting green. Warnings (" W: ") stay advisory on purpose: several
+  # are dlopen heuristics that flag deliberately-declared dependencies.
+  namcap_out="$(namcap "$pkg" 2>&1)" || true
+  printf '%s\n' "$namcap_out" | sed 's/^/    /'
+  case "$namcap_out" in
+    *" E: "*) die "namcap reported the errors above — refusing to ship this package" ;;
+  esac
 else
   warn "namcap not installed — skipping package lint (pacman -S namcap)"
 fi
