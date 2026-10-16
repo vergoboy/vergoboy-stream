@@ -436,3 +436,26 @@ If placement is still Spam after this, everything server-side is passing
 — cold hosting IP, plus Gmail's engagement history with this sender (earlier
 header-less mail taught it "spam"): warm-up, "Not spam" training, Gmail
 Postmaster Tools, or an external transactional relay — operator decision.
+
+### Session 5 addendum — objective deliverability verdict (mail-tester.com)
+
+Sent the fixed message to `test-w2g7f3k9qz@srv1.mail-tester.com` (12:02:44,
+`status=sent`) and fetched `/check?id=…`:
+
+- **Score: 10/10** ("Wow! Perfect, you can send"), SpamAssassin **0.2** (spam
+  threshold 5.0)
+- `Received-SPF: Pass` — `ip4:45.135.242.135` matched for `info@vergoboy.ir`
+- `dkim=pass (2048-bit key)` — `header.d=vergoboy.ir [at] gmail` aligned
+- `dmarc=pass (p=none)` — From/DKIM/SPF alignment confirmed
+- rDNS/HELO: all three = `mail.vergoboy.ir` ✓; MX + A present ✓
+- **Not listed on all 20 checked blocklists** (Spamhaus SBL/CSS/XBL/PBL,
+  Barracuda, SpamCop, PSBL, Backscatterer, …)
+- Content: no short URLs, no dangerous HTML, no broken links; only advisory
+  notes are `SPF_HELO_NONE` (+0.001, HELO publishes no SPF — cosmetic) and
+  missing `List-Unsubscribe` (only required for bulk senders).
+
+Conclusion: every server-side and content signal passes an independent
+receiver. Gmail Spam placement is therefore **Gmail-side reputation and
+engagement** (cold IP + earlier header-less mail history), not configuration.
+Levers remain the ones in FOLLOWUPS: Postmaster Tools, "Not spam" warm-up,
+or a smarthost relay.
