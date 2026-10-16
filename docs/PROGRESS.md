@@ -295,6 +295,18 @@ User decisions (2026-10-15): deploy `/w2g` now; repoint the `stream` package is
 *not* part of this round; namcap license fix done (`LicenseRef-proprietary`,
 commit `b8fbb31`, both packages rebuilt).
 
+*Third cause, 2026-10-16 — distinct from both above:* a **dev-shell binary**.
+The error sentence this time came from WebKit's own error *page* (the window
+showed nothing else), not from `friendlyError()`: a package built with raw
+`cargo build --release` lacks tauri's `custom-protocol` feature, so the crate
+compiles with `cfg(dev)` and the window loads `build.devUrl`
+(`http://localhost:3000/`) instead of the embedded UI — "Could not connect to
+localhost: Connection refused" on every launch, before any click. Diagnosed
+with an `LD_PRELOAD` `connect()` shim (WebKitNetworkProcess dialing `::1:3000`
+and `127.0.0.1:3000` at launch; the correctly built artifact dials
+`45.135.242.135:443` and renders the login screen). `build-arch.sh`'s
+verification now refuses such a binary — see the (4) row in the T2 table.
+
 ### Packaging — both artifacts rebuilt (2026-10-15)
 
 namcap's E-class (`custom is not a valid SPDX license identifier`) was fixed in
