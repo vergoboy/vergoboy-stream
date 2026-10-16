@@ -99,6 +99,8 @@ same either way.
 | `docs/FOLLOWUPS.md` | the root-`/api` question for the *shipped stream* client; the shared live namespace; the shared build tree | carried to the deploy plan |
 | `packaging/arch/PKGBUILD` (2) | `_inject_instance`: any instance but `stream` rewrites `identifier` in the cloned `tauri.conf.json` to `ir.vergoboy.<instance>`, reusing the CSP patcher | one line differs on a copy of the real conf, still valid JSON; and confirmed in the compiled binary by disassembly (below) |
 | `build-arch.sh` (2) | exclusive `flock` on `packaging/arch/.build.lock` for the whole run; a second run waits instead of corrupting | see the incident below |
+| `packaging/arch/PKGBUILD` (3) | installs a repo-root `LICENSE` under `/usr/share/licenses/$pkgname/` — clears namcap's `LicenseRef-*` file requirement, which printed as `E:` on every run since `b8fbb31` | rebuild 2026-10-16: namcap output has no ` E: ` line; `pacman -Qlp` lists `usr/share/licenses/vergoboy-stream/LICENSE` |
+| `build-arch.sh` (3) | verification captures namcap output and `die`s on ` E: ` (namcap exits 0 anyway, and the pipeline's status was sed's — errors scrolled by green); merged the unreachable second `die` after "no usable rustc", whose advice never printed | `bash -n` clean; gate logic checked both ways (E → fail, W-only → pass); verify run `EXIT=0` |
 
 Two things the build cannot get wrong any more, both verified in the logs:
 
@@ -296,6 +298,15 @@ Both artifacts pass `bsdtar` integrity. namcap's remaining line is W-class
 ("LicenseRef-* requires a license file under /usr/share/licenses/") — the repo
 ships no `LICENSE`, so that needs a `LICENSE` file added to fully clear it; it is
 advisory, not a build failure, and does not block T4.
+
+*Resolved 2026-10-16:* the license line was in fact E-class — namcap prints
+`E: Uncommon license identifiers ... require license files below
+/usr/share/licenses/…` — and it appeared on every run while `build-arch.sh`
+stayed green, because namcap exits 0 and the pipeline status was sed's. The
+repo now ships `LICENSE`, `package()` installs it, and the script fails on
+` E: ` output (commits `91577dc`, `ec6bd49`); verified rebuild prints only
+W-class lines and exits 0. The "advisory, not a build failure" reading above
+was wrong on both counts and is superseded by this note.
 
 A side-effect worth noting: `build-arch.sh`'s lock (`packaging/arch/.build.lock`)
 and the 5-way export verification worked as designed — the `w2g` run refused to
