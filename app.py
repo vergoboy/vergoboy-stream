@@ -1728,6 +1728,7 @@ _ARCHIVE_ERRORS = {
     archive_scraper.KIND_AUTH_REQUIRED: (401, "برای دیدن لینک‌های دانلود باید وارد حساب دیجی‌موویز شوید"),
     archive_scraper.KIND_MANUAL_CHALLENGE: (503, "دیجی‌موویز سؤال امنیتی می‌پرسد؛ نشست را کامل کنید و دوباره تلاش کنید"),
     archive_scraper.KIND_SESSION_EXPIRED: (401, "نشست دیجی‌موویز منقضی شده؛ دوباره وارد شوید"),
+    archive_scraper.KIND_SITE_CHALLENGE: (503, "دیجی‌موویز پشت محافظ کلادفلر است؛ چند دقیقه بعد دوباره تلاش کنید"),
     archive_scraper.KIND_AUTH_UNAVAILABLE: (503, "ورود به آرشیو ممکن نشد؛ تنظیمات حساب را بررسی کنید"),
     archive_scraper.KIND_PROXY_UNAVAILABLE: (502, "پروکسی آرشیو در دسترس نیست"),
     archive_scraper.KIND_PROXY_CONFIG: (500, "آدرس پروکسی آرشیو نامعتبر است"),

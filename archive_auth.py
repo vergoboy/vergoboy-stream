@@ -34,6 +34,21 @@ from archive_login_form import (LoginForm, LoginFormError, build_login_payload, 
 LOG = logging.getLogger("archive.auth")
 
 
+def _is_cloudflare_challenge(response: requests.Response) -> bool:
+    """True when Cloudflare's edge is challenging this client, not WordPress.
+
+    Live capture (2026-10-16): the edge serves a "Just a moment..." page with
+    HTTP 403 and the ``cf-mitigated: challenge`` header to every endpoint at
+    once, so no response body was rendered by the site and neither a session
+    expiry nor a login outcome can be concluded from it.  The header is the
+    authoritative stamp; the page's CSP loading ``challenges.cloudflare.com``
+    is the fallback when an intermediary strips response headers.
+    """
+    if "challenge" in (response.headers.get("cf-mitigated") or "").lower():
+        return True
+    return "challenges.cloudflare.com" in response.text[:8192]
+
+
 class AuthState(str, Enum):
     AUTHENTICATED = "AUTHENTICATED"
     AUTH_CHECKING = "AUTH_CHECKING"
@@ -284,6 +299,18 @@ class ArchiveAuthManager:
                       redirect_to=safe_target(response.url), elapsed_ms=started.ms)
             return False
         login_path = self.settings.login_url.rstrip("/")
+        if _is_cloudflare_challenge(response):
+            # The edge answered, not the site.  ``None`` is "temporary
+            # transport failure", which keeps ensure_authenticated() from
+            # opening the (equally walled) login form, and last_check_error
+            # names the cause so the API layer never reports an expired
+            # session the user cannot fix by logging in again.
+            self.last_check_error = "site_challenge"
+            self._note_latency(started.ms)
+            self._transition(AuthState.AUTH_FAILED, "site_challenge")
+            self._log("AUTH_CHECK_SITE_CHALLENGE", status=response.status_code,
+                      redirect_to=safe_target(response.url), elapsed_ms=started.ms)
+            return None
         if response.url.rstrip("/") == login_path or response.status_code in (401, 403):
             self._note_latency(started.ms)
             self._transition(AuthState.AUTH_EXPIRED, "redirected_to_login")

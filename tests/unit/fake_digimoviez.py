@@ -25,6 +25,17 @@ COOKIE = "wordpress_logged_in"
 # same page, because the theme renders the login widget either way.
 LOGOUT_LINK = f'<a href="{BASE}/wp-login.php?action=logout&amp;_wpnonce=deadbeef">خروج</a>'
 
+# What Cloudflare serves instead of the site when the edge challenges a client
+# (captured live 2026-10-16): the page's CSP is what loads the challenge code,
+# so ``challenges.cloudflare.com`` identifies the wall even if headers are
+# stripped by an intermediary.
+CF_CHALLENGE_PAGE = (
+    '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>'
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+    "script-src 'nonce-nonce' 'unsafe-eval' https://challenges.cloudflare.com; "
+    "style-src 'unsafe-inline'\"></head><body></body></html>"
+)
+
 # Dormant popup the theme renders into every page, with a DIFFERENT key and a
 # decoy question.  Correct code must never pair with or answer it.
 POPUP = (
@@ -45,12 +56,15 @@ def account_page() -> str:
 class FakeDigimoviez(BaseAdapter):
     def __init__(self, questions=(("پانصد بعلاوۀ چهل", "540"),), *, username="user", password="pw!Secret-7",
                  reject_first_posts=0, always_reject=False, challenge=True,
-                 account_shows_login_inline=False):
+                 account_shows_login_inline=False, cloudflare_wall=False):
         super().__init__()
         self.questions = list(questions)
         self.username, self.password = username, password
         self.reject_first_posts, self.always_reject, self.challenge = reject_first_posts, always_reject, challenge
         self.account_shows_login_inline = account_shows_login_inline
+        # The Cloudflare edge sits in front of WordPress and can be toggled by
+        # a test mid-flight to model the wall going up or coming down.
+        self.cloudflare_wall = cloudflare_wall
         self.post_keys: list[str | None] = []
         self.session: requests.Session | None = None
         self.sessions: set[str] = set()
@@ -146,6 +160,12 @@ class FakeDigimoviez(BaseAdapter):
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         self.requests.append({"method": request.method, "url": request.url, "proxies": dict(proxies or {}),
                               "headers": dict(request.headers)})
+        if self.cloudflare_wall:
+            # The edge answers before WordPress sees anything: every endpoint,
+            # every method, with the ``cf-mitigated`` stamp and the challenge
+            # page, exactly as observed live on 2026-10-16.
+            return self._respond(request, request.url, CF_CHALLENGE_PAGE, 403,
+                                 {"cf-mitigated": "challenge"})
         url = request.url.split("?")[0]
         status = 200
         if url == LOGIN_URL and request.method == "GET":
@@ -173,9 +193,15 @@ class FakeDigimoviez(BaseAdapter):
             body, final = json.dumps("".join(cards)), AJAX_URL
         else:
             body, final, status = "not found", url, 404
+        return self._respond(request, final, body, status)
+
+    def _respond(self, request, final: str, body: str, status: int = 200,
+                 headers: dict | None = None) -> requests.Response:
         response = requests.Response()
         response.status_code, response.url, response.request = status, final, request
         response._content, response._content_consumed = body.encode("utf-8"), True
-        response.encoding, response.headers = "utf-8", requests.structures.CaseInsensitiveDict({"Content-Type": "text/html"})
+        response.encoding = "utf-8"
+        response.headers = requests.structures.CaseInsensitiveDict(
+            {"Content-Type": "text/html", **(headers or {})})
         response.elapsed = datetime.timedelta(0)
         return response

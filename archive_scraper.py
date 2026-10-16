@@ -59,6 +59,7 @@ LOG = logging.getLogger("archive.collector")
 KIND_AUTH_REQUIRED = "auth_required"
 KIND_MANUAL_CHALLENGE = "manual_challenge_required"
 KIND_SESSION_EXPIRED = "session_expired"
+KIND_SITE_CHALLENGE = "site_challenge"
 KIND_AUTH_UNAVAILABLE = "auth_unavailable"
 KIND_HTTP_ERROR = "http_error"
 KIND_PROXY_UNAVAILABLE = "proxy_unavailable"
@@ -599,6 +600,10 @@ def _auth_failure(auth: ArchiveAuthManager) -> tuple[str, str]:
     """
     from archive_auth import AuthState
 
+    if auth.last_check_error == "site_challenge":
+        # Cloudflare's edge challenged the client; WordPress never saw the
+        # request, so this is neither a session problem nor a credentials one.
+        return KIND_SITE_CHALLENGE, "Digimoviez is behind a Cloudflare edge challenge"
     state = auth.state
     if state is AuthState.AUTH_MANUAL_INTERVENTION_REQUIRED:
         return KIND_MANUAL_CHALLENGE, "Digimoviez requires a manual security challenge"
