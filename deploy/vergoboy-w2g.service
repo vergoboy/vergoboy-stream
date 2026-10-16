@@ -25,6 +25,9 @@ Environment="STREAM_INSTANCE_ROOT=/opt/w2g"
 Environment="STREAM_SITE_URL=https://vergoboy.ir/w2g"
 Environment="STREAM_LIVEKIT_URL=wss://vergoboy.ir/livekit"
 Environment="STREAM_LIVEKIT_ROOM=w2g-voice"
+# app_logging falls back to $XDG_STATE_HOME/… (i.e. /var/www/.local, not
+# writable) when STREAM_LOG_DIR is unset. Point it inside ReadWritePaths.
+Environment="STREAM_LOG_DIR=/opt/w2g/data/logs"
 # Live namespace: deliberately NOT overridden. The RTMP ingest writes one
 # instance-global directory (config.py HLS_PLAYBACK_URL_TEMPLATE →
 # https://vergoboy.ir/hls/live/{key}/index.m3u8, served by the instance-global
