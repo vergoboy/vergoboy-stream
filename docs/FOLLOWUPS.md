@@ -144,3 +144,43 @@ invoked by hand in `packaging/arch`.
 `rm -rf "$PKGDIR/src"` lines unnecessary) so that builds of *different*
 instances can genuinely run in parallel, and share `webapp/out` by path rather
 than by convention.
+
+## From T4 (deploy `/w2g`) — 2026-10-16
+
+- **Wheelhouse upkeep.** The host resolves `pypi.org` but **cannot reach
+  `files.pythonhosted.org`** (read timeouts even at `--timeout 120`), so a
+  release can only be installed offline: cross-download on a machine with
+  PyPI access (`pip download --python-version 3.12 --platform manylinux_2_34_x86_64
+  … --only-binary=:all:`), scp, then `pip install --no-index
+  --find-links=…`. The wheels used for release `20261015T204954Z` are kept at
+  **`/opt/w2g/wheelhouse/`** (32 wheels, 18 M) — refresh it whenever
+  `requirements.lock.txt` changes, or the next release will stall the same way.
+  Alternative worth testing someday: a PyPI mirror the host *can* reach.
+- **`location = /livekit/` is instance-global but lives in the w2g snippet.**
+  `_probe_livekit()` GETs `{STREAM_LIVEKIT_URL}/` (→ `https://vergoboy.ir/livekit/`),
+  which had no route at all (only `/livekit/rtc/…`), so health answered 503.
+  The fix shipped inside `/etc/nginx/snippets/vergoboy-w2g.conf` because D6
+  allowed exactly one include line. If the vhost or `/stream`'s snippet is ever
+  regenerated, hoist this exact-match location into a shared snippet — and note
+  a *future* `/stream` build with the health endpoint needs it too (its current
+  old build has no `/stream/api/health`).
+- **`config.py` never creates `DATA_DIR/rooms/`.** It makes `DATA_DIR` itself
+  (line ~345) and `state.py`'s *save* path makedirs on demand, but every
+  *reader* (`state.py` load, `app.py:1428/4047` listdir, the cleanup greenlet)
+  assumes it exists — a fresh instance crashes a greenlet with
+  `FileNotFoundError …/data/rooms` until someone mkdirs it (done manually at
+  deploy: `/opt/w2g/data/rooms`). Likely also bites a fresh desktop install.
+  One-line fix: `os.makedirs(os.path.join(Config.DATA_DIR, "rooms"), exist_ok=True)`
+  next to the other makedirs in config.py.
+- **`STREAM_ADMIN_EMAIL` is required in production but carried nowhere.** The
+  old `/opt/stream/config.py` hardcodes `very.good.booyy@gmail.com` as its
+  default, the new `config.py` has no default and `validate()` refuses to boot
+  without it, and `/opt/stream/.stream_db.env` doesn't contain the key — so S6's
+  "carry the whitelist" step silently missed it. Deployed by appending it to
+  `/opt/w2g/.stream_db.env`. Add it to whatever sample/template env file is
+  documented, otherwise the next instance repeats the crash loop.
+- **`docs/DEPLOY_PLAN.md` S9's insertion snippet is superseded.** It assumes a
+  single `server{}` (`rfind("}")`); the vhost has four, and even a
+  brace-matching rewrite desynced once. The executed, verified procedure is the
+  one in `docs/DEPLOY_LOG.md` Session 3 (anchor on `location /stream/_next/ {`,
+  `nginx -t` gates the reload, `.bak.<ts>` restore).

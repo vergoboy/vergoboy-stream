@@ -330,6 +330,30 @@ Notes:
 - The 768 (was 762 after e8bcf20) is the 6 new tests in
   tests/unit/test_state_missing_media.py.
 
+### T4 — deploy `/w2g` to vergoboy.ir (2026-10-16) — DONE
+
+Release `20261015T204954Z` from commit `9b80c22`, live at
+**https://vergoboy.ir/w2g** behind `vergoboy-w2g.service` on `127.0.0.1:8802`,
+own `w2g` DB/role, own `STREAM_SECRET_KEY`/`STREAM_JWT_SECRET`, `0600`
+secrets file `/opt/w2g/.stream_db.env`. `/stream` untouched (200/301/404
+baseline unchanged, both units active).
+
+| Step | Result | Deviation worth remembering |
+| --- | --- | --- |
+| S1–S2 | dirs + `git archive` release, www-data | — |
+| S3 venv | deps at exact lockfile versions | **host cannot reach `files.pythonhosted.org`** → wheels cross-downloaded locally and installed `--no-index` from `/opt/w2g/wheelhouse/` (32 wheels, 18 M) |
+| S4 export | 229 `/w2g`, 0 `/stream`, 0 `/api/api` | copied `node_modules` insufficient (`animejs`, `@tauri-apps/api`); real `npm ci` (396 pkgs) |
+| S5–S6 | `w2g` role+DB, secrets file, all 4 OAuth key names carried | `STREAM_ADMIN_EMAIL` not in stream's env (old code hardcodes it) → appended explicitly for the new `validate()` |
+| S7 | atomic `current` symlink | — |
+| S8 | active, `env=production` | unit needed `STREAM_LOG_DIR=/opt/w2g/data/logs` (else `/var/www/.local` EACCES); `data/rooms/` had to be created (config.py never makes it) |
+| S9 | +1 line, `nginx -t` OK, reloaded | plan's `rfind("}")` targets the wrong block (4 server blocks) — inserted before `location /stream/_next/ {` instead; first brace-scan attempt landed in a `/music` location, `nginx -t` caught it, restored from `.bak.20261016T104610Z`; snippet gained `location = /livekit/` (probe URL had no route → 503) |
+| S10 | **all green** | health `{"status":"healthy"}` all 4 checks true; OAuth redirect_uri at `/w2g` (D7); socket handshake; hashed asset 200; `/stream` unchanged |
+
+Follow-ups now on the user: register the two OAuth redirect URIs
+(`…/w2g/api/auth/oauth/{google,github}/callback`) — the server already sends
+them, the provider consoles must allow them. GitHub may need a second OAuth
+app (callback-subdirectory matching, see G2 note).
+
 ## Session 1 (2026-10-06) — reconciliation + commit housekeeping
 
 | Phase | Step | Status | Commit | Evidence |

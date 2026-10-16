@@ -169,3 +169,159 @@ REMOTE
 
 The plan's S9 python inserts the include before `rfind("}")` (the last brace of the file), which with 4 server blocks would land in the wrong block. I will instead insert `include /etc/nginx/snippets/vergoboy-w2g.conf;` into the server block that contains `location /stream/api/` (the line-15 443 vhost), immediately before that block's closing brace — verified by re-reading the file after insertion and by `nginx -t`.
 
+---
+
+## Session 3 (2026-10-16) — T4 S1…S10 (the rollout itself)
+
+Release: `20261015T204954Z`, source commit `9b80c22d2eeebe31ea0f4643006cba3c31461bd3`
+(`git archive HEAD` piped to the host; ownership `www-data` throughout).
+
+### S1–S2 — directories and release identity
+
+```sh
+sudo install -d -o www-data -g www-data -m 0755 /opt/w2g /opt/w2g/releases \
+     /opt/w2g/media /opt/w2g/data "$REL"
+git archive HEAD | sshpass -e ssh ubuntu@45.135.242.135 \
+     "tar -xf - -C $REL && chown -R www-data:www-data $REL"
+```
+
+Verified: `app.py`, `config.py`, `requirements.lock.txt`, `webapp/` present;
+`webapp/out` and `.git` correctly absent.
+
+### S3 — virtualenv (deviation: server cannot reach the PyPI wheel CDN)
+
+`python3 -m venv $REL/venv` then `pip install -r requirements.lock.txt` failed
+repeatedly: `pypi.org` answers (HTTP 200, 1.7 s) but
+**`files.pythonhosted.org` — the wheel CDN — times out** from this host
+(`curl --max-time 25` to it never returns). Read timeouts persisted at
+`--timeout 120 --retries 10`. npm's registry was unaffected (S4 needs it).
+
+Workaround (recorded because every future deploy on this host needs it):
+
+```sh
+# on the deploy machine (has PyPI access), cross-download for the target:
+pip download -r requirements.lock.txt -d w2g-wheelhouse \
+  --python-version 3.12 --platform manylinux_2_34_x86_64 … \
+  --platform manylinux2014_x86_64 --only-binary=:all:
+scp -r w2g-wheelhouse ubuntu@45.135.242.135:/tmp/
+# on the host:
+pip install --no-index --find-links=/tmp/w2g-wheelhouse -r requirements.lock.txt
+```
+
+31 of 33 pins came down (`cffi`, `pycparser` are win32-only markers in the
+lockfile — correctly skipped on Linux). The install upgraded the copies taken
+from `/opt/stream/venv` to the exact lockfile versions. The wheelhouse now
+lives at **`/opt/w2g/wheelhouse/`** (32 wheels, 18 M) for the next release.
+
+Why the venv was seeded from `/opt/stream/venv` at all: that venv predates the
+current code — it has **no `flask_cors`** (which is exactly why the live
+`/stream` sends no CORS headers) — so `import flask_cors` failed at first boot.
+
+Verify step:
+
+```sh
+$REL/venv/bin/python3 -c "import flask, flask_cors, flask_socketio, gevent, \
+  psycopg2, jwt, yaml, sqlalchemy, requests, socketio, yt_dlp; print('ALL KEY DEPS OK')"
+```
+
+### S4 — static export
+
+`rsync $REL/webapp/ → /opt/w2g/webapp/`, then as `www-data`:
+
+```sh
+NEXT_PUBLIC_BUILD_TARGET=web NEXT_PUBLIC_BASE_PATH=/w2g npm ci     # 396 packages
+NEXT_PUBLIC_BUILD_TARGET=web NEXT_PUBLIC_BASE_PATH=/w2g npm run build
+rsync -a --delete /opt/w2g/webapp/out/ "$REL/webapp-out/"
+```
+
+Post-conditions: `grep -rhoF /w2g → 229`, `/stream → 0`, `/api/api → 0`.
+(A first attempt with a copied `node_modules` failed on `animejs` /
+`@tauri-apps/api`; `npm ci` from the lockfile is the real path.)
+
+### S5 + S6 — database and secrets (one shell, `$PGPASS` never printed)
+
+- role `w2g` + database `w2g` created (`CREATE ROLE … LOGIN PASSWORD`, idempotent
+  `DO $$` block; `stream` untouched);
+- `/opt/w2g/.stream_db.env` written `0600 www-data`: own `STREAM_DATABASE_URL`,
+  freshly minted `STREAM_SECRET_KEY` / `STREAM_JWT_SECRET`, plus the carried
+  whitelist — all four `STREAM_{GOOGLE,GITHUB}_OAUTH_CLIENT_{ID,SECRET}` names
+  landed.
+
+### S7 — `current` symlink
+
+`ln -sfn $REL /opt/w2g/current.new && mv -Tf …` (atomic), prune keeps 3 — only
+one release exists so nothing was pruned.
+
+### S8 — backend start (three fixes needed)
+
+```sh
+sudo install -m 0644 deploy/vergoboy-w2g.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now vergoboy-w2g
+```
+
+Boot failed three times, each fixed at the source rather than silenced:
+
+| # | Failure | Fix |
+| - | --- | --- |
+| 1 | `ModuleNotFoundError: flask_cors` | S3 wheelhouse install (above) |
+| 2 | `PermissionError: /var/www/.local` — `app_logging` falls back to `$XDG_STATE_HOME` when `STREAM_LOG_DIR` unset | unit now sets `Environment="STREAM_LOG_DIR=/opt/w2g/data/logs"` (inside `ReadWritePaths`) |
+| 3 | `Production requires explicit … STREAM_ADMIN_EMAIL` — the **old** `/opt/stream/config.py` hardcodes `very.good.booyy@gmail.com` as a default, the new `config.py` requires it explicitly in production, and the key is not in `/opt/stream/.stream_db.env` to carry | appended `STREAM_ADMIN_EMAIL=very.good.booyy@gmail.com` to `/opt/w2g/.stream_db.env` |
+
+Also created `/opt/w2g/data/rooms/`: `config.py` makes `DATA_DIR` but never
+`DATA_DIR/rooms`, and readers (`state.py` load path, cleanup greenlet) assume it
+— a greenlet crashed with `FileNotFoundError … /opt/w2g/data/rooms`.
+
+After the fixes: `env=production`, `Database tables ready`,
+`Running on http://127.0.0.1:8802 (gevent)`.
+
+### S9 — nginx (deviation: plan's brace position + one extra location)
+
+1. Backup: `vergoboy.ir.conf.bak.20261016T104610Z`; snippet installed to
+   `/etc/nginx/snippets/vergoboy-w2g.conf`.
+2. **First insertion attempt failed and was reverted.** A brace-matching
+   scanner (written because `rfind("}")` targets the wrong block) desynced and
+   dropped the include inside a `/music/` location →
+   `nginx -t: location "/w2g/_next/" is outside location "/music/api/"`.
+   Because `nginx -t` gates the reload, **nginx never loaded it** (live traffic
+   untouched); the conf was restored from the backup and verified byte-identical.
+3. Final insertion: immediately **before the `location /stream/_next/ {` line**.
+   nginx forbids nested `location`, so any `location` line in a sites file is a
+   server-level child — this provably lands in the `/stream` server block without
+   parsing braces. `diff` showed exactly `+1` line; `nginx -t` OK; reloaded.
+4. Snippet carries one addition beyond the plan: **`location = /livekit/`** →
+   `proxy_pass http://127.0.0.1:7880/`. `_probe_livekit()` derives
+   `https://vergoboy.ir/livekit/` from `STREAM_LIVEKIT_URL`, but only
+   `/livekit/rtc/…` was routed — the probe got the SPA `404` →
+   `livekit:false` → **HTTP 503**. Exact match cannot collide with the prefix
+   `location /livekit/rtc/`; the SFU answers plain `OK` on its root.
+
+### S10 — verification (all green)
+
+```
+GET /w2g/              -> 200
+GET /w2g (no slash)    -> 301
+GET /w2g/api/health    -> 200   {"checks":{"database":true,"livekit":true,
+                                          "storage":true,"transcoder":true},
+                                 "status":"healthy"}
+socket.io polling      -> 0{"sid":"…","upgrades":["websocket"],…}   (Engine.IO open)
+GET /w2g/_next/static/chunks/webpack-014f8389997a9eac.js -> 200
+GET /livekit/          -> 200   (health passthrough)
+google oauth           -> 302, redirect_uri=https%3A%2F%2Fvergoboy.ir%2Fw2g%2Fapi%2Fauth%2Foauth%2Fgoogle%2Fcallback   (D7 ✓)
+github oauth           -> 302, redirect_uri=…%2Fw2g%2Fapi%2Fauth%2Foauth%2Fgithub%2Fcallback   (D7 ✓)
+GET /stream/           -> 200   (untouched)
+GET /stream/api/health -> 404   (old build — unchanged baseline)
+GET /stream (no slash) -> 301
+services: vergoboy-w2g enabled+active, vergoboy-stream active, nginx active, postgresql active
+nginx -t               -> successful (only the pre-existing proxy_headers_hash warnings)
+```
+
+Disk after rollout: 25 G free (still above the 20 G floor).
+
+### Follow-ups this session created
+
+- User-side OAuth redirect URIs still to add (see G3): Google
+  `https://vergoboy.ir/w2g/api/auth/oauth/google/callback`, and the same for
+  GitHub — the server now *sends* `/w2g` callbacks but the apps must allow them.
+- `/opt/w2g/wheelhouse/` must be refreshed whenever `requirements.lock.txt`
+  changes (host cannot reach `files.pythonhosted.org`).
+
