@@ -166,4 +166,10 @@ package() {
     "${pkgdir}/usr/share/icons/hicolor/128x128/apps/${_pkgbin}.png"
   install -Dm644 "webapp/src-tauri/icons/128x128@2x.png" \
     "${pkgdir}/usr/share/icons/hicolor/256x256/apps/${_pkgbin}.png"
+  # namcap refuses LicenseRef-* identifiers without a license file under
+  #   /usr/share/licenses/<pkgname>/
+  # ("E: Uncommon license identifiers ... Found 0/1 required license files").
+  # Sourced from the clone, so the file only exists once LICENSE is committed.
+  install -Dm644 "LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }
