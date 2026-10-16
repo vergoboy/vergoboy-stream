@@ -6,6 +6,7 @@ import smtplib
 import subprocess
 from email.headerregistry import Address
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
 from config import Config
 
@@ -15,6 +16,12 @@ def _build_message(to: str, subject: str, html: str) -> EmailMessage:
     msg["Subject"] = subject
     msg["From"] = Address("Watch Party", "info", "vergoboy.ir")
     msg["To"] = to
+    # RFC 5322 requires Date and Message-ID; Gmail scores mail without them as
+    # spammy/malformed (seen 2026-10-16: a delivered copy had neither until
+    # this added them). Both must be in the message BEFORE it is submitted —
+    # never rely on an MTA to fix headers on the way out.
+    msg["Date"] = formatdate(localtime=False, usegmt=True)
+    msg["Message-ID"] = make_msgid(domain="vergoboy.ir")
     msg.set_content("مشاهده پیام در مرورگر.")
     msg.add_alternative(html, subtype="html")
     return msg

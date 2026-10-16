@@ -403,3 +403,36 @@ Recipient note: the registered/admin address is `very.good.booyy@gmail.com`
 > and leave the unit `failed` with nothing restarting it — same silent failure
 > as Sep 28. See docs/FOLLOWUPS.md.
 
+
+---
+
+## Session 5 (2026-10-16) — test email landed in Spam: diagnosis and fix
+
+Read-only diagnosis first:
+
+| Check | Result |
+| --- | --- |
+| NS | Cloudflare (alina/tadeo) — DNS records not editable from the server |
+| SPF | `v=spf1 ip4:37.32.43.212 ip4:45.135.242.135 -all` — **includes the sending IP** ✓ |
+| DMARC | `v=DMARC1; p=none; rua=mailto:very.good.booyy@gmail.com` ✓ (monitoring) |
+| DKIM | `default._domainkey.vergoboy.ir` TXT published ✓; private key present, `opendkim-testkey` matches ✓ |
+| opendkim | **active**; socket `local:/var/spool/postfix/opendkim/opendkim.sock`; log shows `DKIM-Signature field added (s=default, d=vergoboy.ir)` on the actual test sends ✓ |
+| postfix identity | `myhostname=mail.vergoboy.ir`, `mydomain=vergoboy.ir`, banner `$myhostname ESMTP` ✓ |
+| rDNS | PTR `45.135.242.135 → mail.vergoboy.ir` ✓; `mail.vergoboy.ir A → 45.135.242.135` ✓ (HELO resolves) |
+| RBLs (via Google DoH) | spamhaus zen, spamcop, barracuda, CBL — **all clean** (the direct-resolver `127.255.255.254` was query-policy refusal, not a listing) |
+| wire headers (probe to root@localhost) | DKIM-Signature ✓ Return-Path `<info@vergoboy.ir>` ✓ Date ✓ — **`Message-ID` MISSING** |
+
+Fix: `mail.py` now sets `Date` and `Message-ID` itself (RFC 5322 requires both;
+Gmail scores header-less mail as malformed/spammy — a delivered copy provably
+had neither; the earlier `Date` had been MTA-added). Release copy patched with
+backup `mail.py.bak.20261016T115510Z`, `vergoboy-w2g` restarted.
+
+Re-probe verified **exactly one `Date` and one `Message-ID`**
+(`<…@vergoboy.ir>`) plus the DKIM signature on the wire; new test delivered to
+the admin Gmail at 11:56:54 (`status=sent`, 250 gsmtp).
+
+If placement is still Spam after this, everything server-side is passing
+(SPF/DKIM/DMARC/rDNS/RBL) and the remaining lever is **sending-IP reputation**
+— cold hosting IP, plus Gmail's engagement history with this sender (earlier
+header-less mail taught it "spam"): warm-up, "Not spam" training, Gmail
+Postmaster Tools, or an external transactional relay — operator decision.

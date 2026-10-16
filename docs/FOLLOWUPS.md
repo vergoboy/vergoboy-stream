@@ -209,3 +209,22 @@ than by convention.
   (Google: Cloud console → credentials; GitHub: OAuth app callback URL —
   remember the pre-Aug-2026 subdirectory-matching caveat from G2, a `/stream`
   callback will not accept `/w2g`).
+
+## From Session 5 (spam placement) — 2026-10-16
+
+- **If vergoboy mail still lands in Gmail Spam after the Message-ID fix**, the
+  server side is provably clean (SPF pass incl. IP, DKIM signed+matching,
+  DMARC pass, rDNS `mail.vergoboy.ir`, RBLs clean) — remaining levers, in
+  order: (1) open Gmail Postmaster Tools for `vergoboy.ir` and read the
+  **IP reputation + spam rate** panels; (2) user marks the test mails "Not
+  spam" (Gmail per-sender engagement); (3) consider a transactional smarthost
+  (Brevo/SendGrid/Mailgun) as `relayhost` — best inbox rates, small cost;
+  (4) review the DMARC aggregate reports that land in the admin mailbox
+  (`rua=mailto:` — sender XMLs from googlemail-dmarc-reports) for per-receiver
+  auth results.
+- **`/stream`'s deployed (old) app still sends Message-ID-less mail** — same
+  spam risk on its password resets; heals on its next deploy, nothing to do
+  now while it stays on the old build.
+- **opendkim private key perms warning** (`opendkim-testkey` from root says
+  "unsafe permissions"): cosmetic — file is `opendkim:opendkim 0640`, signing
+  works; only noticed because the check ran as root.
