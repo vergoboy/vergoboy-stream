@@ -170,6 +170,8 @@ class Config:
     ARCHIVE_LOGIN_PASSWORD_FIELD = os.environ.get("STREAM_ARCHIVE_LOGIN_PASSWORD_FIELD", "")
     ARCHIVE_SESSION_FILE = os.environ.get("STREAM_ARCHIVE_SESSION_FILE", os.path.join(INSTANCE_ROOT, "data", "digimoviez-session.json"))
     ARCHIVE_AUTH_CHECK_INTERVAL = float(os.environ.get("STREAM_ARCHIVE_AUTH_CHECK_INTERVAL", "120"))
+    # Local clearance sidecar for the Cloudflare wall ("" disables the client).
+    ARCHIVE_SOLVER_URL = os.environ.get("STREAM_ARCHIVE_SOLVER_URL", "").strip()
     # A session check slower than this counts as lagging (normal is 2-4s).
     ARCHIVE_LAG_THRESHOLD = float(os.environ.get("STREAM_ARCHIVE_LAG_THRESHOLD", "8"))
     ARCHIVE_MAX_LAG_STREAK = int(os.environ.get("STREAM_ARCHIVE_MAX_LAG_STREAK", "3"))

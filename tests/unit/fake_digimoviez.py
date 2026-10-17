@@ -56,15 +56,19 @@ def account_page() -> str:
 class FakeDigimoviez(BaseAdapter):
     def __init__(self, questions=(("پانصد بعلاوۀ چهل", "540"),), *, username="user", password="pw!Secret-7",
                  reject_first_posts=0, always_reject=False, challenge=True,
-                 account_shows_login_inline=False, cloudflare_wall=False):
+                 account_shows_login_inline=False, cloudflare_wall=False,
+                 valid_clearance: str | None = None):
         super().__init__()
         self.questions = list(questions)
         self.username, self.password = username, password
         self.reject_first_posts, self.always_reject, self.challenge = reject_first_posts, always_reject, challenge
         self.account_shows_login_inline = account_shows_login_inline
         # The Cloudflare edge sits in front of WordPress and can be toggled by
-        # a test mid-flight to model the wall going up or coming down.
+        # a test mid-flight to model the wall going up or coming down.  When a
+        # clearance value is configured, the edge admits requests carrying it
+        # (mirroring the real cf_clearance behaviour) and challenges the rest.
         self.cloudflare_wall = cloudflare_wall
+        self.valid_clearance = valid_clearance
         self.post_keys: list[str | None] = []
         self.session: requests.Session | None = None
         self.sessions: set[str] = set()
@@ -117,12 +121,15 @@ class FakeDigimoviez(BaseAdapter):
                 + challenge + '<button type="submit" name="loginkon">ورود</button>'
                 '<button type="button" id="digiQrLoginBtn">QR</button></form></div></body></html>')
 
-    def _cookie_sid(self, request) -> str | None:
+    def _cookie_value(self, request, name: str) -> str | None:
         for part in (request.headers.get("Cookie") or "").split(";"):
-            name, _, value = part.strip().partition("=")
-            if name == COOKIE:
+            key, _, value = part.strip().partition("=")
+            if key == name:
                 return value
         return None
+
+    def _cookie_sid(self, request) -> str | None:
+        return self._cookie_value(request, COOKIE)
 
     def _handle_login_post(self, request) -> tuple[str, str]:
         raw = request.body.decode() if isinstance(request.body, bytes) else (request.body or "")
@@ -163,9 +170,11 @@ class FakeDigimoviez(BaseAdapter):
         if self.cloudflare_wall:
             # The edge answers before WordPress sees anything: every endpoint,
             # every method, with the ``cf-mitigated`` stamp and the challenge
-            # page, exactly as observed live on 2026-10-16.
-            return self._respond(request, request.url, CF_CHALLENGE_PAGE, 403,
-                                 {"cf-mitigated": "challenge"})
+            # page, exactly as observed live on 2026-10-16.  A request carrying
+            # the valid clearance cookie is admitted, as the real edge does.
+            if self.valid_clearance is None or self._cookie_value(request, "cf_clearance") != self.valid_clearance:
+                return self._respond(request, request.url, CF_CHALLENGE_PAGE, 403,
+                                     {"cf-mitigated": "challenge"})
         url = request.url.split("?")[0]
         status = 200
         if url == LOGIN_URL and request.method == "GET":

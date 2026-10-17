@@ -794,7 +794,7 @@ def get_collector() -> DigimoviezMovieCollector:
             Config.ARCHIVE_HTTP_PROXY, Config.ARCHIVE_LOGIN_USERNAME_FIELD, Config.ARCHIVE_LOGIN_PASSWORD_FIELD,
             Config.ARCHIVE_AUTH_CHECK_INTERVAL, Config.ARCHIVE_REQUEST_TIMEOUT, Config.ARCHIVE_LOGIN_RETRY_COUNT,
             lag_threshold=Config.ARCHIVE_LAG_THRESHOLD, max_lag_streak=Config.ARCHIVE_MAX_LAG_STREAK,
-            lag_backoff_max=Config.ARCHIVE_LAG_BACKOFF_MAX)
+            lag_backoff_max=Config.ARCHIVE_LAG_BACKOFF_MAX, solver_url=Config.ARCHIVE_SOLVER_URL)
         try:
             auth = ArchiveAuthManager(settings)
         except ArchiveProxyConfigurationError as exc:
