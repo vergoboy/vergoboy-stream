@@ -92,6 +92,41 @@ Details in `docs/PROGRESS.md` § "Pre-T4".
 since it touches the existing instance; (c) still read the vhost's `location`
 inventory at S0 in case a root-level proxy is meant to exist.
 
+*Answered 2026-10-17.* (c) is settled, read-only from the live vhost:
+`location /api` in `sites-enabled/vergoboy.ir.conf` proxies to
+`127.0.0.1:5000` (the register/admin app), which is why the domain root answers
+404 with `Access-Control-Allow-Origin: *`. No root-level proxy to our app exists,
+so (a) is mandatory — an empty API base path can never reach either instance.
+
+There is a desktop client that works today with **no server change**:
+`vergoboy-w2g`. `/w2g` runs the current code, so it answers the preflight
+(`OPTIONS /w2g/api/auth/login` → 200 with
+`access-control-allow-origin: tauri://localhost`), serves `/w2g/api/health` →
+200, and carries the archive fixes. Built and verified 2026-10-17:
+
+- `packaging/arch/vergoboy-w2g-0.1.0-1-x86_64.pkg.tar.zst`, 3.24 MiB, sha256
+  `5ec1e0e1b6a7e7af012c873e1555af7812eda542409e942eb9c65e91a4f16712`.
+- Installs alongside the root-targeted `vergoboy-stream`: `/usr/bin/vergoboy-w2g`,
+  `vergoboy-w2g.desktop`, identifier `ir.vergoboy.w2g`.
+- `./build-arch.sh --instance w2g --rebuild-ui` exports with `API base path
+  '/w2g'`. Cross-checked against a same-commit, same-tree `stream` export: the
+  one content-hashed chunk whose content the base path changes
+  (`356-*.js` — it inlines `lib/config`) differs, every other chunk is
+  byte-identical, and `grep '"w2g"'` finds nothing in the stream export.
+
+The `stream` desktop package stays blocked on (b): its deployment is still the
+frozen Sep-22 build (no CORS, no `/api/health`), so repointing it alone would
+swap one "cannot connect" for another.
+
+**Build-script gap found while verifying this.** The reuse gates that compare
+`webapp/out` against `$API_ORIGIN` and `$API_BASE_PATH` only run on the *reuse*
+path. A `--rebuild-ui` run (or a forced rebuild) exports first and then packages
+it with no post-export check at all, and the only gate on the shipped artifact
+counts `_next/static` references — which cannot tell one instance's export from
+the other. A post-export assertion belongs right after `export_ui`
+(`grep -rqF "\"$API_BASE_PATH\"" "$OUTDIR/_next"`, skipped when the base path is
+empty).
+
 ### Live streaming shares one namespace between instances
 
 The RTMP ingest is configured server-side to write a single directory
