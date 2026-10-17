@@ -76,7 +76,10 @@ pub fn locate_mpv() -> Option<PathBuf> {
             return Some(PathBuf::from(p));
         }
     }
-    let name = "mpv";
+    // Windows binaries carry the extension on disk; `Command::new` would also
+    // find it via PATHEXT, but the explicit name keeps `locate_mpv`'s contract
+    // (return the path that exists) honest on both platforms.
+    let name = if cfg!(windows) { "mpv.exe" } else { "mpv" };
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
