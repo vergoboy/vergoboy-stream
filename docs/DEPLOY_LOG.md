@@ -741,3 +741,94 @@ restart: one `AUTH_CHECK_SITE_CHALLENGE` per watchdog cycle (609/676 ms),
 removed; the 1.07 GB flaresolverr image is kept for a future trial — see
 FOLLOWUPS). The state machine recovers by itself the moment the edge lifts
 the challenge; no manual step is possible or needed.
+
+## Session 10 (2026-10-17) — the wall is lifted: FlareSolverr mints, requests replays
+
+**Symptom:** the Session-9 state held all through the night — every archive
+search answered the honest 503 «دیجی‌موویز پشت محافظ کلادفلر است؛ چند دقیقه
+بعد دوباره تلاش کنید», and the journal logged one `AUTH_CHECK_SITE_CHALLENGE`
+per watchdog cycle.
+
+**Dead end first (recorded so it is not retried):** a browser we drove
+ourselves — headed Camoufox on Xvfb through the archive proxy — never got
+past the interactive step from the server. Probe versions (`solve.py` v1–v6)
+showed the page going silent for 120 s right after the `ci` beacon, a
+shadow-rooted checkbox no synthetic click ever landed on, and a provisional
+`cf_clearance` that the edge refused on replay. A locally-run *headed*
+Camoufox on the real workstation display cleared the same wall in ~6 s from
+the same exit IP (194.5.192.35) — i.e. the wall was **environment detection**,
+not IP reputation — but that solver depended on the operator's desktop being
+on and was abandoned with the probe image. The user-supplied
+`cloudflare-turnstile-bypass` repo was also evaluated and rejected: it is a
+~7 KB wrapper around a **paid** API (`peak.fo`) that returns a
+`cf-turnstile-response` token for a widget sitekey, which does not apply to an
+edge interstitial and was out of scope by the user's own decision.
+
+**What actually worked.** The FlareSolverr 3.5.2 image that Session 9 left on
+the server — previously written off — solves this wall cleanly. Run on the
+proxy's own network with the proxy passed **per request** (a global
+`HTTP_PROXY` env breaks its own startup check):
+
+```
+POST http://127.0.0.1:8191/v1
+  {"cmd":"request.get","url":"https://digimoviez.com/","maxTimeout":180000,
+   "proxy":{"url":"http://vergoboy-proxy:10808"}}
+→ {"status":"ok", "solution":{"userAgent":"…Chrome/152… Linux x86_64",
+                              "cookies":[{"name":"cf_clearance", …}]}}
+```
+
+`solution.cookies[cf_clearance]` has **expiry ≈ 525600 min = one year**, and a
+plain `curl` replays it — 200, 371 KB real page — while the same cookie with a
+different User-Agent is 403 again. So the edge binds `cf_clearance` to IP +
+User-Agent, not to TLS/JA3, and the app only has to hold the pair.
+
+**Code (commits `0bcfe2f`, `9a639f8`; tests first, 835 passed):**
+
+* `archive_solver.fetch_clearance()` now speaks FlareSolverr's `POST /v1`
+  instead of the home-grown `/solve` contract, requires a `cf_clearance` in
+  the answer (a "solved" page without one is a failure, never a retry), and
+  forwards the archive proxy as a per-request field.
+* `archive_auth._adopt_clearance()` passes `settings.http_proxy` to the
+  sidecar (the *sidecar's* Chrome reaches the site; this process only talks
+  loopback) and still adopts cookies + User-Agent atomically.
+* `archive_scraper` **seeds the session User-Agent once and stops stamping its
+  own on every scrape.** This was the second bug: `cf_clearance` is bound to
+  the UA that minted it, so with the clearance adopted the session *check*
+  passed (session UA) while every *search* was walled again (hardcoded
+  Chrome/125 UA). Live proof: adopted UA → 200, hardcoded UA → 403.
+
+**Deployed (all backed up `.bak.<ts>`, instance untouched otherwise):**
+
+* `vergoboy-archive-solver` — `ghcr.io/flaresolverr/flaresolverr:latest`,
+  `--network host --shm-size=1g`, `HOST=127.0.0.1 PORT=8895`, `RestartPolicy
+  unless-stopped`. Bound to **127.0.0.1 only** (verified: no `0.0.0.0:8895`),
+  so it is not reachable from the internet.
+* `/opt/w2g/.stream_db.env` (0600) + `.bak.20261017T115820Z`:
+  `STREAM_ARCHIVE_SOLVER_URL=http://127.0.0.1:8895`. Empty = off; the wall
+  degrades to the Session-9 503 exactly as before.
+* `/opt/w2g/current/`: `archive_solver.py` (new), `archive_auth.py`,
+  `config.py`, `archive_scraper.py` (installed checksums match the commits).
+
+**Verification.**
+
+* Solver: `Challenge detected … solved!` in ~116 s; `ss -ltn` shows only
+  `127.0.0.1:8895`.
+* Service journal after restart: `AUTH_CHECK` → `AUTH_CLEARANCE_ADOPTED`
+  (`cookie_names:["cf_clearance"]`, UA Chrome/152 Linux) →
+  `AUTH_CHECK_RETRY_AFTER_CLEARANCE` → `AUTH_OK marker=logout_link status=200`,
+  then steady-state `AUTH_OK` every 120 s in 3–6 s.
+* End-to-end with the live config and the app's own venv:
+  `get_collector().search(SearchFilters.from_mapping({"query":"dune"}))`
+  returned **3 results**, first `Dune: Part Two 2024` (2024, 8.4,
+  `https://digimoviez.com/dune-part-two-2024/`) — real content, not a wall.
+
+**Cost / recovery:** one ~2-minute solve is spent per process start (the
+clearance is not yet persisted with its UA) and again only if Cloudflare
+invalidates the year-long cookie. Every solve failure (unreachable, timeout,
+non-JSON, no `cf_clearance`) collapses to the honest `site_challenge` 503, so
+the state machine can never do worse than Session 9.
+
+**Rollback:** stop/remove `vergoboy-archive-solver`, drop the
+`STREAM_ARCHIVE_SOLVER_URL` line from `.stream_db.env` (restore
+`.bak.20261017T115820Z`), restore the four files from their `.bak.<ts>`
+siblings, `systemctl restart vergoboy-w2g`. No nginx change, no reload.

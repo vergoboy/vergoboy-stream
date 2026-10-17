@@ -294,3 +294,33 @@ and autologin resumes by itself the moment the edge lifts the challenge.
 the minted cookies into the archive session. The upstream flaresolverr
 image (1.07 GB) is already on the server for such a trial; drop it with
 `docker rmi ghcr.io/flaresolverr/flaresolverr:latest` if not wanted.
+
+**Resolved 2026-10-17 (Session 10).** The upstream FlareSolverr *did* solve
+it once it was run on the proxy's network with the proxy passed per request;
+the wall was cleared and archive search works again. See DEPLOY_LOG Session 10.
+
+## From Session 10 (Cloudflare wall lifted) — 2026-10-17
+
+- **A restart costs one ~2-minute solve.** The minted `cf_clearance` and the
+  User-Agent it is bound to are adopted into the running session but not
+  persisted with it, so a process start re-solves. Cheap fix when it starts to
+  annoy: store `{"cookies": {...}, "user_agent": "..."}` in the session file
+  (it is currently a flat `{cookie: value}` map) and reload the UA with the
+  cookies; tests in `tests/unit/test_archive_clearance.py` pin the current
+  shape and would move with it.
+- **The year-long clearance is a single point of invalidation.** Cloudflare can
+  revoke `cf_clearance` before its stated expiry (zone secret rotation, policy
+  change). The signal is exactly the Session-10 pattern —
+  `AUTH_CHECK_SITE_CHALLENGE` back in the journal — and the recovery is
+  automatic (the next wall triggers one solver round-trip). If it ever stops
+  recovering, check `docker logs vergoboy-archive-solver` first:
+  `Challenge detected` with no `solved!` means the edge changed again.
+- **`digi-solver:probe` (5.14 GB) is dead weight.** It was the browser
+  microsolver that never cleared the wall; FlareSolverr replaced it. The disk
+  sat at **93 % (6.4 G free)** on 2026-10-17. Remove with
+  `docker rmi digi-solver:probe` — reversible only by rebuilding, and the
+  Dockerfile lived in `/tmp` and is gone, so decide deliberately.
+- **Do not set a global proxy env on FlareSolverr.** `HTTP(S)_PROXY` makes its
+  own startup User-Agent check hang for 120 s (observed twice) and the
+  container reports "Error getting browser User-Agent" instead of serving.
+  The target proxy belongs in the per-request `proxy` field only.

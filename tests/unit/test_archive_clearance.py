@@ -1,12 +1,13 @@
 """The clearance sidecar lifts a Cloudflare wall without changing the rest.
 
 Live evidence (2026-10-17): from the archive proxy's exit address the edge
-serves a Turnstile managed challenge to every non-headed client, and clearances
-minted in a stripped environment (no WebGL/fonts) are refused on replay.  The
-deployed answer is a local sidecar running a headed browser on Xvfb.  These
-tests pin the app-side contract: a wall triggers exactly one solver round-trip,
-the minted cookies and their bound User-Agent are adopted atomically, the
-retry is bounded, and every solver failure degrades to the honest
+serves a managed challenge to every client that is not a real browser --
+headless Camoufox, its Xvfb variants and raw curl all stalled or were walled --
+and the clearance it finally issues is bound to the User-Agent that minted it.
+The deployed answer is the FlareSolverr sidecar.  These tests pin the app-side
+contract: a wall triggers exactly one solver round-trip, the minted cookies and
+their bound User-Agent are adopted atomically, the adopted UA survives into
+scrapes, the retry is bounded, and every solver failure degrades to the honest
 site_challenge behaviour that predates this feature.
 """
 from __future__ import annotations
