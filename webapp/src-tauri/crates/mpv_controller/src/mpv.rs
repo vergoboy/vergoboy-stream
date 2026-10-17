@@ -599,4 +599,102 @@ mod tests {
             Some(PlayerEvent::Ready)
         );
     }
+
+    /// The observed set is the whole of what the port can be told about today;
+    /// S1 widens it (volume/mute/aid/sid/tracks/cache). Pin it so the widening
+    /// is visible as a deliberate diff rather than drift.
+    #[test]
+    fn a_fresh_player_observes_exactly_three_properties() {
+        let p = bare_player();
+        assert_eq!(p.initial_props.len(), 3, "observed: {:?}", p.initial_props);
+        assert!(p.initial_props.contains("pause"));
+        assert!(p.initial_props.contains("paused-for-cache"));
+        assert!(p.initial_props.contains("eof-reached"));
+        // Restart budget and defaults the crash-recovery path relies on.
+        assert_eq!(p.max_restarts, 3);
+        assert_eq!(p.own_pause, Some(false));
+        assert_eq!(p.own_seeks, 0);
+        assert_eq!(p.last_pos, 0.0);
+        assert!(!p.ended);
+        assert!(!p.fatal_reported);
+        assert!(p.process.is_none() && p.rpc.is_none());
+    }
+
+    /// What `map_event` deliberately does NOT surface yet. Every name here
+    /// returns `None` today; the S1 extension turns several of them into
+    /// events (Position throttled, CacheState, TrackChanged, Muted,
+    /// Volume…), and updates this test in the same commit that adds them.
+    #[test]
+    fn unobserved_properties_are_ignored() {
+        let mut p = bare_player();
+        p.initial_props.clear();
+        for (name, data) in [
+            ("time-pos", serde_json::json!(12.5)), // by design: frame rate would flood the queue
+            ("duration", serde_json::json!(300.0)),
+            ("volume", serde_json::json!(55.0)),
+            ("mute", serde_json::json!(true)),
+            ("aid", serde_json::json!(1)),
+            ("sid", serde_json::json!("no")),
+            ("aid-list", serde_json::json!([])),
+            ("fullscreen", serde_json::json!(true)),
+            ("demuxer-cache-duration", serde_json::json!(3.0)),
+            ("track-list", serde_json::json!([])),
+            ("speed", serde_json::json!(1.5)),
+        ] {
+            assert_eq!(
+                p.map_event(prop(name, data)),
+                None,
+                "property {name} is not surfaced today"
+            );
+        }
+    }
+
+    /// Malformed or merely unknown traffic on the socket must never become a
+    /// player event — an unparseable line upstream leaves `raw` as whatever
+    /// parsed, and mpv emits plenty of events this port does not care about.
+    #[test]
+    fn malformed_unknown_and_non_boolean_payloads_are_ignored() {
+        let mut p = bare_player();
+        p.initial_props.clear();
+
+        // No / unknown event kind.
+        assert_eq!(p.map_event(serde_json::json!({})), None, "no event field");
+        assert_eq!(p.map_event(serde_json::json!({ "event": "idle" })), None);
+        assert_eq!(p.map_event(serde_json::json!({ "event": "startup-complete" })), None);
+
+        // property-change without a usable name or payload.
+        assert_eq!(
+            p.map_event(serde_json::json!({ "event": "property-change" })),
+            None,
+            "no name"
+        );
+        assert_eq!(
+            p.map_event(serde_json::json!({ "event": "property-change", "name": "pause" })),
+            None,
+            "missing data is Null, not false"
+        );
+        assert_eq!(p.map_event(prop("pause", serde_json::json!("yes"))), None, "non-bool pause");
+        assert_eq!(
+            p.map_event(prop("paused-for-cache", serde_json::json!("maybe"))),
+            None,
+            "non-bool buffering"
+        );
+        assert_eq!(p.map_event(prop("eof-reached", serde_json::json!(false))), None);
+
+        // end-file reasons that are ours or inert, plus the missing file_error
+        // fallback ("playback failed: unknown" rather than a panic or "").
+        for reason in ["", "quit", "redirect", "delete", "stop"] {
+            assert_eq!(
+                p.map_event(serde_json::json!({ "event": "end-file", "reason": reason })),
+                None,
+                "reason {reason:?} is not a failure"
+            );
+        }
+        match p.map_event(serde_json::json!({ "event": "end-file", "reason": "error" })) {
+            Some(PlayerEvent::Error(msg)) => {
+                assert!(msg.contains("unknown"), "{msg}")
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
 }

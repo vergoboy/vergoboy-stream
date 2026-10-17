@@ -145,3 +145,95 @@ pub trait PlayerPort {
     /// for the first one. Returns an empty vec on timeout.
     fn poll_events(&mut self, timeout: Duration) -> Vec<PlayerEvent>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The profiles are the product decision (how much RAM/bandwidth a viewer
+    /// spends) and mpv receives them verbatim — so pin every number. A profile
+    /// that silently drifts is a metered user's data plan.
+    #[test]
+    fn cache_profiles_are_exact_property_maps() {
+        assert_eq!(
+            CacheProfile::Normal.properties(),
+            vec![
+                ("demuxer-max-bytes", json!(150 * 1024 * 1024)),
+                ("demuxer-readahead-secs", json!(1.0)),
+                ("demuxer-max-back-bytes", json!(50 * 1024 * 1024)),
+                ("hr-seek", json!("yes")),
+            ]
+        );
+        assert_eq!(
+            CacheProfile::DataSaver.properties(),
+            vec![
+                ("demuxer-max-bytes", json!(20 * 1024 * 1024)),
+                ("demuxer-readahead-secs", json!(0.5)),
+                ("demuxer-max-back-bytes", json!(10 * 1024 * 1024)),
+                ("hr-seek", json!("no")),
+            ]
+        );
+        assert_eq!(
+            CacheProfile::Metered.properties(),
+            vec![
+                ("demuxer-max-bytes", json!(8 * 1024 * 1024)),
+                ("demuxer-readahead-secs", json!(0.2)),
+                ("demuxer-max-back-bytes", json!(4 * 1024 * 1024)),
+                ("hr-seek", json!("no")),
+            ]
+        );
+        // The ordering is constrained by design: only the constrained profiles
+        // give up exact seeking.
+        for (i, profile) in [CacheProfile::Normal, CacheProfile::DataSaver, CacheProfile::Metered]
+            .into_iter()
+            .enumerate()
+        {
+            let props = profile.properties();
+            assert_eq!(props.len(), 4, "profile {i} changed shape");
+            assert_eq!(props[0].0, "demuxer-max-bytes");
+            assert_eq!(props[3].0, "hr-seek");
+        }
+    }
+
+    /// These strings reach logs and the WebView's error report, so they are a
+    /// contract, not a formatting detail.
+    #[test]
+    fn event_displays_are_stable() {
+        assert_eq!(PlayerEvent::Ready.to_string(), "ready");
+        assert_eq!(PlayerEvent::Buffering(true).to_string(), "buffering(true)");
+        assert_eq!(PlayerEvent::Buffering(false).to_string(), "buffering(false)");
+        assert_eq!(PlayerEvent::Ended.to_string(), "ended");
+        assert_eq!(PlayerEvent::Error("boom".into()).to_string(), "error: boom");
+        assert_eq!(PlayerEvent::UserSeek { pos: 12.5 }.to_string(), "user-seek(12.5)");
+        assert_eq!(PlayerEvent::UserPause { paused: true }.to_string(), "user-pause(true)");
+    }
+
+    #[test]
+    fn error_displays_are_stable() {
+        assert_eq!(
+            PlayerError::NotRunning("gone".into()).to_string(),
+            "player not running: gone"
+        );
+        assert_eq!(
+            PlayerError::Timeout("slow".into()).to_string(),
+            "player timed out: slow"
+        );
+        assert_eq!(
+            PlayerError::Rejected { command: "seek".into(), detail: "bad".into() }.to_string(),
+            "player rejected seek: bad"
+        );
+        assert_eq!(
+            PlayerError::Protocol("dropped".into()).to_string(),
+            "player protocol error: dropped"
+        );
+        assert_eq!(
+            PlayerError::Unsupported("nope".into()).to_string(),
+            "unsupported: nope"
+        );
+        // Callers above the crate rely on this bound (the command layer maps it
+        // into its own error type).
+        fn is_std_error<E: std::error::Error>() {}
+        is_std_error::<PlayerError>();
+    }
+}

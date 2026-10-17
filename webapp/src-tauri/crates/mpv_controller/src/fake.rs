@@ -303,4 +303,144 @@ mod tests {
         f.set_cache_profile(CacheProfile::Metered).unwrap();
         assert_eq!(f.profile, CacheProfile::Metered);
     }
+
+    #[test]
+    fn every_port_call_before_load_is_rejected() {
+        // The port contract: a player with nothing loaded refuses work rather
+        // than pretending. `load` is the only exception, and `poll_events`
+        // only drains whatever is already queued.
+        let mut f = FakePlayer::default();
+        assert!(matches!(f.seek(1.0), Err(PlayerError::NotRunning(_))));
+        assert!(matches!(f.set_paused(false), Err(PlayerError::NotRunning(_))));
+        assert!(matches!(f.set_rate(1.5), Err(PlayerError::NotRunning(_))));
+        assert!(matches!(f.set_aid(Some(2)), Err(PlayerError::NotRunning(_))));
+        assert!(matches!(f.set_sid(None), Err(PlayerError::NotRunning(_))));
+        assert!(matches!(f.audio_add("a.mp3", "t"), Err(PlayerError::NotRunning(_))));
+        assert!(matches!(
+            f.set_cache_profile(CacheProfile::Metered),
+            Err(PlayerError::NotRunning(_))
+        ));
+        assert!(matches!(f.get_pos(), Err(PlayerError::NotRunning(_))));
+        assert_eq!(f.poll_events(Duration::ZERO), vec![]);
+        assert!(f.load("m", 0.0, true).is_ok(), "load is allowed on a fresh player");
+    }
+
+    #[test]
+    fn ready_is_delivered_exactly_once_per_load() {
+        let mut f = FakePlayer::new(5.0);
+        f.load("m", 0.0, false).unwrap();
+        assert_eq!(f.poll_events(Duration::ZERO), vec![PlayerEvent::Ready]);
+        assert_eq!(f.poll_events(Duration::ZERO), vec![], "Ready is not re-delivered");
+        // A fresh load arms it again — the restart path depends on this.
+        f.load("m2", 1.0, true).unwrap();
+        assert_eq!(f.poll_events(Duration::ZERO), vec![PlayerEvent::Ready]);
+    }
+
+    #[test]
+    fn emit_queues_events_in_order_without_a_load() {
+        let mut f = FakePlayer::default();
+        f.emit(PlayerEvent::Error("a".into()));
+        f.emit(PlayerEvent::Ended);
+        assert_eq!(
+            f.poll_events(Duration::ZERO),
+            vec![PlayerEvent::Error("a".into()), PlayerEvent::Ended]
+        );
+    }
+
+    #[test]
+    fn seek_clamps_to_the_file_and_re_arms_playback() {
+        let mut f = FakePlayer::new(10.0);
+        f.load("m", 0.0, false).unwrap();
+        let _ = f.poll_events(Duration::ZERO);
+
+        f.tick(20.0); // runs off the end
+        assert_eq!(f.poll_events(Duration::ZERO), vec![PlayerEvent::Ended]);
+        assert_eq!(f.get_pos().unwrap(), 10.0);
+
+        f.seek(-5.0).unwrap();
+        assert_eq!(f.get_pos().unwrap(), 0.0, "negative seeks clamp to 0");
+        f.seek(999.0).unwrap();
+        assert_eq!(f.get_pos().unwrap(), 10.0, "seeks past the end clamp to duration");
+
+        // Seeking back from EOF makes playback live again: time moves and a
+        // second Ended is legitimate.
+        f.seek(3.0).unwrap();
+        assert_eq!(f.get_pos().unwrap(), 3.0);
+        f.tick(20.0);
+        assert_eq!(f.poll_events(Duration::ZERO), vec![PlayerEvent::Ended]);
+    }
+
+    #[test]
+    fn tick_does_nothing_until_a_file_is_loaded() {
+        let mut f = FakePlayer::new(4.0);
+        f.paused = false; // playing, but with nothing loaded: time still must not move
+        f.tick(2.0);
+        assert_eq!(f.pos, 0.0, "unloaded players do not advance");
+        assert_eq!(f.poll_events(Duration::ZERO), vec![]);
+    }
+
+    /// A stall keeps running while paused: it models a network condition, not
+    /// playback, and the buffering edge must still be reported.
+    #[test]
+    fn a_stall_completes_even_while_paused() {
+        let mut f = FakePlayer::new(60.0);
+        f.load("m", 0.0, true).unwrap(); // paused
+        f.stall_for(1.0);
+        f.tick(1.0);
+        assert_eq!(
+            f.poll_events(Duration::ZERO),
+            vec![
+                PlayerEvent::Ready,
+                PlayerEvent::Buffering(true),
+                PlayerEvent::Buffering(false),
+            ]
+        );
+        assert_eq!(f.pos, 0.0, "paused: the stall must not move time");
+    }
+
+    /// `calls` is what later phases assert call *order* on, so its exact shape
+    /// is a contract.
+    #[test]
+    fn the_call_log_and_audio_tracks_record_what_was_asked() {
+        let mut f = FakePlayer::new(10.0);
+        f.load("m", 1.0, true).unwrap();
+        f.audio_add("a.mp3", "Commentary").unwrap();
+        f.audio_add("b.mp3", "Dub").unwrap();
+        f.set_aid(Some(3)).unwrap();
+        f.set_sid(None).unwrap();
+
+        assert_eq!(
+            f.audio_tracks,
+            vec![
+                ("a.mp3".to_string(), "Commentary".to_string()),
+                ("b.mp3".to_string(), "Dub".to_string()),
+            ]
+        );
+        assert_eq!(f.aid, Some(3));
+        assert_eq!(f.sid, None);
+        assert_eq!(
+            f.calls,
+            vec![
+                "load m @1 paused=true".to_string(),
+                "audio_add a.mp3".to_string(),
+                "audio_add b.mp3".to_string(),
+                "set_aid Some(3)".to_string(),
+                "set_sid None".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_fake_starts_paused_at_zero_with_a_default_duration() {
+        let f = FakePlayer::default();
+        assert_eq!(f.duration, 60.0);
+        assert_eq!(f.pos, 0.0);
+        assert!(f.paused);
+        assert_eq!(f.rate, 1.0);
+        assert_eq!(f.aid, None);
+        assert_eq!(f.sid, None);
+        assert_eq!(f.profile, CacheProfile::Normal);
+        assert!(f.loaded.is_none());
+        assert_eq!(f.latency, Duration::ZERO);
+    }
 }

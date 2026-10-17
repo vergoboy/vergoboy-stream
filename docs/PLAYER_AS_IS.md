@@ -211,6 +211,67 @@ process-only, no `libmpv`, GPL aggregation reasoning, spike table.
 `docs/DEPENDENCIES.md` already carries the mpv entry. R7 is satisfied at
 S0; S7 only has to keep it true.
 
+### 1.9 Test coverage map — what S0's 21 pinned, what S1 added
+
+S1's method is characterization first: pin the existing behaviour, then extend.
+This is the inventory the extension commits are measured against.
+
+**S0's 18 unit tests, by module (port.rs had none at all):**
+
+| Module | Tests | What they pin |
+| --- | --- | --- |
+| `mpv.rs` | 6 | Every `map_event` decision against the *measured* mpv v0.41 wire: on-subscription property emissions are consumed, our own `pause` write is not a `UserPause`, the `seek` event carries no `reason` (own-seek counter), buffering edges flow through, the duplicate EOF signal is deduped, `end-file` reasons map to `Error`/`None`/`Ready` |
+| `fake.rs` | 7 | Virtual time only moves when ticked and not paused; stalls bracket with `Buffering(true/false)`; `Ended` fires once; `fail_next` injects one `Rejected` per call; `set_rate` is refused before `load`; `CacheProfile` is stored; `load` reports `Ready` and honours start/pause |
+| `ipc.rs` | 2 | Out-of-order replies are correlated by `request_id`; a missing reply is a `Timeout`, not a hang |
+| `process.rs` | 3 | `MpvOptions::args()` builds exactly the flags the spike proved; `locate_mpv` returns a real path or `None`; dropping `MpvProcess` kills **and reaps** the child |
+
+**S0's 3 real-mpv integration tests:** a real file under local controls
+(load/seek/pause/rate/volume/sub/aid/sid); crash → restart → give-up with the
+process table asserted empty afterwards; buffering edges on a throttled HTTP
+source. All three self-skip when mpv is absent.
+
+**Gaps that S1's characterization commit fills (45 unit + 3 integration = 48):**
+
+- **`port.rs` had zero tests.** Now pins every `CacheProfile::properties()`
+  value (150/50/1.0/yes, 20/10/0.5/no, 8/4/0.2/no) and the `Display` strings
+  of `PlayerEvent`/`PlayerError`, which reach logs and the WebView.
+- **`fake.rs`:** all 8 pre-load calls (not just `set_rate`), `Ready` delivered
+  exactly once *per load* (re-armed by a second `load` — the restart path
+  relies on it), `emit()` ordering, seek clamping to `[0, duration]` and EOF
+  re-arm, tick-while-unloaded, stall-while-paused, the exact `calls` log
+  format later phases assert order on, and `Default`.
+- **`ipc.rs`:** malformed lines skipped without disturbing neighbours, events
+  routed to the queue in order, a *dropped socket* releasing waiters as
+  `NotRunning` (as opposed to waiting out the 3 s timeout) and marking the
+  client closed, a closed client refusing further work, an error reply becoming
+  `Rejected{command, detail}`, request ids starting at 1 and increasing,
+  `connect()` giving up as `Protocol` when the socket never appears.
+- **`process.rs`:** a missing binary is `NotRunning`, not a panic; `spawn`
+  removes a stale socket; `wait_for_exit` returns `Some` on exit and `None` on
+  timeout; `kill()` after the child is already reaped is a no-op that still
+  clears the socket path; `STREAM_MPV_BIN` precedence, blank-value fallback and
+  missing-file passthrough (behind an `ENV_LOCK`, because the variable is
+  process-global and cargo runs tests on parallel threads).
+- **`mpv.rs`:** the observed set is exactly `{pause, paused-for-cache,
+  eof-reached}` with `max_restarts = 3`, and everything unobserved
+  (`time-pos`, `volume`, `mute`, `aid`, `sid`, `fullscreen`,
+  `demuxer-cache-duration`, `track-list`, `speed`, `duration`) returns `None` —
+  this last test is the deliberate record of what the S1 extension changes, and
+  is rewritten in the same commit that changes it.
+
+**Still uncovered after this commit (each is scheduled):**
+
+- `FakePlayer.latency` is a documented field **nothing reads** — there is no
+  behaviour to pin, so no test exists. S1's extension makes it real.
+- Crash/restart vocabulary: today only the real-mpv crash test, asserting
+  `Error("attempt N")` strings. The extension converts it to `ProcessCrashed`
+  and adds state restore (commits 5–7).
+- The Windows named-pipe transport: the `cfg(not(unix))` stub returns
+  `Unsupported` and nothing tests it. Added behind `cfg` in S1, checked by a
+  cross `cargo check`.
+- `apply_profile`, `respawn` bookkeeping and `poll_events`' blocking loop are
+  only exercised indirectly through the real-mpv happy path.
+
 ---
 
 ## 2. Every feature `Player.tsx` provides today
