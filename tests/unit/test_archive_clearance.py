@@ -28,10 +28,10 @@ def walled_with_clearance(tmp_path, *, valid_clearance="tok-1"):
 
 def test_wall_with_working_sidecar_logs_in_end_to_end(tmp_path, monkeypatch):
     manager, site = walled_with_clearance(tmp_path)
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str]] = []
 
-    def fake_fetch(solver_url: str, target_url: str):
-        calls.append((solver_url, target_url))
+    def fake_fetch(solver_url: str, target_url: str, proxy: str):
+        calls.append((solver_url, target_url, proxy))
         return {"cf_clearance": "tok-1"}, BROWSER_UA
 
     monkeypatch.setattr(archive_auth, "fetch_clearance", fake_fetch)
@@ -39,7 +39,9 @@ def test_wall_with_working_sidecar_logs_in_end_to_end(tmp_path, monkeypatch):
     assert manager.state is AuthState.AUTHENTICATED
     assert manager.last_check_error is None
     assert site.posts == 1                                  # it really logged in behind the wall
-    assert calls == [(SOLVER_URL, ACCOUNT_URL)]             # one round-trip, against the check URL
+    # One round-trip, against the check URL, carrying the archive proxy the
+    # sidecar's own browser must use.
+    assert calls == [(SOLVER_URL, ACCOUNT_URL, "http://127.0.0.1:10808")]
     # The login POST carried the adopted clearance together with its bound UA.
     posts = [seen for seen in site.requests if seen["method"] == "POST"]
     assert posts
@@ -60,10 +62,10 @@ def test_solver_failure_degrades_to_site_challenge(tmp_path, monkeypatch):
 def test_gate_off_never_calls_the_sidecar(tmp_path, monkeypatch):
     site = FakeDigimoviez(cloudflare_wall=True)
     manager, _ = make(tmp_path, site)                       # solver_url unset = disabled
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str]] = []
 
-    def fake_fetch(solver_url: str, target_url: str):
-        calls.append((solver_url, target_url))
+    def fake_fetch(solver_url: str, target_url: str, proxy: str):
+        calls.append((solver_url, target_url, proxy))
         return {"cf_clearance": "tok"}, BROWSER_UA
 
     monkeypatch.setattr(archive_auth, "fetch_clearance", fake_fetch)

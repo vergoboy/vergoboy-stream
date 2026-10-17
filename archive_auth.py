@@ -356,9 +356,12 @@ class ArchiveAuthManager:
 
         The cleared browser hands over its ``cf_clearance`` cookies together
         with the User-Agent they are bound to; both are adopted atomically so
-        no request can go out with a mismatched pair.
+        no request can go out with a mismatched pair.  The archive proxy is
+        handed to the sidecar because it is the sidecar's browser, not this
+        process, that has to reach the walled site.
         """
-        result = fetch_clearance(self.settings.solver_url, self.settings.check_url)
+        result = fetch_clearance(self.settings.solver_url, self.settings.check_url,
+                                 self.settings.http_proxy)
         if result is None:
             self._log("AUTH_CLEARANCE_FAILED")
             return False
