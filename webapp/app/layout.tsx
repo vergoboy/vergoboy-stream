@@ -2,10 +2,11 @@ import type { Metadata, Viewport } from "next";
 import { vazirmatn, jetbrainsMono, lalezar } from "./fonts";
 import ClientErrorReporter from "@/components/ClientErrorReporter";
 import "./globals.css";
+import { BASE_PATH } from "@/lib/config";
 
 // metadata.icons doesn't auto-prefix basePath for a plain string path, so we
-// compute the same basePath next.config.ts uses and prepend it ourselves.
-const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
+// prepend the app's mount point ourselves.
+const basePath = BASE_PATH;
 
 export const metadata: Metadata = {
   title: "تماشای مشترک | vergoboy.ir",

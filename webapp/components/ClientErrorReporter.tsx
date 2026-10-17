@@ -10,7 +10,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { apiUrl } from "@/lib/config";
+import { apiUrl, API_PREFIX } from "@/lib/config";
 
 // Keep in sync with MAX_FIELD in app_logging.py; the server truncates too, this
 // just avoids shipping a megabyte of stack over the wire.
@@ -50,7 +50,7 @@ function describe(value: unknown): string {
  */
 async function send(report: ClientReport): Promise<void> {
   try {
-    await fetch(apiUrl("/stream/api/log/client"), {
+    await fetch(apiUrl(`${API_PREFIX}/log/client`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // `keepalive` so a report issued while the page is unloading still lands.

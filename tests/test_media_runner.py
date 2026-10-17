@@ -33,6 +33,7 @@ from media_pipeline.runner import (
     RunnerConfig,
     build_fallback_chain,
     cleanup_orphaned_partials,
+    expose_partial_output,
     parse_progress_line,
 )
 
@@ -745,6 +746,69 @@ class RealEncode(unittest.TestCase):
         self.assertNotIn(self.tmp, result.error.user_message,
                          "a filesystem path must never reach the client")
         self.assertFalse(os.path.exists(out_dir))
+
+
+class ProgressiveOutputTests(unittest.TestCase):
+    """``final_dir -> final_dir.partial``: servable output during the encode.
+
+    The runner builds into ``.partial`` and promotes only on success, but the
+    app marks an item playable as soon as enough of the timeline is encoded
+    (``on_ready``) — progressive playback must read the growing playlists
+    *while* ffmpeg still runs.  Nginx serves the final path straight from
+    disk, so the final path has to resolve into the partial directory until
+    the atomic promote replaces it.  Regression pin for the /w2g deploy where
+    every early-playback fetch 404'd on the empty final dir.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="w2g-expose-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.final = os.path.join(self.tmp, "720p")
+        self.partial = self.final + PARTIAL_SUFFIX
+
+    def test_missing_final_dir_becomes_symlink_to_partial(self):
+        expose_partial_output(self.final)
+        self.assertTrue(os.path.islink(self.final))
+        self.assertEqual(os.readlink(self.final), self.partial)
+        self.assertFalse(os.path.exists(self.final), "dangling until the runner creates .partial")
+
+    def test_partial_output_is_readable_through_the_final_path(self):
+        os.makedirs(self.partial)
+        with open(os.path.join(self.partial, "index.m3u8"), "w") as fh:
+            fh.write("#EXTM3U\n")
+        expose_partial_output(self.final)
+        self.assertTrue(os.path.isfile(os.path.join(self.final, "index.m3u8")))
+
+    def test_existing_symlink_is_reused(self):
+        expose_partial_output(self.final)
+        expose_partial_output(self.final)  # a retry after a failed encode
+        self.assertTrue(os.path.islink(self.final))
+        self.assertEqual(os.readlink(self.final), self.partial)
+
+    def test_existing_real_dir_is_left_alone(self):
+        os.makedirs(self.final)
+        marker = os.path.join(self.final, "index.m3u8")
+        with open(marker, "w") as fh:
+            fh.write("old encode\n")
+        expose_partial_output(self.final)
+        self.assertFalse(os.path.islink(self.final))
+        with open(marker) as fh:  # re-encode: old output stays servable
+            self.assertEqual(fh.read(), "old encode\n")
+
+    def test_promote_replaces_the_progressive_symlink(self):
+        os.makedirs(self.partial)
+        with open(os.path.join(self.partial, "index.m3u8"), "w") as fh:
+            fh.write("#EXTM3U\nfresh\n")
+        expose_partial_output(self.final)
+        runner = EncodeRunner(breaker=HwCircuitBreaker())
+        self.assertTrue(runner._promote(self.partial, self.final))
+        self.assertFalse(os.path.islink(self.final))
+        self.assertTrue(os.path.isdir(self.final))
+        self.assertFalse(os.path.exists(self.partial))
+        self.assertFalse(os.path.exists(self.final + ".old"),
+                         "the symlink must not be left behind as .old cruft")
+        with open(os.path.join(self.final, "index.m3u8")) as fh:
+            self.assertIn("fresh", fh.read())
 
 
 if __name__ == "__main__":

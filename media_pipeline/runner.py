@@ -392,6 +392,32 @@ def _partial_path(output_dir: str) -> str:
     return output_dir + PARTIAL_SUFFIX if output_dir else ""
 
 
+def expose_partial_output(final_dir: str) -> None:
+    """Make an in-progress encode servable at its final path.
+
+    The runner builds into ``<final_dir>.partial`` and renames it into place
+    only on success, but the app marks an item playable as soon as enough of
+    the timeline is encoded (``on_ready``) — the growing playlists must be
+    readable *during* the encode.  Nginx serves the final path straight from
+    disk, so when no finished output exists yet, a symlink
+    ``final_dir -> final_dir.partial`` exposes the partial output at the URL
+    the player already uses; ``_promote`` replaces the symlink with the real
+    directory at completion.  A pre-existing real directory (re-encode of a
+    finished item) is left alone: the old output stays servable until the
+    new one is promoted over it.  A leftover symlink from a failed attempt
+    is reused — its target is recreated by the next run.
+    """
+    if not final_dir:
+        return
+    if os.path.islink(final_dir):
+        if os.readlink(final_dir) == final_dir + PARTIAL_SUFFIX:
+            return
+        os.unlink(final_dir)  # unexpected target: replace, never chase it
+    elif os.path.exists(final_dir):
+        return
+    os.symlink(final_dir + PARTIAL_SUFFIX, final_dir)
+
+
 # ── the runner ───────────────────────────────────────────────────────────────
 
 
@@ -768,6 +794,11 @@ class EncodeRunner:
     def _promote(self, partial_dir: str, final_dir: str) -> bool:
         """Atomically move a finished partial directory into place."""
         try:
+            if os.path.islink(final_dir):
+                # The progressive-playback symlink: dropping the link is a
+                # symlink-safe stand-in for the .old dance (rmtree refuses
+                # symlinks, and the link is not a directory anyway).
+                os.unlink(final_dir)
             if os.path.exists(final_dir):
                 doomed = final_dir + ".old"
                 shutil.rmtree(doomed, ignore_errors=True)

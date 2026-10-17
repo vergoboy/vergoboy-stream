@@ -393,9 +393,10 @@ def live_server(request):
 
     yield {
         "url": f"http://127.0.0.1:{port}",
-        # The app mounts Socket.IO at "stream/socket.io", not the default
-        # "/socket.io"; clients must be told or the handshake 404s.
-        "socketio_path": "stream/socket.io",
+        # The app mounts Socket.IO under its instance prefix (historically
+        # "stream/socket.io", the second instance "w2g/socket.io"), not the
+        # default "/socket.io"; clients must be told or the handshake 404s.
+        "socketio_path": f"{config_mod.Config.BASE_PATH}/socket.io".lstrip("/"),
         "module": app_module,
         "db": dbmod,
         "client": socketio_client,

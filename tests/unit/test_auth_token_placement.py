@@ -10,11 +10,12 @@ from __future__ import annotations
 import pytest
 
 import app
+from config import Config
 
 
 def _query_context(token: str):
     return app.app.test_request_context(
-        "/stream/api/something", query_string={"token": token, "room": "X"},
+        f"{Config.BASE_PATH}/api/something", query_string={"token": token, "room": "X"},
     )
 
 

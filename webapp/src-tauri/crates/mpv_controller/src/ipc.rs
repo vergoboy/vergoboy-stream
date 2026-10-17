@@ -8,7 +8,7 @@
 //! that belongs to `mpv.rs`.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -21,12 +21,25 @@ type Json = serde_json::Value;
 
 const EVENT_QUEUE_LIMIT: usize = 512;
 
+/// The write half of the transport, the only platform-specific piece: a unix
+/// socket on unix, mpv's named pipe on Windows. Both satisfy the two things
+/// the client needs of a writer — `Write` and `try_clone`. The read half only
+/// needs `Read`, so [`reader_loop`] is generic over it.
 #[cfg(unix)]
+type IpcWriter = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type IpcWriter = std::fs::File;
+
+/// Present on every platform that has a transport. Elsewhere the stub at the
+/// bottom of this file takes its place, so the crate still compiles and
+/// reports the gap rather than pretending.
+#[cfg(any(unix, windows))]
 pub struct RpcClient {
-    writer: Mutex<std::os::unix::net::UnixStream>,
+    writer: Mutex<IpcWriter>,
     inner: Arc<Inner>,
 }
 
+#[cfg(any(unix, windows))]
 struct Inner {
     /// `request_id` → the caller waiting for that reply.
     pending: Mutex<HashMap<i64, SyncSender<Json>>>,
@@ -36,10 +49,10 @@ struct Inner {
     closed: AtomicBool,
 }
 
+/// Connect to an already-listening IPC socket, waiting up to `timeout` for it
+/// to appear (mpv creates it asynchronously after spawn).
 #[cfg(unix)]
 impl RpcClient {
-    /// Connect to an already-listening IPC socket, waiting up to `timeout` for
-    /// it to appear (mpv creates it asynchronously after spawn).
     pub fn connect(path: &Path, timeout: Duration) -> Result<Arc<Self>, PlayerError> {
         let deadline = Instant::now() + timeout;
         let stream = loop {
@@ -58,7 +71,50 @@ impl RpcClient {
                 }
             }
         };
+        Self::from_stream(stream, &path)
+    }
+}
 
+/// Windows transport: mpv's IPC is a named pipe, opened with
+/// `std::fs::OpenOptions` (`read + write`), which is the one way `std` can
+/// open `\\.\pipe\…` — no extra crate, no `unsafe`. The returned handle is a
+/// plain `File`, so the reader thread and the client are the same code as on
+/// unix.
+#[cfg(windows)]
+impl RpcClient {
+    pub fn connect(path: &Path, timeout: Duration) -> Result<Arc<Self>, PlayerError> {
+        let deadline = Instant::now() + timeout;
+        let file = loop {
+            match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+                Ok(f) => break f,
+                Err(e) if retryable_pipe_error(&e) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
+                Err(e) => {
+                    return Err(PlayerError::Protocol(format!(
+                        "cannot connect to {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        };
+        Self::from_stream(file, &path)
+    }
+}
+
+/// mpv creates the pipe asynchronously after spawn, and a busy pipe must be
+/// waited out rather than treated as fatal: retry on "not there yet"
+/// (`NotFound`) and on `ERROR_PIPE_BUSY` (231).
+#[cfg(windows)]
+fn retryable_pipe_error(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::NotFound) || e.raw_os_error() == Some(231)
+}
+
+#[cfg(any(unix, windows))]
+impl RpcClient {
+    /// Shared by both transports: clone the read half, start the reader
+    /// thread, and keep the write half behind a mutex.
+    fn from_stream(stream: IpcWriter, path: &Path) -> Result<Arc<Self>, PlayerError> {
         let inner = Arc::new(Inner {
             pending: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
@@ -68,7 +124,7 @@ impl RpcClient {
         });
 
         let reader = stream.try_clone().map_err(|e| {
-            PlayerError::Protocol(format!("clone IPC stream: {e}"))
+            PlayerError::Protocol(format!("clone IPC stream for {}: {e}", path.display()))
         })?;
         std::thread::Builder::new()
             .name("mpv-ipc-reader".into())
@@ -172,8 +228,10 @@ impl RpcClient {
 /// Routes every line mpv sends: replies to their waiting caller, everything
 /// with an `event` field to the queue. Ends only on EOF/error, then releases
 /// every pending caller (they see `NotRunning`) and wakes event waiters.
-#[cfg(unix)]
-fn reader_loop(stream: std::os::unix::net::UnixStream, inner: Arc<Inner>) {
+///
+/// Generic over the read half so unix sockets and Windows pipes share it.
+#[cfg(any(unix, windows))]
+fn reader_loop(stream: impl Read, inner: Arc<Inner>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
@@ -209,16 +267,16 @@ fn reader_loop(stream: std::os::unix::net::UnixStream, inner: Arc<Inner>) {
     inner.cv.notify_all();
 }
 
-/// Windows transport is not implemented yet: mpv's IPC there is a named pipe
-/// (`\\.\pipe\mpv-...`), which std cannot open. The surface exists so the
-/// rest of the crate compiles and reports the gap instead of pretending.
-#[cfg(not(unix))]
+/// Neither unix nor Windows: no IPC transport exists, so the surface is a stub
+/// that reports the gap instead of pretending. (On Windows the real named-pipe
+/// transport above is used.)
+#[cfg(not(any(unix, windows)))]
 pub struct RpcClient;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl RpcClient {
     fn unsupported() -> PlayerError {
-        PlayerError::Unsupported("mpv IPC named-pipe transport is not implemented".into())
+        PlayerError::Unsupported("mpv IPC is not supported on this platform".into())
     }
     pub fn connect(_p: &Path, _t: Duration) -> Result<Arc<Self>, PlayerError> {
         Err(Self::unsupported())
@@ -334,5 +392,131 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PlayerError::Timeout(_)), "got {err:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// mpv's stream is newline-delimited JSON, and anything unparseable must be
+    /// skipped without disturbing the requests and events around it.
+    #[test]
+    fn malformed_lines_are_skipped_and_events_are_routed_to_the_queue() {
+        let path = scripted_server("routing", |cmd, out| {
+            let id = cmd["request_id"].as_i64().unwrap();
+            let _ = writeln!(out, "this is not json");
+            let _ = writeln!(out, "{{ truncated");
+            let _ = writeln!(out, "{}", serde_json::json!({"event": "file-loaded"}));
+            let _ = writeln!(out, "{}", serde_json::json!({"event": "end-file", "reason": "eof"}));
+            let _ = writeln!(out, "{}", serde_json::json!({"error":"success","request_id":id,"data":7}));
+            let _ = out.flush();
+        });
+        let rpc = RpcClient::connect(&path, Duration::from_secs(5)).unwrap();
+
+        let reply = rpc
+            .request(serde_json::json!(["get_property", "x"]), Duration::from_secs(5))
+            .expect("the reply after the garbage");
+        assert_eq!(reply["data"], 7);
+
+        // Both events reached the queue, in order, and nothing else did.
+        let first = rpc.wait_event(Duration::from_millis(500)).expect("first event");
+        assert_eq!(first["event"], "file-loaded");
+        let second = rpc.wait_event(Duration::from_millis(500)).expect("second event");
+        assert_eq!(second["event"], "end-file");
+        assert!(rpc.wait_event(Duration::from_millis(50)).is_none(), "no phantom events");
+        assert!(!rpc.is_closed());
+    }
+
+    /// The socket dropping is the interesting failure: a caller already waiting
+    /// must be released (as `NotRunning`), not left until its timeout, and the
+    /// client must report itself closed so `ensure_alive` can restart mpv.
+    #[test]
+    fn a_dropped_connection_releases_waiters_and_marks_the_client_closed() {
+        let path = sock_path("drop");
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind test socket");
+        let server = std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                // Read the request, then close without answering.
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                assert!(line.contains("request_id"), "server never saw the request: {line:?}");
+                drop(reader); // EOF for the client's reader thread
+            }
+        });
+
+        let rpc = RpcClient::connect(&path, Duration::from_secs(5)).unwrap();
+        let started = Instant::now();
+        let err = rpc
+            .request(serde_json::json!(["get_property", "time-pos"]), Duration::from_secs(5))
+            .unwrap_err();
+        assert!(matches!(err, PlayerError::NotRunning(_)), "got {err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a dropped socket must not be waited out as a timeout"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !rpc.is_closed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(rpc.is_closed(), "EOF must mark the client closed");
+
+        // A closed client refuses further work instead of writing into a dead
+        // socket.
+        let err = rpc
+            .request(serde_json::json!(["get_property", "time-pos"]), Duration::from_millis(100))
+            .unwrap_err();
+        assert!(matches!(err, PlayerError::NotRunning(_)), "got {err:?}");
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_error_reply_becomes_rejected_with_the_command_in_it() {
+        let path = scripted_server("rejected", |cmd, out| {
+            let id = cmd["request_id"].as_i64().unwrap();
+            let reply = serde_json::json!({"error":"property not found","request_id":id});
+            let _ = writeln!(out, "{reply}");
+            let _ = out.flush();
+        });
+        let rpc = RpcClient::connect(&path, Duration::from_secs(5)).unwrap();
+        let err = rpc
+            .request(serde_json::json!(["set_property", "nope", 1]), Duration::from_secs(5))
+            .unwrap_err();
+        match err {
+            PlayerError::Rejected { command, detail } => {
+                assert!(command.contains("set_property"), "{command}");
+                assert_eq!(detail, "property not found");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requests_are_numbered_from_one_and_increase() {
+        let path = scripted_server("ids", |cmd, out| {
+            let id = cmd["request_id"].as_i64().unwrap();
+            let _ = writeln!(out, "{}", serde_json::json!({"error":"success","request_id":id}));
+            let _ = out.flush();
+        });
+        let rpc = RpcClient::connect(&path, Duration::from_secs(5)).unwrap();
+        let a = rpc.request(serde_json::json!(["x"]), Duration::from_secs(5)).unwrap();
+        let b = rpc.request(serde_json::json!(["y"]), Duration::from_secs(5)).unwrap();
+        let (a, b) = (a["request_id"].as_i64().unwrap(), b["request_id"].as_i64().unwrap());
+        assert_eq!(a, 1, "ids start at 1");
+        assert_eq!(b, a + 1, "and increase by one");
+    }
+
+    /// Connecting before mpv has created the socket: the client waits for it,
+    /// and reports a protocol error rather than hanging once the wait is spent.
+    #[test]
+    fn connect_waits_for_the_socket_then_fails_as_a_protocol_error() {
+        let path = sock_path("missing");
+        let _ = std::fs::remove_file(&path);
+        let started = Instant::now();
+        let err = match RpcClient::connect(&path, Duration::from_millis(300)) {
+            Ok(_) => panic!("connect must fail when the socket never appears"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, PlayerError::Protocol(_)), "got {err:?}");
+        assert!(started.elapsed() < Duration::from_secs(3), "must give up quickly");
     }
 }

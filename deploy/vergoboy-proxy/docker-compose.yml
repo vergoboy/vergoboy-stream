@@ -1,0 +1,38 @@
+# Userspace VPN proxy for the vergoboy apps (archive scraper + yt-dlp).
+#
+# Unlike noisy there is no TUN and no shared netns: the apps opt in through
+# STREAM_ARCHIVE_HTTP_PROXY / STREAM_YTDLP_PROXY, so the tunnel only ever
+# carries what they send to it and host routing is untouched.  Loopback-only
+# publish is defence in depth -- even a config that listened on 0.0.0.0
+# would only be reachable through docker's 127.0.0.1 port mapping.
+#
+# Health is asserted by the exit-IP watchdog (vergoboy-proxy-watchdog.timer),
+# not by a container healthcheck: a wedged tunnel keeps answering and keeps
+# running, and only the exit IP proves it still carries traffic.
+
+name: vergoboy-proxy
+
+services:
+  vergoboy-proxy:
+    image: ghcr.io/sagernet/sing-box:v1.14.2
+    container_name: vergoboy-proxy
+    restart: unless-stopped
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+    volumes:
+      - ./sing-box.json:/etc/sing-box/config.json:ro
+    ports:
+      - "127.0.0.1:10808:10808"
+      - "127.0.0.1:10809:10809"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

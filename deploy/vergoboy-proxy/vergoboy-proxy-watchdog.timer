@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the vergoboy VPN proxy exit-IP watchdog every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

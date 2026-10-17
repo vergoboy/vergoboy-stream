@@ -14,13 +14,15 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mpv_controller::ipc::RpcClient;
 use mpv_controller::{
-    locate_mpv, CacheProfile, MpvOptions, MpvPlayer, PlayerEvent, PlayerPort,
+    locate_mpv, CacheProfile, MpvOptions, MpvPlayer, MpvProcess, PlayerError, PlayerEvent,
+    PlayerPort, SubStyle,
 };
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -44,6 +46,32 @@ fn start_player(tag: &str) -> MpvPlayer {
     let mut opts = MpvOptions::new(sock_path(tag));
     opts.headless = true;
     MpvPlayer::start(opts).expect("spawn mpv")
+}
+
+/// Like [`start_player`], but the caller owns the socket path — the process
+/// table checks below need it to find the mpv that belongs to *this* test.
+fn start_player_at(sock: &Path) -> MpvPlayer {
+    let mut opts = MpvOptions::new(sock.to_path_buf());
+    opts.headless = true;
+    MpvPlayer::start(opts).expect("spawn mpv")
+}
+
+/// The process-table half of the "nothing was left behind" evidence.
+///
+/// A *live* mpv keeps its full argv, which contains the unique
+/// `--input-ipc-server=<path>` this player passed, so it is findable by that
+/// path. A *zombie* would have no argv left (`ps` shows it as
+/// `Z [mpv] <defunct>`), so it is invisible here — that half is covered by
+/// `pid_alive`, which uses `kill -0` and therefore *does* see zombies. The two
+/// together say "gone from the process table", and this one is specific to
+/// this test rather than to any mpv on the box.
+fn ps_has_socket(sock: &Path) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-eo", "args"])
+        .output()
+        .expect("run ps");
+    let needle = sock.display().to_string();
+    String::from_utf8_lossy(&out.stdout).contains(&needle)
 }
 
 /// Poll `p`, appending everything to `seen`, until an event at index `>= from`
@@ -106,14 +134,18 @@ fn wait_pos(p: &mut MpvPlayer, pred: impl Fn(f64) -> bool, timeout: Duration) ->
     }
 }
 
-/// SIGKILL via the shell: `std` can only signal children, and this pid was
-/// deliberately made someone else's problem by the test.
-fn kill_hard(pid: u32) {
+/// `kill -<sig> pid` via the shell: `std` can only signal children, and this
+/// pid was deliberately made someone else's problem by the test.
+fn signal(pid: u32, sig: &str) {
     let st = std::process::Command::new("sh")
-        .args(["-c", &format!("kill -9 {pid}")])
+        .args(["-c", &format!("kill -{sig} {pid}")])
         .status()
         .expect("run kill");
-    assert!(st.success(), "kill -9 {pid} failed");
+    assert!(st.success(), "kill -{sig} {pid} failed");
+}
+
+fn kill_hard(pid: u32) {
+    signal(pid, "9");
 }
 
 /// `kill -0`: alive *or* a zombie — so asserting `false` proves the pid was
@@ -170,7 +202,8 @@ fn plays_a_real_file_with_local_controls() {
     let wav = dir.join("controls.wav");
     write_sine_wav(&wav, 30.0);
 
-    let mut p = start_player("controls");
+    let sock = sock_path("controls");
+    let mut p = start_player_at(&sock);
     let mut seen = Vec::new();
 
     // Load paused: Ready must arrive and the position must be at the start.
@@ -222,11 +255,15 @@ fn plays_a_real_file_with_local_controls() {
         .count();
     assert_eq!(ends, 1, "Ended exactly once per file, got {seen:?}");
 
-    // Shutdown: no zombie left behind.
+    // Shutdown: no zombie left behind, and no live mpv for this player either.
     let pid = p.pid().expect("pid before shutdown");
     p.shutdown();
     assert!(!p.is_running(), "shutdown must stop the player");
     assert!(!pid_alive(pid), "mpv pid {pid} must be reaped, not a zombie");
+    assert!(
+        !ps_has_socket(&sock),
+        "no mpv still running for this player's socket"
+    );
 
     drop(p);
     let _ = std::fs::remove_dir_all(&dir);
@@ -242,7 +279,8 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
     let wav = dir.join("crash.wav");
     write_sine_wav(&wav, 60.0); // long enough that EOF never interferes
 
-    let mut p = start_player("crash");
+    let sock = sock_path("crash");
+    let mut p = start_player_at(&sock);
     let mut seen = Vec::new();
 
     p.load(wav.to_str().unwrap(), 5.0, false).expect("load");
@@ -258,6 +296,10 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
     // the recovery will resume from.
     wait_pos(&mut p, |pos| pos > 5.3, Duration::from_secs(5)).expect("playing");
 
+    // Output state the restart has to carry across the crash.
+    p.set_volume(37).expect("volume");
+    p.set_mute(true).expect("mute");
+
     // Crash 1: the very next player call must recover on its own.
     let previous = p.pid().expect("pid");
     kill_hard(previous);
@@ -265,7 +307,7 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
         &mut p,
         &mut seen,
         0,
-        |e| matches!(e, PlayerEvent::Error(m) if m.contains("attempt 1")),
+        |e| matches!(e, PlayerEvent::ProcessCrashed { restarts: 1 }),
         Duration::from_secs(15),
     )
     .expect("restart reported");
@@ -284,6 +326,10 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
     // …resumed near where it was, not at the file's beginning.
     wait_pos(&mut p, |pos| (4.5..8.0).contains(&pos), Duration::from_secs(5))
         .expect("resumed near the pre-crash position");
+    // …and with the output state the user had, not mpv's defaults.
+    let st = p.get_state().expect("state after the restart");
+    assert_eq!(st.volume, 37, "volume must survive the restart");
+    assert!(st.mute, "mute must survive the restart");
 
     // Crashes 2 and 3 still recover.
     for attempt in 2..=3u32 {
@@ -293,7 +339,7 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
             &mut p,
             &mut seen,
             0,
-            |e| matches!(e, PlayerEvent::Error(m) if m.contains(&format!("attempt {attempt}"))),
+            |e| matches!(e, PlayerEvent::ProcessCrashed { restarts } if *restarts == attempt),
             Duration::from_secs(15),
         )
         .unwrap_or_else(|| panic!("restart attempt {attempt} reported"));
@@ -317,6 +363,10 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
     assert_eq!(p.restarts(), 3);
     assert!(!p.is_running());
     assert!(!pid_alive(last), "the last mpv was reaped by the fatal check");
+    assert!(
+        !ps_has_socket(&sock),
+        "the fatal give-up must leave no mpv running"
+    );
     assert!(
         p.poll_events(Duration::from_millis(250)).is_empty(),
         "the fatal error must be reported once, not repeated"
@@ -507,4 +557,271 @@ fn buffering_edges_appear_on_a_throttled_http_source() {
     drop(p);
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The controls S1 added, against a real mpv: output levels, a subtitle track,
+/// subtitle styling, and the `get_state` snapshot. The unit tests pin the
+/// *mapping* (command name, clamp, `None` = leave alone); this proves the
+/// names and flag spellings are the ones mpv v0.41 actually accepts, and that
+/// `sub-add … select` really produces a selected subtitle track.
+#[test]
+fn the_new_controls_and_state_snapshot_work_against_real_mpv() {
+    if locate_mpv().is_none() {
+        eprintln!("SKIP: mpv not installed");
+        return;
+    }
+    let dir = fixture_dir("newctl");
+    let wav = dir.join("newctl.wav");
+    write_sine_wav(&wav, 30.0);
+    let srt = dir.join("subs.srt");
+    std::fs::write(
+        &srt,
+        "1\n00:00:00,000 --> 00:00:05,000\nhello from the test\n",
+    )
+    .expect("write srt");
+
+    let sock = sock_path("newctl");
+    let mut p = start_player_at(&sock);
+    let mut seen = Vec::new();
+
+    p.load(wav.to_str().unwrap(), 3.0, true).expect("load");
+    wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::Ready),
+        Duration::from_secs(15),
+    )
+    .expect("Ready");
+
+    // `Loaded` carried real metadata, not the defaults a unit test sees: the
+    // duration was fetched and the file has at least one track.
+    let (duration, tracks) = seen
+        .iter()
+        .find_map(|e| match e {
+            PlayerEvent::Loaded { duration, tracks } => Some((*duration, tracks.clone())),
+            _ => None,
+        })
+        .expect("Loaded with metadata");
+    assert!((29.0..31.0).contains(&duration), "duration ~30s, got {duration}");
+    assert!(!tracks.is_empty(), "a wav has at least one track");
+
+    // Output controls are accepted; an out-of-range volume is clamped, not
+    // rejected, and `set_volume(37)` afterwards must read back as 37.
+    p.set_volume(37).expect("volume");
+    p.set_mute(true).expect("mute");
+    p.set_rate(1.5).expect("rate");
+    p.set_volume(200).expect("out-of-range volume is clamped, not rejected");
+    p.set_volume(37).expect("volume again");
+    p.set_fullscreen(false).expect("fullscreen");
+
+    // A subtitle can be added, selected, and styled.
+    p.add_subtitle(srt.to_str().unwrap()).expect("add subtitle");
+    p.set_sub_style(SubStyle {
+        scale: Some(1.5),
+        color: Some("#FF0000".into()),
+        border_color: None, // None means "leave mpv's value alone"
+        back_color: None,
+    })
+    .expect("subtitle style");
+
+    let st = p.get_state().expect("state snapshot");
+    assert_eq!(st.volume, 37, "volume after the clamp round-trip");
+    assert!(st.mute, "mute is on");
+    assert_eq!(st.rate, 1.5, "rate");
+    assert!(st.paused, "the file was loaded paused");
+    assert!((2.0..4.0).contains(&st.pos), "position ~3s, got {}", st.pos);
+    assert!(
+        (29.0..31.0).contains(&st.duration),
+        "duration ~30s, got {}",
+        st.duration
+    );
+    assert_eq!(
+        st.loaded.as_deref(),
+        Some(wav.to_str().unwrap()),
+        "the snapshot names the open file"
+    );
+    assert!(
+        st.tracks.iter().any(|t| t.kind == "sub"),
+        "the added subtitle is a track: {:?}",
+        st.tracks
+    );
+    assert!(
+        st.sid.is_some(),
+        "`sub-add … select` made the subtitle current: sid={:?}",
+        st.sid
+    );
+
+    p.shutdown();
+    assert!(!ps_has_socket(&sock), "no mpv left running");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A crash landing in the middle of a seek: the very next command has to
+/// notice the dead process, restart it, and *then* still do what it was asked.
+/// The old mpv is reaped, not left as a zombie.
+#[test]
+fn a_crash_during_a_seek_recovers_and_still_lands() {
+    if locate_mpv().is_none() {
+        eprintln!("SKIP: mpv not installed");
+        return;
+    }
+    let dir = fixture_dir("seekcrash");
+    let wav = dir.join("seekcrash.wav");
+    write_sine_wav(&wav, 30.0);
+
+    let sock = sock_path("seekcrash");
+    let mut p = start_player_at(&sock);
+    let mut seen = Vec::new();
+
+    p.load(wav.to_str().unwrap(), 0.0, false).expect("load");
+    wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::Ready),
+        Duration::from_secs(15),
+    )
+    .expect("Ready");
+    wait_pos(&mut p, |pos| pos > 0.3, Duration::from_secs(5)).expect("playing");
+
+    let doomed = p.pid().expect("pid");
+    kill_hard(doomed);
+    // The death has to be observable before the seek, or the test would be
+    // racing the kernel's zombie transition rather than the player.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while p.is_running() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!p.is_running(), "kill -9 must be observable");
+
+    // One call: it recovers the crash and applies the seek.
+    p.seek(20.0).expect("seek across a restart");
+    wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::ProcessCrashed { restarts: 1 }),
+        Duration::from_secs(15),
+    )
+    .expect("the crash was reported");
+    assert_eq!(p.restarts(), 1);
+    assert!(!pid_alive(doomed), "the crashed mpv was reaped");
+    wait_pos(
+        &mut p,
+        |pos| (19.0..21.0).contains(&pos),
+        Duration::from_secs(10),
+    )
+    .expect("the seek landed after the restart");
+
+    p.shutdown();
+    assert!(!ps_has_socket(&sock), "no mpv left running");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A *frozen* mpv is not a dead one. SIGSTOP makes it stop answering, so an
+/// IPC call has to time out (rather than hang forever, or — worse — be
+/// mistaken for a crash and restart a perfectly healthy player); SIGCONT must
+/// bring it straight back, with the restart counter untouched.
+#[test]
+fn a_stopped_mpv_times_out_then_recovers_after_sigcont() {
+    if locate_mpv().is_none() {
+        eprintln!("SKIP: mpv not installed");
+        return;
+    }
+    let dir = fixture_dir("stopped");
+    let wav = dir.join("stopped.wav");
+    write_sine_wav(&wav, 30.0);
+
+    let sock = sock_path("stopped");
+    let mut p = start_player_at(&sock);
+    let mut seen = Vec::new();
+
+    p.load(wav.to_str().unwrap(), 0.0, false).expect("load");
+    wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::Ready),
+        Duration::from_secs(15),
+    )
+    .expect("Ready");
+    wait_pos(&mut p, |pos| pos > 0.3, Duration::from_secs(5)).expect("playing");
+
+    let pid = p.pid().expect("pid");
+    signal(pid, "STOP");
+    let started = Instant::now();
+    let err = p.get_pos().expect_err("a frozen mpv cannot answer");
+    let waited = started.elapsed();
+    assert!(matches!(err, PlayerError::Timeout(_)), "got {err:?}");
+    assert!(
+        (Duration::from_millis(2500)..Duration::from_secs(6)).contains(&waited),
+        "the IPC timeout is ~3s, waited {waited:?}"
+    );
+    assert!(p.is_running(), "a stopped process must not read as dead");
+    assert_eq!(p.restarts(), 0, "STOP must not be mistaken for a crash");
+
+    signal(pid, "CONT");
+    wait_pos(&mut p, |pos| pos >= 0.0, Duration::from_secs(10))
+        .expect("the player answers again after SIGCONT");
+    assert_eq!(p.restarts(), 0, "recovery without a restart");
+
+    p.shutdown();
+    assert!(!ps_has_socket(&sock), "no mpv left running");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The socket-EOF path, against a real mpv: a caller already waiting for a
+/// reply must be released the moment mpv dies (`NotRunning`), not left to sit
+/// out its own timeout. mpv is frozen first so the request is genuinely in
+/// flight when the kill lands.
+///
+/// This talks to the socket directly — `MpvPlayer` owns its client, and mpv
+/// accepts a single connection — so it spawns mpv through `MpvProcess`.
+#[test]
+fn a_dying_mpv_releases_a_pending_caller_instead_of_timing_out() {
+    let Some(exe) = locate_mpv() else {
+        eprintln!("SKIP: mpv not installed");
+        return;
+    };
+    let sock = sock_path("pending");
+    let mut opts = MpvOptions::new(sock.clone());
+    opts.headless = true;
+    opts.media = None; // --idle: mpv waits, socket and all
+    let mut proc = MpvProcess::spawn(exe, opts).expect("spawn mpv");
+    let pid = proc.pid();
+    let rpc = RpcClient::connect(&sock, Duration::from_secs(10)).expect("connect");
+    assert!(!rpc.is_closed(), "a fresh connection starts open");
+
+    // Freeze mpv so it cannot answer, then put a request in flight.
+    signal(pid, "STOP");
+    let rpc_in_thread = Arc::clone(&rpc);
+    let waiter = std::thread::spawn(move || {
+        let started = Instant::now();
+        let err = rpc_in_thread
+            .request(
+                serde_json::json!(["get_property", "time-pos"]),
+                Duration::from_secs(10),
+            )
+            .unwrap_err();
+        (err, started.elapsed())
+    });
+    std::thread::sleep(Duration::from_millis(250)); // let the request go out
+    kill_hard(pid); // the socket closes under the waiting caller
+
+    let (err, waited) = waiter.join().expect("the waiter thread finishes");
+    assert!(matches!(err, PlayerError::NotRunning(_)), "got {err:?}");
+    assert!(
+        waited < Duration::from_secs(5),
+        "released by EOF, not waited out as a 10s timeout: {waited:?}"
+    );
+    assert!(rpc.is_closed(), "EOF must mark the client closed");
+
+    proc.kill().expect("reap the dead mpv");
+    assert!(!pid_alive(pid), "mpv reaped, not a zombie");
+    assert!(!ps_has_socket(&sock), "no mpv left running");
+    let _ = std::fs::remove_file(&sock);
 }

@@ -5,8 +5,9 @@ import { LayoutDashboard, Users, DoorOpen, Radio, Film, RotateCw, Save, Trash2, 
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import type { AdminUser, UserRole } from "@/lib/types";
+import { BASE_PATH } from "@/lib/config";
 
-const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
+const basePath = BASE_PATH;
 
 const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
   { value: "watcher", label: "تماشاگر" },

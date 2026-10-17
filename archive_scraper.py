@@ -59,6 +59,7 @@ LOG = logging.getLogger("archive.collector")
 KIND_AUTH_REQUIRED = "auth_required"
 KIND_MANUAL_CHALLENGE = "manual_challenge_required"
 KIND_SESSION_EXPIRED = "session_expired"
+KIND_SITE_CHALLENGE = "site_challenge"
 KIND_AUTH_UNAVAILABLE = "auth_unavailable"
 KIND_HTTP_ERROR = "http_error"
 KIND_PROXY_UNAVAILABLE = "proxy_unavailable"
@@ -73,11 +74,17 @@ KIND_VALIDATION = "validation"
 CARD_CLASS = "item_def_loop"
 # The live theme emits ``item_dubbled`` for page cards and ``item_small_loop``
 # for the AJAX search results; ``item_def_loop`` is the older markup and is still
-# accepted so already-stored fixtures keep parsing.
-CARD_CLASSES = ("item_small_loop", "item_dubbled", CARD_CLASS)
+# accepted so already-stored fixtures keep parsing. ``text_adv_se`` is the
+# header search's card since the site's WP 7.1.2 update (2026-10): one ``<li>``
+# per result, title block first, poster and rate divs following it — slicing
+# between consecutive markers spans the whole ``li``.
+CARD_CLASSES = ("item_small_loop", "item_dubbled", CARD_CLASS, "text_adv_se")
 # Free-text search is answered by this endpoint; the ``?s=`` page renders a
-# generic "dubbed" list and does not filter by the query at all.
-SEARCH_AJAX_ACTION = "ajaxsearch"
+# generic "dubbed" list and does not filter by the query at all. The site's
+# WP 7.1.2 update retired ``ajaxsearch`` for guests — it answers 400 with body
+# "0" from any network — while its own header now posts ``ajaxsearchheader``,
+# which honours the same free-text term (extra payload fields are ignored).
+SEARCH_AJAX_ACTION = "ajaxsearchheader"
 PAGINATION_CLASS = "alphapageNavi"
 MAX_SEARCH_PAGES = 3
 _TITLE_PREFIX = re.compile(r"^دانلود\s+(?:فیلم|سریال)\s+")
@@ -538,7 +545,11 @@ def _parse_search_card(block: str, base_url: str) -> dict[str, Any] | None:
         # skips the section/nav links that share the card block's tail.
         if url[len(base_url) + 1:].count("/") != 1:
             continue
-        heading = re.search(r"(?is)<h2[^>]*>(.*?)</h2>", inner)
+        # h2 is the historical title heading; the header search cards use h3
+        # (``<h3 class="title lato_font">``), so h2 keeps priority where a
+        # block contains both.
+        heading = (re.search(r"(?is)<h2[^>]*>(.*?)</h2>", inner)
+                   or re.search(r"(?is)<h3[^>]*>(.*?)</h3>", inner))
         title = ""
         if heading:
             title = _TITLE_PREFIX.sub("", _clean(re.sub(r"(?s)<[^>]+>", " ", heading.group(1))))
@@ -550,7 +561,11 @@ def _parse_search_card(block: str, base_url: str) -> dict[str, Any] | None:
         return {
             "source": "digimoviez", "kind": "movie", "title": title, "url": url,
             "poster": _absolute(base_url, poster) if poster else None,
-            "rating": _field(r'<div[^>]+class="[^"]*(?:rate_num|imdb_rate_dubbled)[^"]*"[^>]*>\s*<strong>([\d.]+)</strong>', block),
+            # The header search's rate box is ``rate_container`` with a
+            # ``<span>`` behind an inline SVG; the page cards keep
+            # ``rate_num``/``imdb_rate_dubbled`` with ``<strong>``.
+            "rating": _field(r'<div[^>]+class="[^"]*(?:rate_num|imdb_rate_dubbled|rate_container)[^"]*"[^>]*>'
+                             r'.*?<(?:strong|span)[^>]*>([\d.]+)</(?:strong|span)>', block),
             "year": _field(r'\b((?:19|20)\d{2})\b', title),
         }
     return None
@@ -585,6 +600,10 @@ def _auth_failure(auth: ArchiveAuthManager) -> tuple[str, str]:
     """
     from archive_auth import AuthState
 
+    if auth.last_check_error == "site_challenge":
+        # Cloudflare's edge challenged the client; WordPress never saw the
+        # request, so this is neither a session problem nor a credentials one.
+        return KIND_SITE_CHALLENGE, "Digimoviez is behind a Cloudflare edge challenge"
     state = auth.state
     if state is AuthState.AUTH_MANUAL_INTERVENTION_REQUIRED:
         return KIND_MANUAL_CHALLENGE, "Digimoviez requires a manual security challenge"
@@ -611,7 +630,14 @@ class DigimoviezMovieCollector:
         self.auth = auth
         self.connect_timeout, self.read_timeout = connect_timeout, read_timeout
         self.total_timeout, self.retries = total_timeout, retries
+        self.total_timeout, self.retries = total_timeout, retries
         self.session = auth.session
+        # Baseline browser UA for the whole archive session.  The clearance
+        # sidecar replaces it with the User-Agent its cf_clearance is bound to;
+        # sending any other UA beside that cookie is walled again (live
+        # evidence 2026-10-17: the adopted UA replayed 200, the old hardcoded
+        # UA was handed a 403).
+        self.session.headers["User-Agent"] = UA
 
     def _request(self, request: dict[str, Any]) -> str:
         deadline = time.monotonic() + self.total_timeout
@@ -624,9 +650,12 @@ class DigimoviezMovieCollector:
             if self.auth.settings.enabled and not self.auth.ensure_authenticated():
                 raise ArchiveRequestError(*_auth_failure(self.auth))
             try:
+                # No User-Agent here: it comes from the session, which carries
+                # the UA the adopted cf_clearance is bound to.  An explicit UA
+                # would override it and the edge would wall the request again.
                 response = self.session.request(request["method"], request["url"],
                     timeout=(self.connect_timeout, self.read_timeout), headers={
-                        "User-Agent": UA, "Accept-Language": "fa,en;q=0.8",
+                        "Accept-Language": "fa,en;q=0.8",
                         **({"X-Requested-With": "XMLHttpRequest",
                             "Referer": self.base_url + "/"} if request.get("ajax") else {}),
                     }, data=request.get("data"))
@@ -775,7 +804,7 @@ def get_collector() -> DigimoviezMovieCollector:
             Config.ARCHIVE_HTTP_PROXY, Config.ARCHIVE_LOGIN_USERNAME_FIELD, Config.ARCHIVE_LOGIN_PASSWORD_FIELD,
             Config.ARCHIVE_AUTH_CHECK_INTERVAL, Config.ARCHIVE_REQUEST_TIMEOUT, Config.ARCHIVE_LOGIN_RETRY_COUNT,
             lag_threshold=Config.ARCHIVE_LAG_THRESHOLD, max_lag_streak=Config.ARCHIVE_MAX_LAG_STREAK,
-            lag_backoff_max=Config.ARCHIVE_LAG_BACKOFF_MAX)
+            lag_backoff_max=Config.ARCHIVE_LAG_BACKOFF_MAX, solver_url=Config.ARCHIVE_SOLVER_URL)
         try:
             auth = ArchiveAuthManager(settings)
         except ArchiveProxyConfigurationError as exc:

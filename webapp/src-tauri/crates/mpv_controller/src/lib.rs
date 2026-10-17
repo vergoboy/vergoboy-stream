@@ -19,5 +19,8 @@ pub mod process;
 
 pub use fake::FakePlayer;
 pub use mpv::MpvPlayer;
-pub use port::{CacheProfile, PlayerError, PlayerEvent, PlayerPort, PlayerResult};
+pub use port::{
+    CacheProfile, PlayerError, PlayerEvent, PlayerPort, PlayerResult, PlayerState, SubStyle,
+    TrackInfo,
+};
 pub use process::{locate_mpv, MpvOptions, MpvProcess};

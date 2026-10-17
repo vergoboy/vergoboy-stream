@@ -1,0 +1,22 @@
+#!/bin/bash
+# Root helper: show the live state of the userspace VPN proxy.
+set -uo pipefail
+PROXY=http://127.0.0.1:10808
+DIR=/opt/vergoboy-proxy
+
+printf 'container  : %s\n' \
+  "$(docker inspect -f '{{.State.Status}}' vergoboy-proxy 2>/dev/null || echo absent)"
+printf 'host ip    : %s\n' "$(cat "$DIR/host_exit_ip" 2>/dev/null || echo '(unprobed)')"
+
+ip=$(curl -sS -x "$PROXY" --max-time 10 https://api.ipify.org 2>/dev/null)
+printf 'exit ip    : %s\n' "${ip:-unavailable}"
+
+probe() {  # label url
+  local code
+  code=$(curl -sS -x "$PROXY" -o /dev/null -w '%{http_code}' --max-time 15 "$1" 2>/dev/null)
+  printf '%-10s: %s\n' "$2" "${code:-unreachable}"
+}
+probe "https://www.youtube.com/generate_204" "youtube"
+probe "https://redirector.googlevideo.com/" "googlevideo"
+probe "https://digimoviez.com/" "digimoviez"
+probe "https://animex.click/" "animex"

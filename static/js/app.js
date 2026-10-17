@@ -1,6 +1,11 @@
 (() => {
   "use strict";
 
+  // Public URL prefix this instance is mounted under, injected by the Flask
+  // template (templates/index.html). Falls back to the historical default so
+  // the file still works if it is ever served without that template.
+  const BP = window.__STREAM_BASE_PATH__ ?? "/stream";
+
   // ===================================================================
   // Debug logger — structured console output for easier diagnostics.
   // Access window.__streamLog() in the browser console to see all events.
@@ -239,7 +244,7 @@
     fd.append("file", file);
     fd.append("name", myName);
     try {
-      const res = await fetch("/stream/api/avatar", { method: "POST", body: fd });
+      const res = await fetch(BP + "/api/avatar", { method: "POST", body: fd });
       const data = await res.json();
       if (res.ok) {
         myAvatarUrl = data.url;
@@ -260,7 +265,7 @@
   function connectSocket() {
     if (socket) return;
     dbg("SOCKET", "connecting…");
-    socket = io({ path: "/stream/socket.io", transports: ["websocket"] });
+    socket = io({ path: BP + "/socket.io", transports: ["websocket"] });
 
     socket.on("connect", () => {
       dbg("SOCKET", "connected, sid=" + socket.id);
@@ -320,7 +325,7 @@
     socket.on("chat_cleared", () => { chatFeed.innerHTML = ""; chatEmptyHint.hidden = false; unreadChat = 0; updateChatBadge(); });
     socket.on("chat_purged", () => {
       // A background purge removed some old messages — just re-sync from the server.
-      fetch("/stream/api/chat/history").then((r) => r.json()).then((d) => renderChatHistory(d.messages || [])).catch(() => {});
+      fetch(BP + "/api/chat/history").then((r) => r.json()).then((d) => renderChatHistory(d.messages || [])).catch(() => {});
     });
   }
 
@@ -523,7 +528,7 @@
     if (pendingQualityRequest === itemId + ":" + label) return;
     pendingQualityRequest = itemId + ":" + label;
     try {
-      const res = await fetch("/stream/api/request-quality", {
+      const res = await fetch(BP + "/api/request-quality", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ item_id: itemId, label, name: myName }),
       });
@@ -1141,7 +1146,7 @@
       li.querySelector(".pl-remove").addEventListener("click", (e) => {
         e.stopPropagation();
         if (!confirm("این آیتم از پلی‌لیست حذف شود؟")) return;
-        fetch(`/stream/api/playlist/${item.id}?name=${encodeURIComponent(myName)}`, { method: "DELETE" });
+        fetch(BP + `/api/playlist/${item.id}?name=${encodeURIComponent(myName)}`, { method: "DELETE" });
       });
       playlistEl.appendChild(li);
     });
@@ -1324,7 +1329,7 @@
     const fd = new FormData();
     fd.append("file", file);
     try {
-      const res = await fetch("/stream/api/chat/image", { method: "POST", body: fd });
+      const res = await fetch(BP + "/api/chat/image", { method: "POST", body: fd });
       const data = await res.json();
       if (res.ok) {
         pendingChatImageUrl = data.url;
@@ -1357,7 +1362,7 @@
   btnClearChat.addEventListener("click", async () => {
     if (!confirm("کل چت برای همه پاک بشه؟ این کار قابل بازگشت نیست.")) return;
     try {
-      await fetch(`/stream/api/chat/clear?name=${encodeURIComponent(myName)}`, { method: "POST" });
+      await fetch(BP + `/api/chat/clear?name=${encodeURIComponent(myName)}`, { method: "POST" });
     } catch {
       alert("خطا در ارتباط با سرور");
     }
@@ -1408,7 +1413,7 @@
     track.hidden = false; fill.style.width = "0%";
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/stream/api/upload");
+    xhr.open("POST", BP + "/api/upload");
     xhr.upload.addEventListener("progress", (ev) => {
       if (ev.lengthComputable) fill.style.width = ((ev.loaded / ev.total) * 100) + "%";
     });
@@ -1431,7 +1436,7 @@
     e.preventDefault();
     const url = $("urlInput").value.trim();
     if (!url) return;
-    const res = await fetch("/stream/api/add-url", {
+    const res = await fetch(BP + "/api/add-url", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url, title: $("urlTitle").value.trim(), name: myName }),
     });
@@ -1459,7 +1464,7 @@
     $("btnYtLoad").disabled = true;
 
     try {
-      const res = await fetch("/stream/api/youtube-formats", {
+      const res = await fetch(BP + "/api/youtube-formats", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
       });
@@ -1505,7 +1510,7 @@
     btn.disabled = true;
 
     try {
-      const res = await fetch("/stream/api/add-youtube", {
+      const res = await fetch(BP + "/api/add-youtube", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url, format_id: formatId,
@@ -1530,7 +1535,7 @@
   });
 
   $("btnGenKey").addEventListener("click", async () => {
-    const res = await fetch("/stream/api/live/new-key", { method: "POST" });
+    const res = await fetch(BP + "/api/live/new-key", { method: "POST" });
     generatedLive = await res.json();
     $("pushUrlOut").textContent = generatedLive.push_url;
     $("streamKeyOut").textContent = generatedLive.key;
@@ -1551,7 +1556,7 @@
 
   $("btnAddGeneratedLive").addEventListener("click", async () => {
     if (!generatedLive) return;
-    await fetch("/stream/api/add-live", {
+    await fetch(BP + "/api/add-live", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: "پخش زنده", playback_url: generatedLive.playback_url,
@@ -1566,7 +1571,7 @@
     e.preventDefault();
     const playback_url = $("livePlayback").value.trim();
     if (!playback_url) return;
-    const res = await fetch("/stream/api/add-live", {
+    const res = await fetch(BP + "/api/add-live", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: $("liveTitle").value.trim() || "پخش زنده", playback_url, name: myName }),
     });
@@ -1608,7 +1613,7 @@
     btn.disabled = true;
     cleanupStatus.textContent = "⏳ در حال پاکسازی…";
     try {
-      const res = await fetch("/stream/api/cleanup", { method: "POST" });
+      const res = await fetch(BP + "/api/cleanup", { method: "POST" });
       const data = await res.json();
       if (res.ok) {
         const total = data.total || 0;
@@ -1636,7 +1641,7 @@
     fd.append("label", $("subFileLabel").value.trim() || "زیرنویس");
     fd.append("lang", "fa");
     fd.append("name", myName);
-    const res = await fetch("/stream/api/subtitle-upload", { method: "POST", body: fd });
+    const res = await fetch(BP + "/api/subtitle-upload", { method: "POST", body: fd });
     if (res.ok) $("formSubFile").reset();
     else alert("خطا: " + (await res.text()));
   });
@@ -1647,7 +1652,7 @@
     const url = $("subUrlInput").value.trim();
     if (!itemId) { alert("ابتدا یک ویدیوی مقصد انتخاب کن"); return; }
     if (!url) return;
-    const res = await fetch("/stream/api/subtitle-url", {
+    const res = await fetch(BP + "/api/subtitle-url", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_id: itemId, url, label: $("subUrlLabel").value.trim() || "زیرنویس", lang: "fa", name: myName }),
     });
@@ -1661,7 +1666,7 @@
     const url = $("audioUrlInput").value.trim();
     if (!itemId) { alert("ابتدا یک ویدیوی مقصد انتخاب کن"); return; }
     if (!url) return;
-    const res = await fetch("/stream/api/audio-track", {
+    const res = await fetch(BP + "/api/audio-track", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_id: itemId, url, label: $("audioLabel").value.trim() || "دوبله", name: myName }),
     });
@@ -1694,5 +1699,5 @@
   renderSofa([]);
   // Chat history is also fetchable over REST in case the socket takes a
   // moment to connect (e.g. slow network) — this way the tab isn't empty.
-  fetch("/stream/api/chat/history").then((r) => r.json()).then((d) => renderChatHistory(d.messages || [])).catch(() => {});
+  fetch(BP + "/api/chat/history").then((r) => r.json()).then((d) => renderChatHistory(d.messages || [])).catch(() => {});
 })();

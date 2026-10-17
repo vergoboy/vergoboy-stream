@@ -35,6 +35,7 @@ from media_pipeline import (
     ErrorKind,
     build_fallback_chain,
     cleanup_orphaned_partials,
+    expose_partial_output,
 )
 from media_domain.adapters.filesystem import DEFAULT_LOCAL_ROOT
 from media_domain.adapters.http import download_to_file
@@ -114,7 +115,12 @@ except ImportError as e:
     from state import rooms
 
 
-app = Flask(__name__, static_url_path="/stream/static", template_folder="templates")
+# Public URL prefix for this instance ("" for the domain root). Every route
+# and every URL this process hands to a client is built from it, so one build
+# serves any mount point with no second copy. See Config.BASE_PATH.
+BP = Config.BASE_PATH
+
+app = Flask(__name__, static_url_path=f"{BP}/static", template_folder="templates")
 app.config.from_object(Config)
 app_log = app_logging.configure(os.environ.get("STREAM_LOG_LEVEL", "INFO"), stream=sys.stderr)
 configure_archive_logging(Config.ARCHIVE_LOG_LEVEL)
@@ -126,12 +132,12 @@ app_log.info("backend starting: pid=%s env=%s log_level=%s python=%s",
 CORS(
     app,
     resources={
-        r"/stream/api/*": {
+        rf"{BP}/api/*": {
             "origins": list(Config.CORS_ORIGINS),
             "supports_credentials": False,
             "methods": ["GET", "POST", "OPTIONS", "DELETE"],
         },
-        r"/stream/media/*": {
+        rf"{BP}/media/*": {
             "origins": list(Config.CORS_ORIGINS),
             "supports_credentials": False,
             "methods": ["GET", "OPTIONS"],
@@ -141,7 +147,7 @@ CORS(
 
 socketio = SocketIO(
     app,
-    path="stream/socket.io",
+    path=f"{BP}/socket.io".lstrip("/"),
     cors_allowed_origins=list(Config.CORS_ORIGINS),
     async_mode="gevent",
 )
@@ -1078,7 +1084,7 @@ def _extract_subtitles_async(item_id: str, source: str, sub_streams: list, reque
                          or f"زیرنویس {len(new_subs) + 1}")
                 new_subs.append({
                     "id": sub_id, "label": label, "lang": s["lang"] or "und",
-                    "url": f"/stream/media/subs/{vtt_name}",
+                    "url": f"{BP}/media/subs/{vtt_name}",
                 })
         except Exception as e:
             log_debug(f"Auto subtitle extraction failed for stream {s['index']}: {e}")
@@ -1137,6 +1143,8 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
 
     def fail(msg: str):
         log_debug(f"Rendition encode failed [{item_id}/{label}]: {msg}")
+        if os.path.islink(rendition_dir):
+            os.unlink(rendition_dir)  # the progressive symlink, not a directory
         shutil.rmtree(rendition_dir, ignore_errors=True)
         item = set_rendition_status("error", msg)
         rs = _room_for_item(item_id)
@@ -1198,7 +1206,10 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
         if dur is None:
             dur = get_duration_s(_ffprobe_source(source))
 
-        os.makedirs(rendition_dir, exist_ok=True)
+        # Expose the in-progress output at the final path (symlink into the
+        # .partial dir the runner writes into) so on_ready's "ready" really is
+        # playable; _promote swaps in the real directory on success.
+        expose_partial_output(rendition_dir)
 
         def on_ready(elapsed_s):
             item = set_rendition_status("ready")
@@ -1212,7 +1223,7 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
                 _rewrite_master_playlist(out_dir, collect_ready(item), aspect)
                 if is_default:
                     item["status"] = "ready"
-                    item["src"] = f"/stream/media/hls/{item_id}/master.m3u8"
+                    item["src"] = f"{BP}/media/hls/{item_id}/master.m3u8"
                     safe_save(rrs)
                 title = item["title"]
             broadcast_state(rrs)
@@ -1263,7 +1274,7 @@ def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: s
             _rewrite_master_playlist(out_dir, collect_ready(item), aspect)
             if is_default:
                 item["status"] = "complete"
-                item["src"] = f"/stream/media/hls/{item_id}/master.m3u8"
+                item["src"] = f"{BP}/media/hls/{item_id}/master.m3u8"
                 item.pop("error", None)
                 # The whole timeline now exists, so the seek guard has nothing
                 # left to enforce and the recorded progress is dead weight.
@@ -1418,7 +1429,7 @@ def _collect_referenced_files() -> tuple:
     # Rooms on disk that have never been opened in this process still own their
     # media. On boot the registry is empty, so counting only the registry here
     # makes cleanup delete every cold room's uploads/HLS — exactly how real
-    # media got wiped by one /stream/api/delete on another item.
+    # media got wiped by a single delete request on another item.
     try:
         entries = sorted(os.listdir(os.path.join(Config.DATA_DIR, "rooms")))
     except OSError:
@@ -1516,10 +1527,17 @@ def _delete_chat_images(messages: list):
 # Pages
 # ────────────────────────────────────────────────────────────────────────────
 
-@app.route("/stream/")
-@app.route("/stream")
+@app.route(f"{BP}/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", base_path=BP)
+
+
+# The mount point without its trailing slash. Nginx normally answers this with
+# a 301, but the bare-Flask fallback (dev, or nginx not in front) should work
+# on its own. Registered as a separate endpoint so an empty BASE_PATH — where
+# both rules would be "/" — cannot collide.
+if BP:
+    app.add_url_rule(BP, "index_bare", index)
 
 
 def _probe_storage() -> bool:
@@ -1569,7 +1587,7 @@ def _probe_livekit() -> bool:
         return False
 
 
-@app.route("/stream/api/health")
+@app.route(f"{BP}/api/health")
 def api_health():
     checks = {}
     try:
@@ -1586,7 +1604,7 @@ def api_health():
     return jsonify({"status": "healthy" if healthy else "degraded", "checks": checks}), (200 if healthy else 503)
 
 
-@app.route("/stream/api/log/client", methods=["POST"])
+@app.route(f"{BP}/api/log/client", methods=["POST"])
 def api_log_client():
     """Accept an error the webview caught. See app_logging.record_client_error."""
     payload = request.get_json(silent=True)
@@ -1596,26 +1614,26 @@ def api_log_client():
     return jsonify({"ok": True, "id": ident}), 201
 
 
-@app.route("/stream/api/log/diagnostics")
+@app.route(f"{BP}/api/log/diagnostics")
 def api_log_diagnostics():
     """Log files, sizes, mtimes and the tail of error/crash logs."""
     return jsonify(log_diagnostics()), 200
 
 
-@app.route("/stream/media/uploads/<path:filename>")
+@app.route(f"{BP}/media/uploads/<path:filename>")
 def serve_upload(filename):
     return send_from_directory(Config.UPLOAD_DIR, filename, conditional=True)
 
 
-@app.route("/stream/media/subs/<path:filename>")
+@app.route(f"{BP}/media/subs/<path:filename>")
 def serve_sub(filename):
     return send_from_directory(Config.SUBS_DIR, filename, conditional=True)
 
 
-@app.route("/stream/media/hls/<item_id>/<path:filename>")
+@app.route(f"{BP}/media/hls/<item_id>/<path:filename>")
 def serve_hls(item_id, filename):
     # NOTE: in production this route is normally bypassed — Nginx should
-    # serve /stream/media/hls/ directly from disk (see deployment notes)
+    # serve the HLS tree directly from disk (see deployment notes)
     # for far better throughput on segment requests. This Flask route is a
     # functional fallback (e.g. local/dev testing without Nginx in front).
     d = os.path.join(Config.HLS_DIR, item_id)
@@ -1628,12 +1646,12 @@ def serve_hls(item_id, filename):
     return resp
 
 
-@app.route("/stream/media/chat/<path:filename>")
+@app.route(f"{BP}/media/chat/<path:filename>")
 def serve_chat_image(filename):
     return send_from_directory(Config.CHAT_IMG_DIR, filename, conditional=True)
 
 
-@app.route("/stream/media/avatars/<path:filename>")
+@app.route(f"{BP}/media/avatars/<path:filename>")
 def serve_avatar(filename):
     return send_from_directory(Config.AVATAR_DIR, filename, conditional=True)
 
@@ -1642,14 +1660,14 @@ def serve_avatar(filename):
 # REST API — playlist / media
 # ────────────────────────────────────────────────────────────────────────────
 
-@app.route("/stream/api/state")
+@app.route(f"{BP}/api/state")
 def api_state():
     _require_user()
     cur = _current_room()
     return jsonify(cur.to_public_dict() if cur else {})
 
 
-@app.route("/stream/api/upload", methods=["POST"])
+@app.route(f"{BP}/api/upload", methods=["POST"])
 def api_upload():
     user = _require_user()
     cur = _current_room()
@@ -1710,6 +1728,7 @@ _ARCHIVE_ERRORS = {
     archive_scraper.KIND_AUTH_REQUIRED: (401, "برای دیدن لینک‌های دانلود باید وارد حساب دیجی‌موویز شوید"),
     archive_scraper.KIND_MANUAL_CHALLENGE: (503, "دیجی‌موویز سؤال امنیتی می‌پرسد؛ نشست را کامل کنید و دوباره تلاش کنید"),
     archive_scraper.KIND_SESSION_EXPIRED: (401, "نشست دیجی‌موویز منقضی شده؛ دوباره وارد شوید"),
+    archive_scraper.KIND_SITE_CHALLENGE: (503, "دیجی‌موویز پشت محافظ کلادفلر است؛ چند دقیقه بعد دوباره تلاش کنید"),
     archive_scraper.KIND_AUTH_UNAVAILABLE: (503, "ورود به آرشیو ممکن نشد؛ تنظیمات حساب را بررسی کنید"),
     archive_scraper.KIND_PROXY_UNAVAILABLE: (502, "پروکسی آرشیو در دسترس نیست"),
     archive_scraper.KIND_PROXY_CONFIG: (500, "آدرس پروکسی آرشیو نامعتبر است"),
@@ -1748,7 +1767,7 @@ def _archive_err(e, archive_request_id=None):
     return jsonify(payload), status
 
 
-@app.route("/stream/api/archive/search", methods=["POST"])
+@app.route(f"{BP}/api/archive/search", methods=["POST"])
 def api_archive_search():
     user = _require_user()
     denied = _deny_unless(user, permmod.PERM_SEARCH_ARCHIVE, "اجازه جستجوی آرشیو را نداری")
@@ -1781,7 +1800,7 @@ def api_archive_search():
         reset_request_id(token)
 
 
-@app.route("/stream/api/archive/filters", methods=["GET"])
+@app.route(f"{BP}/api/archive/filters", methods=["GET"])
 def api_archive_filters():
     """UI option lists are derived from i.txt, never duplicated in JavaScript."""
     user = _require_user()
@@ -1797,7 +1816,7 @@ def api_archive_filters():
                     "rating_min": 0, "rating_max": 10, "rating_step": 0.1})
 
 
-@app.route("/stream/api/archive/auth/status", methods=["GET"])
+@app.route(f"{BP}/api/archive/auth/status", methods=["GET"])
 def api_archive_auth_status():
     user = _require_user()
     denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
@@ -1809,7 +1828,7 @@ def api_archive_auth_status():
                     "manual_session_kinds": sorted(ARCHIVE_MANUAL_SESSION_KINDS)})
 
 
-@app.route("/stream/api/archive/auth/manual-session", methods=["POST"])
+@app.route(f"{BP}/api/archive/auth/manual-session", methods=["POST"])
 def api_archive_manual_session():
     """Operator-only continuation after a manually completed challenge.
 
@@ -1843,7 +1862,7 @@ def api_archive_manual_session():
     return jsonify({"ok": True, "state": manager.state.value})
 
 
-@app.route("/stream/api/archive/title", methods=["POST"])
+@app.route(f"{BP}/api/archive/title", methods=["POST"])
 def api_archive_title():
     user = _require_user()
     denied = _deny_unless(user, permmod.PERM_ACCESS_ARCHIVE, "اجازه دسترسی به آرشیو را نداری")
@@ -1866,7 +1885,7 @@ def api_archive_title():
     return jsonify(info)
 
 
-@app.route("/stream/api/archive/files", methods=["POST"])
+@app.route(f"{BP}/api/archive/files", methods=["POST"])
 def api_archive_files():
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
@@ -1907,7 +1926,7 @@ def _add_url_item(url: str, title: str, name: str, room_code: str = None,
     return item
 
 
-@app.route("/stream/api/add-many", methods=["POST"])
+@app.route(f"{BP}/api/add-many", methods=["POST"])
 def api_add_many():
     """Bulk-adds episodes/qualities scraped from the archive to the playlist."""
     user = _require_user()
@@ -2080,7 +2099,7 @@ def _ytdlp_cmd(extra=None, timeout=45):
     return cmd
 
 
-@app.route("/stream/api/youtube-formats", methods=["POST"])
+@app.route(f"{BP}/api/youtube-formats", methods=["POST"])
 def api_youtube_formats():
     """Scans a YouTube / yt-dlp-supported link and returns video info:
     title, thumbnail, duration, channel, view count, subtitle/caption languages
@@ -2274,7 +2293,7 @@ def _attach_yt_subtitle(item_id: str, raw_path: str, sub_lang: str, requester_na
             if item:
                 item.setdefault("subtitles", []).append({
                     "id": sub_id, "label": label, "lang": sub_lang,
-                    "url": f"/stream/media/subs/{vtt_name}",
+                    "url": f"{BP}/media/subs/{vtt_name}",
                 })
                 safe_save(rs)
                 title = item["title"]
@@ -2312,7 +2331,7 @@ def _queue_youtube_item(cur, user, yt_url, title, name, fmt_selector, count=1, s
     return item
 
 
-@app.route("/stream/api/add-youtube", methods=["POST"])
+@app.route(f"{BP}/api/add-youtube", methods=["POST"])
 def api_add_youtube():
     user = _require_user()
     cur = _current_room()
@@ -2341,7 +2360,7 @@ def api_add_youtube():
     return jsonify(item)
 
 
-@app.route("/stream/api/add-youtube-playlist", methods=["POST"])
+@app.route(f"{BP}/api/add-youtube-playlist", methods=["POST"])
 def api_add_youtube_playlist():
     """Adds every entry of a YouTube playlist to the room playlist."""
     user = _require_user()
@@ -2426,7 +2445,7 @@ def _is_hls(url: str) -> bool:
     return url_ext(url) == "m3u8" or "m3u8" in url.split("?")[0].lower()
 
 
-@app.route("/stream/api/add-url", methods=["POST"])
+@app.route(f"{BP}/api/add-url", methods=["POST"])
 def api_add_url():
     user = _require_user()
     cur = _current_room()
@@ -2457,7 +2476,7 @@ def api_add_url():
     return jsonify(item)
 
 
-@app.route("/stream/api/request-quality", methods=["POST"])
+@app.route(f"{BP}/api/request-quality", methods=["POST"])
 def api_request_quality():
     user = _require_user()
     if not _may_control(user):
@@ -2474,7 +2493,7 @@ def api_request_quality():
     return jsonify({"ok": True})
 
 
-@app.route("/stream/api/live/new-key", methods=["POST"])
+@app.route(f"{BP}/api/live/new-key", methods=["POST"])
 def api_new_key():
     key = uuid.uuid4().hex[:10]
     host = urllib.parse.urlparse(Config.RTMP_PUSH_URL_TEMPLATE.format(key="")).netloc.split(":")[0]
@@ -2497,7 +2516,7 @@ def api_new_key():
 # LiveKit voice room
 # ────────────────────────────────────────────────────────────────────────────
 
-@app.route("/stream/api/voice/token", methods=["POST"])
+@app.route(f"{BP}/api/voice/token", methods=["POST"])
 def api_voice_token():
     """Issues a short-lived LiveKit access token scoped to the user's current
     stream room, so each room gets its own voice channel.
@@ -2532,7 +2551,7 @@ def api_voice_token():
     })
 
 
-@app.route("/stream/api/add-live", methods=["POST"])
+@app.route(f"{BP}/api/add-live", methods=["POST"])
 def api_add_live():
     user = _require_user()
     cur = _current_room()
@@ -2570,7 +2589,7 @@ def api_add_live():
     return jsonify(item)
 
 
-@app.route("/stream/api/playlist/<item_id>", methods=["DELETE"])
+@app.route(f"{BP}/api/playlist/<item_id>", methods=["DELETE"])
 def api_remove_item(item_id):
     user = _require_user()
     if not _may_control(user):
@@ -2600,14 +2619,14 @@ def api_remove_item(item_id):
     return jsonify({"ok": True})
 
 
-@app.route("/stream/api/cleanup", methods=["POST"])
+@app.route(f"{BP}/api/cleanup", methods=["POST"])
 def api_cleanup():
     removed = _cleanup_orphans()
     total = len(removed["uploads"]) + len(removed["subs"]) + len(removed["hls"])
     return jsonify({"removed": removed, "total": total})
 
 
-@app.route("/stream/api/subtitle-upload", methods=["POST"])
+@app.route(f"{BP}/api/subtitle-upload", methods=["POST"])
 def api_subtitle_upload():
     _require_user()
     cur = _current_room()
@@ -2632,9 +2651,9 @@ def api_subtitle_upload():
     if ext == "srt":
         vtt_name = f"{sub_id}.vtt"
         convert_srt_to_vtt(raw_path, os.path.join(Config.SUBS_DIR, vtt_name))
-        url = f"/stream/media/subs/{vtt_name}"
+        url = f"{BP}/media/subs/{vtt_name}"
     else:
-        url = f"/stream/media/subs/{sub_id}.{ext}"
+        url = f"{BP}/media/subs/{sub_id}.{ext}"
 
     with LOCK:
         item = cur.find_item(item_id)
@@ -2648,7 +2667,7 @@ def api_subtitle_upload():
     return jsonify({"id": sub_id, "url": url})
 
 
-@app.route("/stream/api/subtitle-url", methods=["POST"])
+@app.route(f"{BP}/api/subtitle-url", methods=["POST"])
 def api_subtitle_url():
     _require_user()
     cur = _current_room()
@@ -2678,9 +2697,9 @@ def api_subtitle_url():
     if ext == "srt":
         vtt_name = f"{sub_id}.vtt"
         convert_srt_to_vtt(raw_path, os.path.join(Config.SUBS_DIR, vtt_name))
-        sub_url = f"/stream/media/subs/{vtt_name}"
+        sub_url = f"{BP}/media/subs/{vtt_name}"
     else:
-        sub_url = f"/stream/media/subs/{sub_id}.{ext}"
+        sub_url = f"{BP}/media/subs/{sub_id}.{ext}"
 
     with LOCK:
         item = cur.find_item(item_id)
@@ -2694,7 +2713,7 @@ def api_subtitle_url():
     return jsonify({"id": sub_id, "url": sub_url})
 
 
-@app.route("/stream/api/audio-track", methods=["POST"])
+@app.route(f"{BP}/api/audio-track", methods=["POST"])
 def api_add_audio_track():
     _require_user()
     cur = _current_room()
@@ -2725,7 +2744,7 @@ def api_add_audio_track():
 # REST API — chat & avatars
 # ────────────────────────────────────────────────────────────────────────────
 
-@app.route("/stream/api/chat/history")
+@app.route(f"{BP}/api/chat/history")
 def api_chat_history():
     user = _require_user()
     if not user.current_room_id:
@@ -2735,7 +2754,7 @@ def api_chat_history():
         return jsonify({"messages": chat_obj.public_history()})
 
 
-@app.route("/stream/api/chat/clear", methods=["POST"])
+@app.route(f"{BP}/api/chat/clear", methods=["POST"])
 def api_chat_clear():
     _require_user()
     room_code = _current_room_code()
@@ -2750,7 +2769,7 @@ def api_chat_clear():
     return jsonify({"ok": True, "removed": len(removed)})
 
 
-@app.route("/stream/api/chat/image", methods=["POST"])
+@app.route(f"{BP}/api/chat/image", methods=["POST"])
 def api_chat_image():
     _require_user()
     f = request.files.get("file")
@@ -2761,10 +2780,10 @@ def api_chat_image():
     ext = f.filename.rsplit(".", 1)[-1].lower()
     fname = f"{new_id()}.{ext}"
     f.save(os.path.join(Config.CHAT_IMG_DIR, fname))
-    return jsonify({"url": f"/stream/media/chat/{fname}"})
+    return jsonify({"url": f"{BP}/media/chat/{fname}"})
 
 
-@app.route("/stream/api/avatar", methods=["POST"])
+@app.route(f"{BP}/api/avatar", methods=["POST"])
 def api_avatar_upload():
     user = _require_user()
     room_code = _current_room_code()
@@ -2780,7 +2799,7 @@ def api_avatar_upload():
     ext = f.filename.rsplit(".", 1)[-1].lower()
     fname = f"{new_id()}.{ext}"
     f.save(os.path.join(Config.AVATAR_DIR, fname))
-    url = f"/stream/media/avatars/{fname}"
+    url = f"{BP}/media/avatars/{fname}"
 
     if room_code:
         chat_obj = rooms.chat(room_code)
@@ -2810,7 +2829,7 @@ def _issue_tokens(session, user) -> dict:
     return {"access_token": access, "refresh_token": refresh}
 
 
-@app.route("/stream/api/auth/register", methods=["POST"])
+@app.route(f"{BP}/api/auth/register", methods=["POST"])
 def api_auth_register():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip()
@@ -2877,7 +2896,7 @@ def api_auth_register():
         session.close()
 
 
-@app.route("/stream/api/auth/verify-email")
+@app.route(f"{BP}/api/auth/verify-email")
 def api_auth_verify_email():
     token = (request.args.get("token") or "").strip()
     if not token:
@@ -2925,7 +2944,7 @@ a.btn{{display:inline-block;background:linear-gradient(135deg,#d4a017,#6b4e93);c
 </div></body></html>"""
 
 
-@app.route("/stream/api/auth/resend-verification", methods=["POST"])
+@app.route(f"{BP}/api/auth/resend-verification", methods=["POST"])
 def api_auth_resend_verification():
     data = request.get_json(force=True, silent=True) or {}
     email = (data.get("email") or "").strip().lower()
@@ -2952,7 +2971,7 @@ def api_auth_resend_verification():
         session.close()
 
 
-@app.route("/stream/api/auth/forgot-password", methods=["POST"])
+@app.route(f"{BP}/api/auth/forgot-password", methods=["POST"])
 def api_auth_forgot_password():
     data = request.get_json(force=True, silent=True) or {}
     email = (data.get("email") or "").strip().lower()
@@ -2974,7 +2993,7 @@ def api_auth_forgot_password():
         session.close()
 
 
-@app.route("/stream/api/auth/reset")
+@app.route(f"{BP}/api/auth/reset")
 def api_auth_reset_page():
     token = (request.args.get("token") or "").strip()
     session = dbmod.SessionLocal()
@@ -2992,7 +3011,7 @@ def api_auth_reset_page():
         session.close()
 
 
-@app.route("/stream/api/auth/reset-password", methods=["POST"])
+@app.route(f"{BP}/api/auth/reset-password", methods=["POST"])
 def api_auth_reset_password():
     data = request.get_json(force=True, silent=True) or {}
     if not data:
@@ -3069,7 +3088,7 @@ a.btn{{display:inline-block;background:linear-gradient(135deg,#d4a017,#6b4e93);c
 </div></body></html>"""
 
 
-@app.route("/stream/api/auth/login", methods=["POST"])
+@app.route(f"{BP}/api/auth/login", methods=["POST"])
 def api_auth_login():
     data = request.get_json(force=True, silent=True) or {}
     login = (data.get("username") or data.get("login") or "").strip()
@@ -3277,12 +3296,12 @@ def _oauth_redirect_back(message: str):
     return redirect(f"{Config.SITE_BASE_URL}/?{q}")
 
 
-@app.route("/stream/api/auth/oauth/<provider>")
+@app.route(f"{BP}/api/auth/oauth/<provider>")
 def api_oauth_login(provider: str):
     return _oauth_start(provider)
 
 
-@app.route("/stream/api/auth/oauth/<provider>/callback")
+@app.route(f"{BP}/api/auth/oauth/<provider>/callback")
 def api_oauth_callback(provider: str):
     if provider not in ("google", "github"):
         return jsonify({"error": "روش ورود نامعتبر است"}), 400
@@ -3316,7 +3335,7 @@ def api_oauth_callback(provider: str):
     )
 
 
-@app.route("/stream/api/auth/refresh", methods=["POST"])
+@app.route(f"{BP}/api/auth/refresh", methods=["POST"])
 def api_auth_refresh():
     data = request.get_json(force=True, silent=True) or {}
     token = (data.get("refresh_token") or "").strip()
@@ -3347,7 +3366,7 @@ def api_auth_refresh():
         session.close()
 
 
-@app.route("/stream/api/auth/logout", methods=["POST"])
+@app.route(f"{BP}/api/auth/logout", methods=["POST"])
 def api_auth_logout():
     data = request.get_json(force=True, silent=True) or {}
     token = (data.get("refresh_token") or "").strip()
@@ -3365,7 +3384,7 @@ def api_auth_logout():
     return jsonify({"ok": True})
 
 
-@app.route("/stream/api/auth/me")
+@app.route(f"{BP}/api/auth/me")
 def api_auth_me():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3404,7 +3423,7 @@ def _room_info_json(session, room_row: dbmod.Room) -> dict:
     }
 
 
-@app.route("/stream/api/room/info")
+@app.route(f"{BP}/api/room/info")
 def api_room_info():
     _require_user()
     code = (request.args.get("code") or "").strip().upper()
@@ -3420,7 +3439,7 @@ def api_room_info():
         session.close()
 
 
-@app.route("/stream/api/room/join", methods=["POST"])
+@app.route(f"{BP}/api/room/join", methods=["POST"])
 def api_room_join():
     user = _require_user()
     data = request.get_json(force=True, silent=True) or {}
@@ -3442,7 +3461,7 @@ def api_room_join():
         session.close()
 
 
-@app.route("/stream/api/room/mine", methods=["POST"])
+@app.route(f"{BP}/api/room/mine", methods=["POST"])
 def api_room_mine():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3475,7 +3494,7 @@ def _room_manage_guard(session, user: DBUser):
     return room_row, None, None
 
 
-@app.route("/stream/api/room/members", methods=["POST"])
+@app.route(f"{BP}/api/room/members", methods=["POST"])
 def api_room_members():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3513,7 +3532,7 @@ def api_room_members():
         session.close()
 
 
-@app.route("/stream/api/room/members/promote", methods=["POST"])
+@app.route(f"{BP}/api/room/members/promote", methods=["POST"])
 def api_room_promote():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3537,7 +3556,7 @@ def api_room_promote():
         session.close()
 
 
-@app.route("/stream/api/room/members/demote", methods=["POST"])
+@app.route(f"{BP}/api/room/members/demote", methods=["POST"])
 def api_room_demote():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3563,7 +3582,7 @@ def api_room_demote():
         session.close()
 
 
-@app.route("/stream/api/room/members/ban", methods=["POST"])
+@app.route(f"{BP}/api/room/members/ban", methods=["POST"])
 def api_room_ban():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3593,7 +3612,7 @@ def api_room_ban():
         session.close()
 
 
-@app.route("/stream/api/room/members/unban", methods=["POST"])
+@app.route(f"{BP}/api/room/members/unban", methods=["POST"])
 def api_room_unban():
     user = _require_user()
     session = dbmod.SessionLocal()
@@ -3618,7 +3637,7 @@ def api_room_unban():
 # Admin dashboard (role=admin only) — everything DB-synced
 # ────────────────────────────────────────────────────────────────────────────
 
-@app.route("/stream/api/admin/stats")
+@app.route(f"{BP}/api/admin/stats")
 def api_admin_stats():
     admin = _require_user()
     if not _is_admin(admin):
@@ -3639,7 +3658,7 @@ def api_admin_stats():
         session.close()
 
 
-@app.route("/stream/api/admin/users")
+@app.route(f"{BP}/api/admin/users")
 def api_admin_users():
     admin = _require_user()
     if not _is_admin(admin):
@@ -3663,7 +3682,7 @@ def api_admin_users():
         session.close()
 
 
-@app.route("/stream/api/admin/users/<user_id>", methods=["POST"])
+@app.route(f"{BP}/api/admin/users/<user_id>", methods=["POST"])
 def api_admin_update_user(user_id):
     admin = _require_user()
     if not _is_admin(admin):
@@ -3708,7 +3727,7 @@ def api_admin_update_user(user_id):
         session.close()
 
 
-@app.route("/stream/api/admin/users/<user_id>", methods=["DELETE"])
+@app.route(f"{BP}/api/admin/users/<user_id>", methods=["DELETE"])
 def api_admin_delete_user(user_id):
     admin = _require_user()
     if not _is_admin(admin):
@@ -4008,7 +4027,7 @@ def on_chat_send(data):
 
     if not text and not image_url:
         return
-    if image_url and "/stream/media/chat/" not in image_url:
+    if image_url and f"{BP}/media/chat/" not in image_url:
         image_url = None
 
     avatar_url = None

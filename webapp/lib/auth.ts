@@ -1,7 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
-import { apiUrl } from "./config";
+import { apiUrl, API_PREFIX } from "./config";
 import type { AuthRoom, AuthTokens, AuthUser, UserRole } from "./types";
 
 export type { AuthRoom, AuthTokens, AuthUser, UserRole };
@@ -122,7 +122,7 @@ export async function refreshAccessToken(): Promise<boolean> {
     return false;
   }
   try {
-    const res = await fetch(apiUrl("/stream/api/auth/refresh"), {
+    const res = await fetch(apiUrl(API_PREFIX + "/auth/refresh"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: refresh }),
@@ -171,7 +171,7 @@ export class VerifyRequiredError extends Error {
 }
 
 export function oauthLoginUrl(provider: "google" | "github"): string {
-  return apiUrl(`/stream/api/auth/oauth/${provider}`);
+  return apiUrl(API_PREFIX + `/auth/oauth/${provider}`);
 }
 
 /** Called after the OAuth callback redirects back with tokens in the URL
@@ -179,7 +179,7 @@ export function oauthLoginUrl(provider: "google" | "github"): string {
 export async function finishOAuthLogin(access: string, refresh: string): Promise<AuthUser | null> {
   let res: Response;
   try {
-    res = await fetch(apiUrl("/stream/api/auth/me"), {
+    res = await fetch(apiUrl(API_PREFIX + "/auth/me"), {
       headers: { Authorization: `Bearer ${access}` },
     });
   } catch {
@@ -194,7 +194,7 @@ export async function finishOAuthLogin(access: string, refresh: string): Promise
 export async function login(username: string, password: string): Promise<AuthUser> {
   let res: Response;
   try {
-    res = await fetch(apiUrl("/stream/api/auth/login"), {
+    res = await fetch(apiUrl(API_PREFIX + "/auth/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
@@ -220,7 +220,7 @@ export async function login(username: string, password: string): Promise<AuthUse
 export async function register(username: string, password: string, display_name = "", email = ""): Promise<AuthUser> {
   let res: Response;
   try {
-    res = await fetch(apiUrl("/stream/api/auth/register"), {
+    res = await fetch(apiUrl(API_PREFIX + "/auth/register"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password, display_name, email }),
@@ -250,7 +250,7 @@ export async function register(username: string, password: string, display_name 
 export async function resendVerification(email: string): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(apiUrl("/stream/api/auth/resend-verification"), {
+    res = await fetch(apiUrl(API_PREFIX + "/auth/resend-verification"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
@@ -265,7 +265,7 @@ export async function resendVerification(email: string): Promise<void> {
 export async function forgotPassword(email: string): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(apiUrl("/stream/api/auth/forgot-password"), {
+    res = await fetch(apiUrl(API_PREFIX + "/auth/forgot-password"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
@@ -281,7 +281,7 @@ export async function logout(): Promise<void> {
   const refresh = state.refresh;
   try {
     if (refresh) {
-      await fetch(apiUrl("/stream/api/auth/logout"), {
+      await fetch(apiUrl(API_PREFIX + "/auth/logout"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: refresh }),

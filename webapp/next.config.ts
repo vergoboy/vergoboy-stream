@@ -1,14 +1,17 @@
 import type { NextConfig } from "next";
 
+// Single source of truth for the mount point, shared with the client bundles
+// (lib/config.ts) so the build cannot disagree with itself.
+import { BASE_PATH } from "./lib/config";
+
 // Two build targets share this one config:
-//  - "web"   (default): served by Nginx at https://vergoboy.ir/stream/ —
-//    needs basePath "/stream" and same-origin (empty) API origin.
+//  - "web"   (default): served by Nginx under BASE_PATH (historically
+//    /stream, the second instance /w2g) — needs that basePath and a
+//    same-origin (empty) API origin.
 //  - "tauri": bundled inside the desktop/Android app, where the frontend's
 //    own origin is tauri://localhost (NOT vergoboy.ir) — so it must NOT
 //    have a basePath, and NEXT_PUBLIC_API_ORIGIN must be set to the real
 //    absolute backend URL at build time. See TAURI.md.
-const isTauriBuild = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri";
-
 const nextConfig: NextConfig = {
   output: "export",
   // makepkg's isolated Git worktree can prevent Next 16 from consuming the
@@ -17,7 +20,7 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: process.env.NEXT_SKIP_TYPECHECK === "1",
   },
-  basePath: isTauriBuild ? "" : "/stream",
+  basePath: BASE_PATH,
   trailingSlash: true,
   images: {
     unoptimized: true,

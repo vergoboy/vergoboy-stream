@@ -53,7 +53,7 @@ def _hls_item(item_id, *, status="complete", source=None, src=None):
         "type": "file",
         "title": "gone video",
         "status": status,
-        "src": src or f"/stream/media/hls/{item_id}/master.m3u8",
+        "src": src or f"{Config.BASE_PATH}/media/hls/{item_id}/master.m3u8",
         "renditions": [{"label": "720p", "status": "complete"}],
     }
     if source is not None:

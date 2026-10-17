@@ -4,8 +4,7 @@ import { useState } from "react";
 import { Copy, Check, DoorOpen, Home, Ticket } from "lucide-react";
 import { api } from "@/lib/api";
 import { updateUser } from "@/lib/auth";
-
-const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
+import { API_BASE_PATH } from "@/lib/config";
 
 /** Your ticket: the room code, a one-tap invite, and the way into someone else's room. */
 export function RoomBar({ roomCode, online, onRoomChange }: { roomCode: string; online: number; onRoomChange: (code: string) => void }) {
@@ -15,7 +14,7 @@ export function RoomBar({ roomCode, online, onRoomChange }: { roomCode: string; 
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null);
 
   const origin = process.env.NEXT_PUBLIC_API_ORIGIN || window.location.origin;
-  const inviteLink = `${origin}${basePath}/?join=${roomCode}`;
+  const inviteLink = `${origin}${API_BASE_PATH}/?join=${roomCode}`;
 
   function copyInvite() {
     navigator.clipboard

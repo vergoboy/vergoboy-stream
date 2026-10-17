@@ -52,10 +52,11 @@ webapp-out/
 .config/
 .stream_db.env
 
-# makepkg work directories and the local bare source repository
+# makepkg work directories and the local bare source repository (one per
+# instance: vergoboy-stream, vergoboy-w2g, ...)
 packaging/arch/pkg/
 packaging/arch/src/
-packaging/arch/vergoboy-stream/
+packaging/arch/vergoboy-*/
 
 # Server runtime — never commit
 cookies.txt
@@ -72,6 +73,11 @@ app.py.save
 .coverage.*
 .pytest_cache/
 
-# Locally built packages and the API-origin override written by build-arch.sh
+# Locally built packages, and the per-build metadata build-arch.sh writes into
+# packaging/arch/ (read by the PKGBUILD) and webapp/ (marks which instance the
+# shared webapp/out was exported for)
 packaging/arch/*.pkg.tar.zst
 packaging/arch/.api-origin
+packaging/arch/.instance
+packaging/arch/.build.lock
+webapp/.out-instance

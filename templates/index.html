@@ -25,7 +25,7 @@
     <nav>
       <a href="/" class="nav-link">🏠 خانه</a>
       <a href="/#services" class="nav-link">⚡ سرویس‌ها</a>
-      <a href="/stream" class="nav-link active">🎬 استریم</a>
+      <a href="{{ base_path or '/' }}" class="nav-link active">🎬 استریم</a>
       <a href="/donate" class="nav-link">💜 دونیت</a>
       <a href="/#contact" class="nav-link">✉️ تماس</a>
     </nav>
@@ -38,7 +38,7 @@
   <nav class="mobile-nav" id="mobile-nav">
     <a href="/" class="nav-link">🏠 خانه</a>
     <a href="/#services" class="nav-link">⚡ سرویس‌ها</a>
-    <a href="/stream" class="nav-link active">🎬 استریم</a>
+    <a href="{{ base_path or '/' }}" class="nav-link active">🎬 استریم</a>
     <a href="/donate" class="nav-link">💜 دونیت</a>
     <a href="/#contact" class="nav-link">✉️ تماس</a>
   </nav>
@@ -431,7 +431,7 @@
         <ul class="footer-links">
           <li><a href="/"><span class="fl-icon">🏠</span> خانه</a></li>
           <li><a href="/#services"><span class="fl-icon">⚡</span> سرویس‌ها</a></li>
-          <li><a href="/stream"><span class="fl-icon">🎬</span> استریم</a></li>
+          <li><a href="{{ base_path or '/' }}"><span class="fl-icon">🎬</span> استریم</a></li>
           <li><a href="/donate"><span class="fl-icon">💜</span> دونیت</a></li>
         </ul>
       </div>
@@ -461,6 +461,7 @@
   </div>
 </footer>
 
+<script>window.__STREAM_BASE_PATH__ = {{ base_path|tojson }};</script>
 <script src="{{ url_for('static', filename='js/vendor/socket.io.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/vendor/hls.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
