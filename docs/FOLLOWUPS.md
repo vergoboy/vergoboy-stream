@@ -507,3 +507,52 @@ the slow `ProcessHandling` tests above it drive shell scripts, and the socket
 offenders are plain HTTP. The 2 skips are the pre-existing non-HLS golden cases
 (`test_ffmpeg_cmd_golden.py:121`). So the fast suite's 412 s is transport and
 timeout waits, not misclassified tests; no marker change was worth a commit.
+
+## From the mpv player task, S4 re-scope — 2026-10-17
+
+S4 makes HLS transcoding **lazy** (started on demand by a web client or an
+admin, never on add and never by a native-mpv client — see the S4 decision in
+`docs/PROGRESS.md`). That stops the needless CPU burn; this section records the
+follow-up question the re-scope raises: what could be deleted entirely if the
+web client is dropped or limited to direct-play-compatible files. **Nothing
+here is started.** It is a separate phase, after GATE D2.
+
+### Retire the encode pipeline (separate phase after D2)
+
+Everything below is deletable if the web client no longer needs server-side
+transcoding. LOC measured 2026-10-17, exact to the line except where noted:
+
+* **`media_pipeline/` encode half — ~1,453 lines:** `encode.py` (447; also
+  holds the rendition-ladder config — the `quality`/`profile`/`preset` fields
+  are the ladder), `runner.py` (303; worker loop + hardware circuit breaker),
+  `ffmpeg_cmd.py` (406), `util.py` (230), `queue.py` (66), `__init__.py` (1).
+* **`media_pipeline/probe.py` is NOT in the deletions (255 lines, kept):** S4
+  runs ffprobe on add for metadata, encoded or not. Only the *encode* half of
+  the package goes.
+* **`app.py` wiring — ~60 call sites:** the encode queue + semaphore
+  (`ENCODE_SEMAPHORE`, `ENCODE_RUNNER`, ~15 `encode_queue`/`EncodeRunner`
+  lines), the encoded-frontier bookkeeping and clamp (~6 `frontier` lines,
+  `app.py:488` ff.), `transcode_progress` event plumbing (~18 lines), and the
+  HLS-serving branches (~20 `hls` lines).
+* **`transcode_progress` events end to end:** server emit, webapp listener,
+  and the UI that renders progress — all meaningless without encodes.
+* **Quality selector UI:** `webapp/src/components/player/QualitySelector.tsx`
+  (121 lines) plus its wiring in the player.
+* **Related tests — ~2,460 lines:** `tests/test_media_pipeline.py` +
+  `tests/test_media_runner.py` + `tests/test_media_pipeline_runtime.py` +
+  `tests/test_media_errors.py` (2,137 together) and
+  `tests/unit/test_ffmpeg_cmd_golden.py` (321). Probe-only cases survive with
+  `probe.py`; expect ~2,200–2,400 net deletions.
+
+**Total estimate: ~3,600–3,900 lines removed** (≈1,500 Python production,
+≈120 TSX, ≈2,300 tests, ≈60 call-site lines in `app.py`).
+
+**User-facing cost, stated plainly:** web users lose playback of anything a
+browser cannot direct-play — MKV containers, HEVC/H.265, 10-bit video, DTS
+audio — which is exactly what the ladder exists to fix. If instead the web
+client is *limited* to direct-play-compatible files (MP4/H.264/AAC), those
+items must show an explicit "not playable in browser" state. Native-mpv users
+are unaffected either way: they always direct-play the original bytes. The
+S4 gate must therefore report, per scenario, encodes started before vs after
+and the CPU time saved in the test scenario — the numbers that decide whether
+this retirement is worth a phase.

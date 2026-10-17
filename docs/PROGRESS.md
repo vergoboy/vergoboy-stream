@@ -102,6 +102,29 @@ options; the user chose **cut from `release/w2g-v1`**, so branching from
    with a cross `cargo check` if the target is available, otherwise declared
    unverified), `cargo tree` proving no Tauri dependency, and a gate report
    before S2. `make test-fast` green after every step; no push/merge.
+6. **S4 re-scope: lazy transcoding (2026-10-17).** Encoding is not removed by
+   this task by design (the web client keeps HLS), but it must stop being
+   triggered needlessly: today the transcode starts when an item is ADDED
+   (upload/import), before anyone plays it, so native-only rooms burn CPU.
+   S4 must make HLS/ffmpeg transcoding **lazy**, in separate small commits
+   with tests (characterization first, then the change, deleting what is
+   replaced): on add, only store the item and run ffprobe (metadata); start
+   the transcode only when a client of kind `"web"` requests playback (the
+   capabilities/item-open path) or an admin explicitly triggers it;
+   native-mpv clients never trigger it; existing completed HLS output is
+   kept and still served; interrupted/queued encodes on boot are only
+   re-kicked when a web client is waiting for them. The web experience for a
+   not-yet-encoded item must stay correct: existing "processing" state,
+   playable-after-N-seconds behaviour unchanged, no regression for items
+   already encoded. Required tests: add item → no ffmpeg process started;
+   native capabilities request → no ffmpeg; web request → encode starts
+   exactly once even with two clients asking simultaneously; web request for
+   a finished item → no re-encode. The S4 gate reports encodes started per
+   scenario before vs after, plus CPU time saved in the test scenario. The
+   encode pipeline itself is NOT deleted in this task — the retirement
+   inventory (with LOC and user-facing cost) is written up in
+   `docs/FOLLOWUPS.md` under "Retire the encode pipeline (separate phase
+   after D2)" and is not started.
 
 S1 rows are below; the plan was printed to the user before the first commit
 (their explicit condition).
