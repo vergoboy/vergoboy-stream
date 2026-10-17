@@ -687,7 +687,7 @@ impl PlayerPort for MpvPlayer {
         if let Err(e) = self.ensure_alive(true) {
             // One clear line when the restart budget is spent, never a stream
             // of them: transient failures below the budget already surfaced as
-            // the "restarting" event `ensure_alive` queued before failing.
+            // the `ProcessCrashed` event `ensure_alive` queued before failing.
             if self.restarts >= self.max_restarts && !self.fatal_reported {
                 self.fatal_reported = true;
                 self.pending.push_back(PlayerEvent::Error(e.to_string()));
@@ -698,9 +698,9 @@ impl PlayerPort for MpvPlayer {
             // Wait for the first *port* event; mpv noise (unobserved
             // properties, stray events) maps to nothing and is skipped while
             // there is time left on the clock.
-            let deadline = std::time::Instant::now() + timeout;
+            let deadline = Instant::now() + timeout;
             while self.pending.is_empty() {
-                let now = std::time::Instant::now();
+                let now = Instant::now();
                 if now >= deadline {
                     break;
                 }
