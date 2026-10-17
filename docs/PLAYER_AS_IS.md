@@ -317,8 +317,19 @@ clears its pending queue.
 What this commit's unit tests pin: throttle release, cache epsilon,
 both-halves track reporting, `Paused`/`UserPause` pairing, `Seeked` vs
 `UserSeek`, `ProcessCrashed`-not-`Error`, the 7-property observed set, and the
-fake's new methods, crash/recover, snapshot and latency. Real-mpv coverage of
-the new methods and the failure modes is the next commit.
+fake's new methods, crash/recover, snapshot and latency.
+
+The real-mpv tests then cover what the unit tests cannot: that the new control
+names and flag spellings are the ones mpv v0.41 accepts (`set_volume` including
+its clamp, `set_mute`, `set_fullscreen`, `add_subtitle` → a selected `sub`
+track, `set_sub_style`, and a `get_state` snapshot with a fetched duration and
+track list), and the failure modes — a crash **during a seek** (the call
+recovers the crash and still lands), a **frozen** mpv (`SIGSTOP` → IPC
+`Timeout` at ~3 s, no restart, `SIGCONT` recovers), a **dying** mpv releasing a
+pending caller with `NotRunning` rather than a timeout, and **no zombie**
+after quit or after the restart budget is spent (`kill -0` catches a zombie;
+`ps -eo args` shows no live mpv for the player's socket). Repeat-run and
+serialized runs are stable.
 
 ---
 
