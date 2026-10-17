@@ -1,0 +1,8 @@
+[Unit]
+Description=vergoboy VPN proxy exit-IP watchdog
+Documentation=file:///opt/vergoboy-proxy/README.md
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vergoboy-proxy/watchdog.sh

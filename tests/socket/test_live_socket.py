@@ -1035,7 +1035,7 @@ def test_room_persistence_stays_out_of_the_repo_data_dir(live_server):
 
     rs = app_module.rooms.get("TSTPERSIST")
     rs.add_item({"id": "pitem", "type": "file", "title": "persist probe",
-                 "src": "/stream/media/hls/pitem/master.m3u8", "status": "queued"})
+                 "src": f"{app_module.Config.BASE_PATH}/media/hls/pitem/master.m3u8", "status": "queued"})
     app_module.safe_save(rs)
 
     repo_room_file = Path(__file__).resolve().parents[2] / "data" / "rooms" / "TSTPERSIST.json"

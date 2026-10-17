@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vergoboy W2G
+Comment=تماشای گروهی در سینمای خصوصی (نمونهٔ دوم)
+Exec=vergoboy-w2g
+Icon=vergoboy-w2g
+Terminal=false
+Categories=AudioVideo;Video;Network;
+StartupWMClass=vergoboy-w2g

@@ -43,6 +43,7 @@ from .runner import (
     RunResult,
     build_fallback_chain,
     cleanup_orphaned_partials,
+    expose_partial_output,
 )
 
 __all__ = [
@@ -70,6 +71,7 @@ __all__ = [
     "classify_failure",
     "classify_stderr",
     "cleanup_orphaned_partials",
+    "expose_partial_output",
     "plan",
     "plan_compat",
     "probe",

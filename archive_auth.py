@@ -30,8 +30,24 @@ from archive_challenge import ChallengeHandler, UnsolvableChallenge
 from archive_challenge_auto import AutomaticChallengeHandler
 from archive_login_form import (LoginForm, LoginFormError, build_login_payload, is_authenticated_page,
                                 parse_login_form)
+from archive_solver import fetch_clearance
 
 LOG = logging.getLogger("archive.auth")
+
+
+def _is_cloudflare_challenge(response: requests.Response) -> bool:
+    """True when Cloudflare's edge is challenging this client, not WordPress.
+
+    Live capture (2026-10-16): the edge serves a "Just a moment..." page with
+    HTTP 403 and the ``cf-mitigated: challenge`` header to every endpoint at
+    once, so no response body was rendered by the site and neither a session
+    expiry nor a login outcome can be concluded from it.  The header is the
+    authoritative stamp; the page's CSP loading ``challenges.cloudflare.com``
+    is the fallback when an intermediary strips response headers.
+    """
+    if "challenge" in (response.headers.get("cf-mitigated") or "").lower():
+        return True
+    return "challenges.cloudflare.com" in response.text[:8192]
 
 
 class AuthState(str, Enum):
@@ -76,6 +92,9 @@ class AuthSettings:
     max_lag_streak: int = 3
     # Ceiling for the watchdog's backoff multiplier while lagging.
     lag_backoff_max: float = 4.0
+    # Local clearance sidecar ("" disables it).  When set, a Cloudflare wall
+    # triggers one solver round-trip before the failure stays classified.
+    solver_url: str = ""
 
 
 class _Outcome(Enum):
@@ -233,7 +252,7 @@ class ArchiveAuthManager:
                   interval_s=round(self.settings.check_interval * factor))
         return self.settings.check_interval * factor
 
-    def check(self, *, keep_manual_challenge: bool = False) -> bool | None:
+    def check(self, *, keep_manual_challenge: bool = False, _after_clearance: bool = False) -> bool | None:
         """True=valid, False=expired, None=temporary transport failure."""
         if not self.settings.enabled:
             return True
@@ -284,6 +303,25 @@ class ArchiveAuthManager:
                       redirect_to=safe_target(response.url), elapsed_ms=started.ms)
             return False
         login_path = self.settings.login_url.rstrip("/")
+        if _is_cloudflare_challenge(response):
+            if self.settings.solver_url and not _after_clearance and self._adopt_clearance():
+                # The sidecar minted a clearance into this session: retry the
+                # check exactly once.  A second wall (still walled edge, or a
+                # provisional token the edge refuses) falls through to the
+                # honest site_challenge below -- never a loop.
+                self._log("AUTH_CHECK_RETRY_AFTER_CLEARANCE")
+                return self.check(keep_manual_challenge=keep_manual_challenge, _after_clearance=True)
+            # The edge answered, not the site.  ``None`` is "temporary
+            # transport failure", which keeps ensure_authenticated() from
+            # opening the (equally walled) login form, and last_check_error
+            # names the cause so the API layer never reports an expired
+            # session the user cannot fix by logging in again.
+            self.last_check_error = "site_challenge"
+            self._note_latency(started.ms)
+            self._transition(AuthState.AUTH_FAILED, "site_challenge")
+            self._log("AUTH_CHECK_SITE_CHALLENGE", status=response.status_code,
+                      redirect_to=safe_target(response.url), elapsed_ms=started.ms)
+            return None
         if response.url.rstrip("/") == login_path or response.status_code in (401, 403):
             self._note_latency(started.ms)
             self._transition(AuthState.AUTH_EXPIRED, "redirected_to_login")
@@ -312,6 +350,29 @@ class ArchiveAuthManager:
         self._transition(AuthState.AUTH_FAILED, "http_error")
         self._log("AUTH_CHECK_HTTP_ERROR", status=response.status_code)
         return None
+
+    def _adopt_clearance(self) -> bool:
+        """Ask the local solver sidecar for a clearance and load it into the session.
+
+        The cleared browser hands over its ``cf_clearance`` cookies together
+        with the User-Agent they are bound to; both are adopted atomically so
+        no request can go out with a mismatched pair.  The archive proxy is
+        handed to the sidecar because it is the sidecar's browser, not this
+        process, that has to reach the walled site.
+        """
+        result = fetch_clearance(self.settings.solver_url, self.settings.check_url,
+                                 self.settings.http_proxy)
+        if result is None:
+            self._log("AUTH_CLEARANCE_FAILED")
+            return False
+        cookies, user_agent = result
+        host = urlsplit(self.settings.check_url).hostname or ""
+        for name, value in cookies.items():
+            self.session.cookies.set(name, value, domain=f".{host.lstrip('.')}")
+        self.session.headers["User-Agent"] = user_agent
+        self._log("AUTH_CLEARANCE_ADOPTED", cookie_names=sorted(cookies), user_agent=user_agent,
+                  cookie_count=len(self.session.cookies))
+        return True
 
     def ensure_authenticated(self) -> bool:
         # An unsolvable challenge is a deliberate terminal state.  Do this

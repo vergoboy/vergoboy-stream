@@ -11,6 +11,7 @@ from archive_auth import ArchiveAuthManager, AuthSettings, AuthState
 class Response:
     def __init__(self, url="https://example.test/account/", status=200, text="ok"):
         self.url, self.status_code, self.text, self.ok = url, status, text, status < 400
+        self.headers = {}   # real responses always carry headers; check() reads them
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError(str(self.status_code))

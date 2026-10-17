@@ -13,5 +13,6 @@ that do not exist yet).
 | **License** | Package: `GPL-2.0-or-later AND LGPL-2.1-or-later` (`pacman -Qi mpv`). We spawn the **binary** — no linking, no LGPL obligations in our code. |
 | **Not used** | `libmpv.so` (LGPL-2.1+) is *not* linked; see ADR 0002. |
 | **Distribution** | User/distro-installed, like ffmpeg. Absent → native client shows "install mpv"; web client unaffected. |
-| **Detection** | `mpv_controller` resolves `$STREAM_MPV_BIN`, then `PATH`; spawn failure is an `Error` port event, never a crash. |
-| **Evidence** | `docs/spike/mpv-ipc-observations.json`, ADR 0002 (incl. part-B wire-behaviour record), `cargo test -p mpv_controller` (21 tests, 3 of them against a real headless mpv). |
+| **Detection** | `mpv_controller` resolves `$STREAM_MPV_BIN`, then `PATH` (`mpv`, or `mpv.exe` on Windows); spawn failure is an `Error` port event, never a crash. |
+| **Transport** | unix socket (`--input-ipc-server=/path.sock`) on unix; Windows named pipe (`--input-ipc-server=\\.\pipe\mpv-…`) opened with `std::fs::OpenOptions`. **std only — no new crate, no `libmpv`, no `unsafe`.** Windows support is compile-verified (`cargo check -p mpv_controller --target x86_64-pc-windows-msvc`), not run (no Windows host). |
+| **Evidence** | `docs/spike/mpv-ipc-observations.json`, ADR 0002 (incl. part-B wire-behaviour record), `cargo test -p mpv_controller` (59 unit + 7 against a real headless mpv). |

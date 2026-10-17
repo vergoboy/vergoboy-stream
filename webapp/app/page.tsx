@@ -5,6 +5,7 @@ import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useLocalStorage } from "@/lib/useLocalStorage";
 import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
+import { API_BASE_PATH, BASE_PATH } from "@/lib/config";
 import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
 import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, mayManage, finishOAuthLogin } from "@/lib/auth";
@@ -45,7 +46,7 @@ let toastSeq = 0;
 type ContextTarget = "player" | "user" | "voice" | "page";
 type ContextMenuState = { x: number; y: number; kind: ContextTarget; name: string | null };
 
-const basePath = process.env.NEXT_PUBLIC_BUILD_TARGET === "tauri" ? "" : "/stream";
+const basePath = BASE_PATH;
 
 const PANEL_META: Record<PanelId, { title: string; icon: React.ReactNode }> = {
   queue: { title: "صف پخش", icon: <ListVideo className="h-6 w-6" /> },
@@ -493,7 +494,7 @@ function PageInner() {
   const copyInvite = () => {
     const origin = process.env.NEXT_PUBLIC_API_ORIGIN || window.location.origin;
     navigator.clipboard
-      ?.writeText(`${origin}${basePath}/?join=${roomCode}`)
+      ?.writeText(`${origin}${API_BASE_PATH}/?join=${roomCode}`)
       .then(() => {
         setChipCopied(true);
         window.setTimeout(() => setChipCopied(false), 1800);

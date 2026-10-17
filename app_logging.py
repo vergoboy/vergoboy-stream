@@ -24,8 +24,8 @@ Rotation is size-based (``RotatingFileHandler``) so a crash loop cannot fill the
 disk, and every message is passed through :func:`redact` first so a traceback
 carrying a cookie or token does not end up on disk in the clear.
 
-Client-side errors are accepted over ``POST /stream/api/log/client``; see
-:func:`record_client_error`.
+Client-side errors are accepted over the ``/api/log/client`` route (under the
+instance's mount point); see :func:`record_client_error`.
 """
 from __future__ import annotations
 
@@ -315,7 +315,7 @@ def record_client_error(payload: dict[str, Any], *, client_ip: str = "") -> str:
 
 
 def diagnostics() -> dict[str, Any]:
-    """Small snapshot for ``GET /stream/api/log/diagnostics``.
+    """Small snapshot for the ``/api/log/diagnostics`` route.
 
     Deliberately shallow: sizes, mtimes, tail of the crash log and the log path.
     It must be safe to hit while the app is broken, so it never parses more than

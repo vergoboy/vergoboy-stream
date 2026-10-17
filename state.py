@@ -284,7 +284,7 @@ class RoomState:
             if item.get("status") not in ("complete", "ready"):
                 continue
             src = item.get("src") or ""
-            if not src.startswith("/stream/media/hls/"):
+            if not src.startswith(f"{Config.BASE_PATH}/media/hls/"):
                 continue
             master = os.path.join(Config.HLS_DIR, str(item.get("id", "")), "master.m3u8")
             if os.path.exists(master):

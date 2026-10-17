@@ -228,9 +228,12 @@ The frontend is a **Next.js** application configured for **static export** (outp
 - **framer-motion** for animated transitions (sofa seating area, menus, etc.).
 - **Vazirmatn** (Persian) and **JetBrains Mono** fonts, loaded from the main vergoboy.ir site.
 
-The export is built twice-over from one config: `NEXT_PUBLIC_BUILD_TARGET=web`
-(the default, `basePath: /stream`, same-origin API) and `=tauri` (no basePath,
-absolute `NEXT_PUBLIC_API_ORIGIN`) for the desktop/Android shell in `src-tauri/`.
+The export is built three ways from one config. `NEXT_PUBLIC_BUILD_TARGET=web`
+(the default) mounts the app under `NEXT_PUBLIC_BASE_PATH` — `/stream` by
+default, `/w2g` for the second instance — with a same-origin API. `=tauri`
+drops the basePath and expects an absolute `NEXT_PUBLIC_API_ORIGIN` for the
+desktop/Android shell in `src-tauri/`. The mount point is inlined into the
+bundle at build time, so the value must match the instance it is deployed with.
 
 ### Client-Server Synchronization
 
@@ -257,10 +260,13 @@ HTTPS/WSS domains and refuses missing secrets or LiveKit configuration.
 | STREAM_ENV | development | `development` or `production`; systemd sets `production` explicitly |
 | STREAM_HOST | 127.0.0.1 | Local bind host |
 | STREAM_PORT | 8801 | Local bind port |
+| STREAM_BASE_PATH | /stream | Public URL prefix every route and generated URL is built under (`/w2g` for the second instance; empty = domain root) |
+| STREAM_INSTANCE | stream | Short instance name; namespaces the JWT `iss`/`aud` claims and the default LiveKit room |
+| STREAM_INSTANCE_ROOT | the checkout directory | Directory holding `media/` and `data/`, so released code and mutable state can live apart |
 | STREAM_SECRET_KEY | required | Flask/session signing key, at least 32 characters |
 | STREAM_DATABASE_URL | required | Persistent PostgreSQL SQLAlchemy URI; no fallback |
 | STREAM_JWT_SECRET | required | Independent JWT access/refresh signing key, at least 32 characters |
-| STREAM_SITE_URL | https://vergoboy.ir/stream | Public HTTPS base URL (verification links, OAuth redirects); explicit in production |
+| STREAM_SITE_URL | https://vergoboy.ir/stream | Public HTTPS base URL (verification links, OAuth redirects); defaults to `https://vergoboy.ir` + `STREAM_BASE_PATH`; explicit in production |
 | STREAM_ADMIN_EMAIL | unset | Verified address promoted to admin; explicit in production |
 | STREAM_CORS_ORIGINS | environment-specific | Comma-separated exact browser origins |
 | STREAM_MAIL_FROM | info@vergoboy.ir | Envelope/From for outgoing mail |
@@ -290,7 +296,7 @@ HTTPS/WSS domains and refuses missing secrets or LiveKit configuration.
 | STREAM_ARCHIVE_AUTH_CHECK_INTERVAL | 120 | Seconds between archive session health checks |
 | STREAM_ARCHIVE_REQUEST_TIMEOUT | 30 | Authentication request timeout in seconds |
 | STREAM_ARCHIVE_LOGIN_RETRY_COUNT | 3 | Login retries with exponential backoff |
-| STREAM_LIVEKIT_URL / _ROOM / _TOKEN_TTL | URL unset in development | Voice-room connection; production requires an explicit reachable WSS URL |
+| STREAM_LIVEKIT_URL / _ROOM / _TOKEN_TTL | URL unset in development | Voice-room connection; production requires an explicit reachable WSS URL. `_ROOM` defaults to `<STREAM_INSTANCE>-voice` |
 | STREAM_LIVEKIT_API_KEY / _API_SECRET | parsed from `/etc/livekit/config.yaml` | LiveKit token minting; never sent to clients |
 
 Notes:
@@ -323,6 +329,23 @@ to be copied — just make sure the main app is running.
   backend `Wants=`/`After=` for startup ordering, so re-running the build never
   stops the backend. `deploy/livekit-server.service` runs the pinned SFU as the
   `livekit` user and reads its protected config from `/etc/livekit/config.yaml`.
+- **Instances** — one codebase serves several mount points. The original is
+  `/stream` (`deploy/vergoboy-stream.service`, `/opt/stream`, port 8801); the
+  second is `/w2g` (`deploy/vergoboy-w2g.service`, `/opt/w2g`, port 8802,
+  `deploy/nginx-w2g.conf`). They differ only in `STREAM_BASE_PATH`,
+  `STREAM_INSTANCE`, `STREAM_INSTANCE_ROOT`, `STREAM_PORT`, `STREAM_SITE_URL`
+  and a distinct `STREAM_JWT_SECRET` — every route and every generated URL
+  follows from those. Both nginx snippets are pasted into the same `server{}`
+  block; instance-global locations (`/hls/`, `/whip/`, `/livekit/`) are
+  declared once, by the `/stream` snippet.
+- **Desktop client** — `./build-arch.sh` builds one *instance* of the Tauri
+  app: with no arguments it produces `vergoboy-stream-<ver>-<pkgrel>-x86_64.pkg.tar.zst`,
+  `./build-arch.sh --instance w2g` produces `vergoboy-w2g-…`. The two are the
+  same Rust binary carrying a different static export (the instance's API
+  origin and `NEXT_PUBLIC_API_BASE_PATH` are baked in at export time), so they
+  install side by side. `webapp/.out-instance` records which instance the
+  shared `webapp/out` belongs to and the script refuses to reuse it for a
+  different one.
 - **Nginx** — see the comments in `deploy/nginx-stream.conf`. Three things are
   easy to get wrong:
   - `/stream/` serves the static Next.js export from disk, not through Flask;

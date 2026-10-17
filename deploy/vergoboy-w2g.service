@@ -1,0 +1,52 @@
+[Unit]
+Description=vergoboy.ir — second Watch Party instance (/w2g)
+# Independent of the original vergoboy-stream.service and of the
+# vergoboy-frontend-build.service that serves it: /w2g's static export is
+# produced into the release directory at deploy time, not by a build unit.
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/w2g/current
+Environment="STREAM_ENV=production"
+Environment="STREAM_HOST=127.0.0.1"
+Environment="STREAM_PORT=8802"
+Environment="PATH=/opt/w2g/current/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Instance identity. This is the whole parametrization: the public mount point,
+# the short name that namespaces JWTs (iss/aud) and the LiveKit room, and the
+# directory that holds the mutable state (media/, data/) outside the versioned
+# releases so it survives an upgrade.
+Environment="STREAM_BASE_PATH=/w2g"
+Environment="STREAM_INSTANCE=w2g"
+Environment="STREAM_INSTANCE_ROOT=/opt/w2g"
+Environment="STREAM_SITE_URL=https://vergoboy.ir/w2g"
+Environment="STREAM_LIVEKIT_URL=wss://vergoboy.ir/livekit"
+Environment="STREAM_LIVEKIT_ROOM=w2g-voice"
+# app_logging falls back to $XDG_STATE_HOME/… (i.e. /var/www/.local, not
+# writable) when STREAM_LOG_DIR is unset. Point it inside ReadWritePaths.
+Environment="STREAM_LOG_DIR=/opt/w2g/data/logs"
+# Live namespace: deliberately NOT overridden. The RTMP ingest writes one
+# instance-global directory (config.py HLS_PLAYBACK_URL_TEMPLATE →
+# https://vergoboy.ir/hls/live/{key}/index.m3u8, served by the instance-global
+# /hls/ location declared in nginx-stream.conf). Pointing w2g at its own
+# /w2g/hls/ would hand out playlists nothing ever writes, so both instances
+# share the live namespace until the ingest is split per instance — see
+# docs/FOLLOWUPS.md. Stream keys are 10 hex chars generated independently per
+# instance, so a collision is negligible.
+EnvironmentFile=/opt/w2g/.stream_db.env
+
+ExecStart=/opt/w2g/current/venv/bin/python3 /opt/w2g/current/app.py
+Restart=always
+RestartSec=3
+
+# Baseline hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/w2g/media /opt/w2g/data
+
+[Install]
+WantedBy=multi-user.target

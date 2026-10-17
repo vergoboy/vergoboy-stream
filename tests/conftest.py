@@ -309,6 +309,20 @@ def live_server(request):
 
     import app as app_module
 
+    # Test-fixture only, and deliberately not app config: engine.io's default
+    # heartbeat cadence is a 25s ping with a 20s timeout (app.py's SocketIO is
+    # constructed without overriding them, so production keeps 25/20). Over
+    # the polling transport a graceful disconnect parks in a long-poll the
+    # server does not answer until its next ping, so every handshake-rejected
+    # client used to cost one full 25s interval (~300s across 12 tests, 73% of
+    # the suite — measured, docs/FOLLOWUPS.md "S1 side task"). Lowering the
+    # cadence on the server object before start-up changes nothing a product
+    # path can observe. Only the *interval* is lowered: the ~25s stall is the
+    # long-poll parked until the next ping, while a 1s *timeout* was measured
+    # to drop clients whose pong ran late under full-suite load (a `leave`
+    # instead of a `seek_clamped`), so the default 20s timeout is kept.
+    app_module.socketio.server.eio.ping_interval = 1
+
     port = _free_port()
     thread = threading.Thread(
         target=lambda: app_module.socketio.run(
@@ -393,9 +407,10 @@ def live_server(request):
 
     yield {
         "url": f"http://127.0.0.1:{port}",
-        # The app mounts Socket.IO at "stream/socket.io", not the default
-        # "/socket.io"; clients must be told or the handshake 404s.
-        "socketio_path": "stream/socket.io",
+        # The app mounts Socket.IO under its instance prefix (historically
+        # "stream/socket.io", the second instance "w2g/socket.io"), not the
+        # default "/socket.io"; clients must be told or the handshake 404s.
+        "socketio_path": f"{config_mod.Config.BASE_PATH}/socket.io".lstrip("/"),
         "module": app_module,
         "db": dbmod,
         "client": socketio_client,

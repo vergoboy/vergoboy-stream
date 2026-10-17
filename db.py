@@ -231,6 +231,9 @@ def _sign(payload: dict, ttl: timedelta) -> str:
     # unique refresh-token index and fail with a 500. A random `jti` makes every
     # token unique without changing any of the claims we actually rely on.
     payload["jti"] = uuid.uuid4().hex
+    # Stamp the minting instance. See decode_token() for why.
+    payload["iss"] = Config.JWT_ISSUER
+    payload["aud"] = Config.JWT_AUDIENCE
     return jwt.encode(payload, Config.JWT_SECRET, algorithm=Config.JWT_ALGORITHM)
 
 
@@ -244,9 +247,24 @@ def create_refresh_token(user_id: str) -> str:
 
 def decode_token(token: str) -> dict | None:
     try:
-        return jwt.decode(token, Config.JWT_SECRET, algorithms=[Config.JWT_ALGORITHM])
+        # verify_aud is deferred to the explicit check below so that a missing
+        # claim is treated the same as a mismatched one, rather than PyJWT
+        # raising for absence only.
+        payload = jwt.decode(
+            token, Config.JWT_SECRET, algorithms=[Config.JWT_ALGORITHM],
+            options={"verify_aud": False},
+        )
     except PyJWTError:
         return None
+    # Instance isolation. A token minted for another instance must never be
+    # accepted here even if the secrets were ever shared. Tokens minted
+    # before the iss/aud claims existed carry neither and are still honoured,
+    # so upgrading an instance does not log its users out.
+    if payload.get("iss") not in (None, Config.JWT_ISSUER):
+        return None
+    if payload.get("aud") not in (None, Config.JWT_AUDIENCE):
+        return None
+    return payload
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
