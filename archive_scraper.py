@@ -630,7 +630,14 @@ class DigimoviezMovieCollector:
         self.auth = auth
         self.connect_timeout, self.read_timeout = connect_timeout, read_timeout
         self.total_timeout, self.retries = total_timeout, retries
+        self.total_timeout, self.retries = total_timeout, retries
         self.session = auth.session
+        # Baseline browser UA for the whole archive session.  The clearance
+        # sidecar replaces it with the User-Agent its cf_clearance is bound to;
+        # sending any other UA beside that cookie is walled again (live
+        # evidence 2026-10-17: the adopted UA replayed 200, the old hardcoded
+        # UA was handed a 403).
+        self.session.headers["User-Agent"] = UA
 
     def _request(self, request: dict[str, Any]) -> str:
         deadline = time.monotonic() + self.total_timeout
@@ -643,9 +650,12 @@ class DigimoviezMovieCollector:
             if self.auth.settings.enabled and not self.auth.ensure_authenticated():
                 raise ArchiveRequestError(*_auth_failure(self.auth))
             try:
+                # No User-Agent here: it comes from the session, which carries
+                # the UA the adopted cf_clearance is bound to.  An explicit UA
+                # would override it and the edge would wall the request again.
                 response = self.session.request(request["method"], request["url"],
                     timeout=(self.connect_timeout, self.read_timeout), headers={
-                        "User-Agent": UA, "Accept-Language": "fa,en;q=0.8",
+                        "Accept-Language": "fa,en;q=0.8",
                         **({"X-Requested-With": "XMLHttpRequest",
                             "Referer": self.base_url + "/"} if request.get("ajax") else {}),
                     }, data=request.get("data"))

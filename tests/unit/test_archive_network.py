@@ -59,6 +59,9 @@ class Response:
 class ArchiveSession:
     def __init__(self, fail=False):
         self.cookies = requests.cookies.RequestsCookieJar()
+        # A real requests.Session always carries default headers; the collector
+        # and the clearance adopter both read and write User-Agent here.
+        self.headers = requests.structures.CaseInsensitiveDict()
         self.requests: list[tuple[str, str]] = []
         self.fail = fail
     def request(self, method, url, **kwargs):

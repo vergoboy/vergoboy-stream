@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import archive_auth
 from archive_auth import AuthState
-from tests.unit.fake_digimoviez import ACCOUNT_URL, FakeDigimoviez
+from archive_scraper import DigimoviezMovieCollector
+from tests.unit.fake_digimoviez import ACCOUNT_URL, AJAX_URL, BASE, FakeDigimoviez
 from tests.unit.test_archive_auth_flow import make
 
 SOLVER_URL = "http://127.0.0.1:8895"
@@ -100,3 +101,24 @@ def test_existing_wall_tests_still_hold_with_the_gate_configured_but_failing(tmp
     site.cloudflare_wall = False                            # the edge lifts on its own
     assert manager.ensure_authenticated() is True
     assert manager.last_check_error is None
+
+
+def test_search_sends_the_user_agent_the_clearance_is_bound_to(tmp_path, monkeypatch):
+    """The adopter's UA must survive into scrapes, not just into the session check.
+
+    A cf_clearance is bound to the User-Agent that minted it; the collector used
+    to stamp its own hardcoded UA on every scrape, which the edge then walled
+    even with a valid clearance (live evidence 2026-10-17: adopted UA -> 200,
+    hardcoded UA -> 403).  This pins that the scrape carries the adopted UA.
+    """
+    manager, site = walled_with_clearance(tmp_path)
+    monkeypatch.setattr(archive_auth, "fetch_clearance",
+                        lambda *_args: ({"cf_clearance": "tok-1"}, BROWSER_UA))
+    collector = DigimoviezMovieCollector(BASE, manager, connect_timeout=1, read_timeout=1,
+                                         total_timeout=5, retries=0)
+    assert manager.ensure_authenticated() is True
+    collector._search_ajax("dune", "movie")
+    scrapes = [seen for seen in site.requests if seen["url"].startswith(AJAX_URL)]
+    assert scrapes, "the search never reached the site"
+    assert scrapes[-1]["headers"]["User-Agent"] == BROWSER_UA
+    assert "cf_clearance=tok-1" in (scrapes[-1]["headers"].get("Cookie") or "")
