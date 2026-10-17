@@ -272,6 +272,54 @@ source. All three self-skip when mpv is absent.
 - `apply_profile`, `respawn` bookkeeping and `poll_events`' blocking loop are
   only exercised indirectly through the real-mpv happy path.
 
+### 1.10 The S1 extension — the vocabulary, filled in
+
+Path §1.8 of `docs/PROGRESS.md` fixed the shape; this is what the code does.
+
+**Events.** The three legacy variants are kept (`Ready`, `UserSeek`,
+`UserPause`) and seven are added, so one mpv message can be two events in a
+defined order — which is why `map_event` now returns `Vec<PlayerEvent>`
+(empty = not interesting) instead of `Option`:
+
+| Event | Source |
+| --- | --- |
+| `Loaded { duration, tracks }` | `file-loaded`; the metadata is *fetched* (the event carries none). Emitted before `Ready`, and again after a restart. |
+| `Position { pos }` | observed `time-pos`, throttled to one per 500 ms; `last_pos` still follows every sample, so a crash-resume is accurate. |
+| `Paused { paused }` | **every** `pause` change. A player-originated one also emits `UserPause`. |
+| `CacheState { buffered_secs }` | observed `demuxer-cache-duration`, deduped to a 0.25 s change. |
+| `Seeked { pos }` | our own seek (matched by the `own_seeks` counter). |
+| `TrackChanged { aid, sid }` | observed `aid`/`sid` change; both selections are reported. |
+| `ProcessCrashed { restarts }` | a death below the restart budget — replaces the old `Error("mpv exited; restarting…")` string. The fatal give-up is still `Error`. |
+
+The observed set grew from 3 to 7 properties (`OBSERVED`): `pause`,
+`paused-for-cache`, `eof-reached`, `time-pos`, `demuxer-cache-duration`,
+`aid`, `sid`. Everything else the UI needs (`volume`, `mute`, `fullscreen`,
+`duration`, `track-list`, `speed`) is read on demand by `get_state`.
+
+**Port methods.** Added `set_volume` (0–100, clamped), `set_mute`,
+`set_fullscreen`, `add_subtitle` (`sub-add … select`), `set_sub_style`
+(`sub-scale`/`sub-color`/`sub-border-color`/`sub-back-color`; `None` = leave
+alone) and `get_state` (a snapshot: pos, duration, pause, rate, aid, sid,
+volume, mute, fullscreen, profile, buffered seconds, tracks, loaded URL).
+`audio_add` and `set_cache_profile` already existed and are unchanged. Every
+name was checked against the installed mpv v0.41.0 (`--list-properties`).
+
+**Restart state-restore** grew beyond media/position/pause+profile to also
+re-apply volume, mute and fullscreen (`respawn`, best-effort).
+
+**`FakePlayer`** implements the whole surface: `latency` is now actually
+honoured (a synchronous sleep before a command takes effect, default zero);
+`crash()`/`recover()` model the process death and the restart, with state
+preserved and `Loaded`+`Ready` re-announced; `load` resets per-file state
+(tracks, external subs/audio, queued events) exactly as `MpvPlayer::load`
+clears its pending queue.
+
+What this commit's unit tests pin: throttle release, cache epsilon,
+both-halves track reporting, `Paused`/`UserPause` pairing, `Seeked` vs
+`UserSeek`, `ProcessCrashed`-not-`Error`, the 7-property observed set, and the
+fake's new methods, crash/recover, snapshot and latency. Real-mpv coverage of
+the new methods and the failure modes is the next commit.
+
 ---
 
 ## 2. Every feature `Player.tsx` provides today

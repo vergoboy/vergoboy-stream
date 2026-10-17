@@ -265,7 +265,7 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
         &mut p,
         &mut seen,
         0,
-        |e| matches!(e, PlayerEvent::Error(m) if m.contains("attempt 1")),
+        |e| matches!(e, PlayerEvent::ProcessCrashed { restarts: 1 }),
         Duration::from_secs(15),
     )
     .expect("restart reported");
@@ -293,7 +293,7 @@ fn crash_recovery_restarts_reaps_and_eventually_gives_up() {
             &mut p,
             &mut seen,
             0,
-            |e| matches!(e, PlayerEvent::Error(m) if m.contains(&format!("attempt {attempt}"))),
+            |e| matches!(e, PlayerEvent::ProcessCrashed { restarts } if *restarts == attempt),
             Duration::from_secs(15),
         )
         .unwrap_or_else(|| panic!("restart attempt {attempt} reported"));
