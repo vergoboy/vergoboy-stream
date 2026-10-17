@@ -407,9 +407,10 @@ explicitly what could not be verified.
 Measured 2026-10-17 with `venv/bin/python -m pytest -m "not integration" -q
 --durations=20` → **815 passed, 2 skipped, 412.43 s** (identical to the S0
 baseline's 412.56 s). The top 20 durations account for **401.3 s of those
-412.4 (97 %)** and fall into two clusters. Neither was fixed (the user's rule
-for this task: no fixes unless the fix is a one-line *marker* change); both are
-written up with the measured cause and the exact fix.
+412.4 (97 %)** and fall into two clusters. Cluster 1 was fixed on 2026-10-17
+as an S2 side task (user-approved, test-fixture only — see below); cluster 2
+is still not fixed (its fix is not a marker change and the test's 90 s is by
+design).
 
 ### 1. 12 × ~25.05 s = 300.6 s (73 % of the suite) — one engine.io ping interval per failed handshake
 
@@ -454,21 +455,27 @@ below instead drive their own raw client, so they pay it in the *call* phase:
 `test_a_token_signed_with_another_secret_is_rejected` (:994),
 `test_a_refresh_token_cannot_be_used_to_connect` (:1012).
 
-*Recommended fix (not applied — it is a fixture change, not a marker):* the
-ping cadence lives on the **engine.io server object**, which Flask-SocketIO
-exposes as `app_module.socketio.server.eio`
+*Fix — applied 2026-10-17 (S2 side task, user-approved test-fixture-only
+change).* The ping cadence lives on the **engine.io server object**, which
+Flask-SocketIO exposes as `app_module.socketio.server.eio`
 (`flask_socketio/__init__.py:257` → `socketio/base_server.py:19,34`), so
-`tests/conftest.py`'s `live_server` can lower it **for the tests only**, just
+`tests/conftest.py`'s `live_server` lowers it **for the tests only**, just
 before `thread.start()`:
 
 ```python
 app_module.socketio.server.eio.ping_interval = 1
-app_module.socketio.server.eio.ping_timeout = 1
 ```
 
-Two lines, no product behaviour touched (the default stays 25 s in
-production). Every one of the 12 drops to ~1 s, and their `wait_timeout=10`
-still has a comfortable margin. Expected: 412 s → ≈ 112 s.
+**Only the interval is set.** The first attempt also set `ping_timeout = 1`
+and that variant is measurably unsafe: it passed in isolation but under
+full-suite load the server dropped a client whose pong ran >1 s late —
+`test_an_item_with_nothing_playable_yet_is_not_freely_seekable` got a `leave`
+where it expected a `seek_clamped` (1 failed, 814 passed). The ~25 s stall
+never depended on the timeout (it is the long-poll parked until the next
+*ping*), so the default 20 s timeout stays. Measured after: the 12 tests drop
+from ~25.05 s to ~1.05 s each, and the suite goes **412.45 s → 124.23 s**
+(identical 815 passed / 2 skipped / 20 deselected, repeated run identical).
+No product behaviour touched — the default 25 s stays in production.
 
 Do **not** try `socketio.run(..., ping_interval=1)`: that is
 `flask_socketio.SocketIO.run(app, host, port, **kwargs)`
