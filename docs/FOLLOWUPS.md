@@ -401,3 +401,109 @@ lines in the two `.desktop` files, argv handling and single-instance in
 Verification required at S3: `vergoboy-w2g /path/file.mkv` **and**
 `xdg-open`/`gio open` if a display is available (Xvfb is fine); state
 explicitly what could not be verified.
+
+## From the mpv player task, S1 side task — where `make test-fast`'s 412 s goes
+
+Measured 2026-10-17 with `venv/bin/python -m pytest -m "not integration" -q
+--durations=20` → **815 passed, 2 skipped, 412.43 s** (identical to the S0
+baseline's 412.56 s). The top 20 durations account for **401.3 s of those
+412.4 (97 %)** and fall into two clusters. Neither was fixed (the user's rule
+for this task: no fixes unless the fix is a one-line *marker* change); both are
+written up with the measured cause and the exact fix.
+
+### 1. 12 × ~25.05 s = 300.6 s (73 % of the suite) — one engine.io ping interval per failed handshake
+
+Reproduced in isolation: `test_connect_with_a_valid_token_is_accepted` alone costs
+**25.05 s of call time with 0.9 s of CPU** — a blocked wait, not work. And a
+second one individually: `test_connect_with_no_auth_at_all_is_rejected`, same
+25.05 s.
+
+Cause chain (each link verified, not inferred):
+
+1. The live suite is **polling-only**: the server prints
+   `websocket-client package not installed, only polling transport is
+   available` at start-up, so there is no WebSocket to close promptly.
+2. On a namespace rejection python-socketio cleans up **politely**
+   (`socketio/client.py:169-170`: `if set(self.namespaces) !=
+   set(self.connection_namespaces): self.disconnect()`), and then raises
+   `ConnectionError`. The tests' own `_abort(client)` in `finally` therefore
+   runs too late — the cost is already paid inside `connect()`.
+3. `disconnect()` defaults to `abort=False`
+   (`engineio/client.py`), which ends with `self.read_loop_task.join()`.
+   With the polling transport the reader is parked in a long-poll GET the
+   server does not answer until its next **engine.io ping — 25 s**
+   (`ping_interval=25` default, `engineio/base_server.py:35`; the client reads
+   it from the handshake, `engineio/client.py:225`, served at
+   `engineio/server.py:398-400`).
+
+The suite already knew this and fixed it in one place: `connect_client`'s
+teardown uses the `_abort(client)` helper, whose comment reads "A graceful
+disconnect waits for the server's acknowledgement over the polling transport,
+which costs ~25s per client and dominated the suite's runtime." The 12 tests
+below instead drive their own raw client, so they pay it in the *call* phase:
+
+`tests/socket/test_live_socket.py` — `test_connect_with_a_valid_token_is_accepted`
+(:222 — its own polite `client.disconnect()` at :229),
+`test_connect_without_a_usable_token_is_rejected` (:233, 3 params),
+`test_connect_with_no_auth_at_all_is_rejected` (:246),
+`test_a_rejected_connect_joins_no_room` (:252),
+`test_a_banned_member_is_rejected_at_the_handshake` (:877),
+`test_a_user_with_no_room_cannot_connect` (:952),
+`test_a_deactivated_user_cannot_connect` (:961),
+`test_an_expired_token_is_rejected` (:974),
+`test_a_token_signed_with_another_secret_is_rejected` (:994),
+`test_a_refresh_token_cannot_be_used_to_connect` (:1012).
+
+*Recommended fix (not applied — it is a fixture change, not a marker):* the
+ping cadence lives on the **engine.io server object**, which Flask-SocketIO
+exposes as `app_module.socketio.server.eio`
+(`flask_socketio/__init__.py:257` → `socketio/base_server.py:19,34`), so
+`tests/conftest.py`'s `live_server` can lower it **for the tests only**, just
+before `thread.start()`:
+
+```python
+app_module.socketio.server.eio.ping_interval = 1
+app_module.socketio.server.eio.ping_timeout = 1
+```
+
+Two lines, no product behaviour touched (the default stays 25 s in
+production). Every one of the 12 drops to ~1 s, and their `wait_timeout=10`
+still has a comfortable margin. Expected: 412 s → ≈ 112 s.
+
+Do **not** try `socketio.run(..., ping_interval=1)`: that is
+`flask_socketio.SocketIO.run(app, host, port, **kwargs)`
+(`flask_socketio/__init__.py:577`) and its kwargs go to the **WSGI server**,
+not engine.io. (For completeness, the true construction-time knob would be
+`SocketIO(app, …, ping_interval=1)` at `app.py:148` — a product change, not
+recommended.) Alternative, transport-correct: add `websocket-client` to the
+dev deps so the WebSocket transport exists and the close is immediate.
+
+### 2. 90.13 s — `tests/test_media_runner.py::ProcessHandling::test_hard_timeout_scales_and_kills`
+
+Cause: the test asks for `duration_s=0`, so
+`RunnerConfig.timeout_for(0)` returns the cap, and `FakeConfig` sets
+`TIMEOUT_BASE = 30.0`, `TIMEOUT_PER_SECOND = 0.0`,
+`MAX_TIMEOUT = 30.0` (`tests/test_media_runner.py:68-81`) → **30 s per
+attempt**. The error is retryable and `MAX_RETRIES = 2`, so the runner walks
+the full chain — 1 + 2 attempts, each burning its whole 30 s against a script
+that emits progress forever, which is precisely what the test asserts. 3 × 30 s
+= 90 s is by design, not a hang.
+
+*Recommended fix (not applied):* wind `FakeConfig.MAX_TIMEOUT` (and
+`TIMEOUT_BASE`) down to `5.0` — one line, ≈ 75 s saved, and the watchdog
+semantics under test don't depend on the magnitude. Per-test
+`mock.patch.object` is the alternative if the shared config must stay real.
+Deliberately **not** an `integration` marker: this test needs no ffmpeg, so
+marking it out of `test-fast` would mislabel it and hide the only end-to-end
+check of the hard-timeout watchdog.
+
+### Marker audit (the one fix the task allows)
+
+None of the top-20 offenders is missing an `integration` marker. The one class
+in this area that genuinely needs a media stack — `RealEncode`
+(`tests/test_media_runner.py:619`) — already carries
+`pytestmark = pytest.mark.integration` and is excluded from `make test-fast`;
+the slow `ProcessHandling` tests above it drive shell scripts, and the socket
+offenders are plain HTTP. The 2 skips are the pre-existing non-HLS golden cases
+(`test_ffmpeg_cmd_golden.py:121`). So the fast suite's 412 s is transport and
+timeout waits, not misclassified tests; no marker change was worth a commit.
