@@ -359,3 +359,57 @@ the wall was cleared and archive search works again. See DEPLOY_LOG Session 10.
   own startup User-Agent check hang for 120 s (observed twice) and the
   container reports "Error getting browser User-Agent" instead of serving.
   The target proxy belongs in the per-request `proxy` field only.
+
+## From the mpv player task, S0 recon — 2026-10-17
+
+Everything below was observed while writing `docs/PLAYER_AS_IS.md`. None of it
+is code the mpv task needs, so none of it was changed (AGENTS.md rule 4).
+
+### Syncplay-style per-user local files
+
+LOCAL mode plays one local file on one machine. Matching *different* local
+files across clients of one room (each with their own copy, Syncplay-style) —
+name/size/hash negotiation, per-client paths — is explicitly out of scope.
+
+*Later:* if ever wanted, it rides on the same `Source` seam S3 introduces
+(`LocalSource` per client instead of one shared identity) plus a room-side
+matcher; the socket `control`/`state_sync` contract already carries everything
+except the file identity.
+
+### `/media/*` is unauthenticated for the web path too
+
+The S4 media token covers the **native** ROOM path only — the web/HLS client
+must keep working exactly as it does today (R5/R7: no behaviour change to the
+web build). But the pre-existing routes are wide open, which S0 measured:
+
+- Flask: `send_from_directory(…, conditional=True)` for `/media/uploads/`,
+  `/media/subs/`, `/media/hls/` — no auth anywhere, the only middleware on
+  `{BP}/media/*` is a CORS entry (`app.py:140`).
+- nginx: `location /w2g/media/ { alias /opt/w2g/media/; … }` with
+  `Accept-Ranges bytes` (`deploy/nginx-w2g.conf:55`) — serves any file under
+  the media tree to anyone who guesses the name.
+
+*Why not now:* tokenizing the shared `/media/*` paths changes every existing
+web client's URL shape and would need a coordinated deploy — a server change,
+which this task's scope excludes except where the native path requires it.
+
+*Later:* mint short-lived signed paths for `/media/*` (the S4 token scheme,
+widened), 302 from Flask to the signed URL, nginx `location` guard validating
+the signature; keep `conditional=True` so Range/206 semantics survive.
+
+### `.desktop` files declare no `MimeType` (touches the "Open with" DoD)
+
+`packaging/arch/vergoboy-{stream,w2g}.desktop` are `Exec=` + `Categories=`
+only — no `MimeType=`, no `Actions=`, and no CLI file-argument handling exists
+in `main.rs` (`fn main` = crash logging + `run()`). A file manager therefore
+offers no "Open with vergoboy-w2g" entry for a `.mkv`.
+
+*Why not now:* packaging is out of scope for this task by its own definition,
+and S6's LOCAL mode starts at the Tauri/argv layer.
+
+*Later / needs a call at S6:* the DoD ("plays offline from file-manager
+'Open with'") cannot be met without at least `MimeType=video/x-matroska;…` +
+`Exec=… %F` in the packaged `.desktop` and argv parsing in the binary. Either
+the packaging exclusion is relaxed for those two lines, or the DoD is
+verified via `vergoboy-w2g /path/file.mkv` from a shell — raise it before S6
+builds the argv path against an assumption.
