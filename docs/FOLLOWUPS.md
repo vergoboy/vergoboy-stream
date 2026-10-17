@@ -376,40 +376,28 @@ name/size/hash negotiation, per-client paths — is explicitly out of scope.
 matcher; the socket `control`/`state_sync` contract already carries everything
 except the file identity.
 
-### `/media/*` is unauthenticated for the web path too
+### ~~`/media/*` is unauthenticated for the web path too~~ — resolved 2026-10-17: moved into S4 scope
 
-The S4 media token covers the **native** ROOM path only — the web/HLS client
-must keep working exactly as it does today (R5/R7: no behaviour change to the
-web build). But the pre-existing routes are wide open, which S0 measured:
+The measurement stands (Flask `send_from_directory(…, conditional=True)` with
+no auth on `{BP}/media/*` beyond a CORS entry at `app.py:140`; nginx
+`location /w2g/media/` serving the tree with `Accept-Ranges` and no token,
+`deploy/nginx-w2g.conf:55`) — but the user ruled this is **not** a followup:
+it overlaps the task's section 3.5 (scoped media token), so it is S4 work.
 
-- Flask: `send_from_directory(…, conditional=True)` for `/media/uploads/`,
-  `/media/subs/`, `/media/hls/` — no auth anywhere, the only middleware on
-  `{BP}/media/*` is a CORS entry (`app.py:140`).
-- nginx: `location /w2g/media/ { alias /opt/w2g/media/; … }` with
-  `Accept-Ranges bytes` (`deploy/nginx-w2g.conf:55`) — serves any file under
-  the media tree to anyone who guesses the name.
+S4 must show tests for: no token → 401; wrong item → 403; expired token →
+401; valid token → 206 with `Content-Range`; and that the HLS/web path keeps
+working unchanged (the web client must not regress — if it needs a different
+mechanism, document it and gate it behind the client kind).
 
-*Why not now:* tokenizing the shared `/media/*` paths changes every existing
-web client's URL shape and would need a coordinated deploy — a server change,
-which this task's scope excludes except where the native path requires it.
+### ~~`.desktop` files declare no `MimeType`~~ — resolved 2026-10-17: approved into S3 scope
 
-*Later:* mint short-lived signed paths for `/media/*` (the S4 token scheme,
-widened), 302 from Flask to the signed URL, nginx `location` guard validating
-the signature; keep `conditional=True` so Range/206 semantics survive.
-
-### `.desktop` files declare no `MimeType` (touches the "Open with" DoD)
-
-`packaging/arch/vergoboy-{stream,w2g}.desktop` are `Exec=` + `Categories=`
-only — no `MimeType=`, no `Actions=`, and no CLI file-argument handling exists
-in `main.rs` (`fn main` = crash logging + `run()`). A file manager therefore
-offers no "Open with vergoboy-w2g" entry for a `.mkv`.
-
-*Why not now:* packaging is out of scope for this task by its own definition,
-and S6's LOCAL mode starts at the Tauri/argv layer.
-
-*Later / needs a call at S6:* the DoD ("plays offline from file-manager
-'Open with'") cannot be met without at least `MimeType=video/x-matroska;…` +
-`Exec=… %F` in the packaged `.desktop` and argv parsing in the binary. Either
-the packaging exclusion is relaxed for those two lines, or the DoD is
-verified via `vergoboy-w2g /path/file.mkv` from a shell — raise it before S6
-builds the argv path against an assumption.
+The measurement stands (`Exec=` + `Categories=` only, no `MimeType=`; no argv
+handling in `main.rs`), and the user ruled that local-mode entry points — CLI
+argument, file-manager "Open with", single-instance forwarding of a second
+file to the running window — are **explicitly required by section 3.4**, i.e.
+in scope, done in **S3** (not S6). Allowed edits, verbatim: the `MimeType=`
+lines in the two `.desktop` files, argv handling and single-instance in
+`main.rs`. Do **not** touch the PKGBUILD or anything under server/deploy.
+Verification required at S3: `vergoboy-w2g /path/file.mkv` **and**
+`xdg-open`/`gio open` if a display is available (Xvfb is fine); state
+explicitly what could not be verified.

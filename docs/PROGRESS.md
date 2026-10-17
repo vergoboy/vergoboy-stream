@@ -54,6 +54,46 @@ options; the user chose **cut from `release/w2g-v1`**, so branching from
 `main` (and dropping the multi-instance work) was rejected. Branch created:
 `feat/mpv-player` @ `c17a155` (S0 docs commit).
 
+### User decisions for S1–S4 (2026-10-17, verbatim intent)
+
+1. **Branch base** confirmed; the R3 deviation stays in the ledger; nothing is
+   merged or pushed to `main` from this branch.
+2. **`.desktop` `MimeType=` + `main.rs` argv/single-instance are IN SCOPE and
+   belong to S3**, not S6 — local-mode entry points (CLI argument,
+   file-manager "Open with", single-instance forwarding of a second file to
+   the running window) are required by the task's section 3.4. Allowed edits,
+   verbatim: the `MimeType=` lines in the two `.desktop` files, argv handling
+   and single-instance in `main.rs`. PKGBUILD and everything under
+   server/deploy stay untouched. FOLLOWUPS entry updated; DoD verification at
+   S3 must use `vergoboy-w2g /path/file.mkv` **and** `xdg-open`/`gio open` if a
+   display is available (Xvfb acceptable), naming whatever could not be
+   verified.
+3. **The unauthenticated `/media/*` paths are NOT a followup** — they overlap
+   section 3.5, so they move into **S4 scope**, with required tests: no token →
+   401, wrong item → 403, expired → 401, valid → 206 + `Content-Range`, and the
+   HLS/web path unregressed (a different mechanism is acceptable if documented
+   and gated behind the client kind).
+4. **Test-time side task:** the 20 slowest tests and their cause go into
+   `docs/FOLLOWUPS.md`; fixes only if a one-line marker change (own commit).
+5. **S1 scope:** characterization tests for the existing `mpv_controller`
+   first (published as pinned/not-covered, own commit), then exactly the listed
+   extension (port methods `set_volume`/`set_mute`, `add_audio`,
+   `add_subtitle(url|path)`, `set_sub_style`, `set_cache_profile`,
+   `set_fullscreen`, `get_state`; richer events `Loaded{duration,tracks}`,
+   `Position`, `Paused`, `Buffering`, `CacheState`, `Seeked`, `Ended`,
+   `TrackChanged`, `Error`, `ProcessCrashed`; `FakePlayer` implementing all of
+   it with virtual time and injectable stalls/latency/failures), the required
+   failure-mode tests (crash mid-play → `ProcessCrashed` then clean restart
+   with state restored; kill during seek; IPC timeout; socket/pipe reconnect;
+   no zombie asserted via the process table; real-mpv `--vo=null --ao=null`
+   integration that self-skips loudly; Windows named-pipe path behind `cfg`
+   with a cross `cargo check` if the target is available, otherwise declared
+   unverified), `cargo tree` proving no Tauri dependency, and a gate report
+   before S2. `make test-fast` green after every step; no push/merge.
+
+S1 rows are below; the plan was printed to the user before the first commit
+(their explicit condition).
+
 ## Session 3 (2026-10-15) — w2g delivery: T0 reconcile, T1 parametrize
 
 Mission (from the master instructions): a second instance at
