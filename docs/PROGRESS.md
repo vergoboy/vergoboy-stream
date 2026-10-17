@@ -5,6 +5,55 @@ Statuses: todo / doing / done / blocked.
 Phases in fixed order: P0 → P1 → P2 → P3 → P4 → P5 → P6. No phase starts
 before its predecessor's gate passed AND the user approved.
 
+## Session 11 (2026-10-17) — mpv player task (LOCAL + ROOM), steps S0→S8
+
+Mission (task doc): native client plays the **original** file in a real mpv
+process — LOCAL mode (offline, no login) and ROOM mode (original bytes over
+Range, no transcode, synchronized) — driven through Tauri commands; the web
+build keeps its HLS player untouched. Deployment/packaging/server work is out
+of scope (→ `docs/FOLLOWUPS.md`). Fixed order S0→S8, GATE D1 after S2, GATE D2
+after S6, both stop the run for user review. Documentation for S0 lives in
+**`docs/PLAYER_AS_IS.md`** (baseline: 815 py / 21 rust, and the exact feature
+inventory S7 must reproduce).
+
+| Step | Status | Commit | Evidence |
+| --- | --- | --- | --- |
+| S0 recon: baseline commands (`git status/branch/log`, `ls`, `wc -l`) | done | n/a | tree clean on `release/w2g-v1` @ `2abbe52`; `Player.tsx` = 1788 lines; full output quoted in docs/PLAYER_AS_IS.md §0 |
+| S0: `docs/PLAYER_AS_IS.md` written (mpv state + full player inventory) | done | c17a155 | 44 features enumerated (§2), crate state (§1), server/sync contract (§3), 5 rough edges (§5); out-of-scope notes → `docs/FOLLOWUPS.md` §S0 (incl. the `.desktop` MimeType gap the "Open with" DoD hits at S6) |
+| S0: `make test-fast` baseline | done | n/a | **815 passed, 2 skipped, 20 deselected, 412.56s**, EXIT=0 (2 skips = pre-existing `test_ffmpeg_cmd_golden` non-HLS cases) |
+| S0: `cargo test -p mpv_controller` baseline | done | n/a | **18 unit + 3 real-mpv = 21 passed, 0 failed**, EXIT=0 (real tests self-skip without mpv) |
+
+S0 findings that correct the task's premises (recorded, no code changed):
+
+- `mpv_controller` **already exists and is green** (2885 lines, `ec6891e`,
+  ADR 0002) — `PlayerPort`/`FakePlayer`/`MpvPlayer`/`MpvProcess`/IPC + real-mpv
+  integration tests. S1 *characterizes and extends* it, it does not start it.
+  Missing vs the task's §3.1: subtitles/`sub-add`, sub styles, `set_fullscreen`,
+  `get_state`, richer events (`Loaded/Position/Seeked/TrackChanged/
+  ProcessCrashed`), and all `--wid` window plumbing (tiers 1–2 don't exist).
+- `PlayerBackend`/`HlsBackend`/`MpvBackend` **do not exist** — the seam the task
+  calls "the only shared one" is aspirational (`RECONCILIATION.md:79`,
+  `PROGRESS.md` P1 row still `todo`). S7 creates it.
+- `GET /api/capabilities` **does not exist** (only an unrelated docstring at
+  `app.py:271`); no media-token code anywhere. nginx already serves
+  `/w2g/media/` from disk with `Accept-Ranges` and **no auth** — S4's token is a
+  real gap, not a refactor.
+- The Tauri layer has **zero player commands**: `src-tauri/src/lib.rs` (717
+  lines) is crash logging only; no `invoke_handler`, no `invoke()` in the app.
+- Server trust hole already present: `play`/`pause` accept the client's `at`
+  (`app.py:3970`) — S3.5's fix is a backward-compatible one-liner plus a
+  characterization test.
+- `docs/QA_NATIVE_CLIENT.md` §2 documents a `playback_status` socket event that
+  **does not exist** (handler is `watching`, `app.py:3883`) — stale doc, fix in
+  S8.
+
+**R8 resolved (user decision, 2026-10-17):** task R3 says branch
+`feat/mpv-player` from `main`, but HEAD was `release/w2g-v1` (`2abbe52`,
+unpushed, ahead of `main` by the whole `/w2g` delivery). Asked with three
+options; the user chose **cut from `release/w2g-v1`**, so branching from
+`main` (and dropping the multi-instance work) was rejected. Branch created:
+`feat/mpv-player` @ `c17a155` (S0 docs commit).
+
 ## Session 3 (2026-10-15) — w2g delivery: T0 reconcile, T1 parametrize
 
 Mission (from the master instructions): a second instance at
