@@ -236,6 +236,12 @@ impl PlayerPort for FakePlayer {
             tracks: self.tracks.clone(),
         });
         self.events.push_back(PlayerEvent::Ready);
+        // Documented asymmetry (ADR 0004): the real MpvPlayer credits a
+        // `start > 0` load as its own seek and therefore emits `Seeked`. The
+        // fake does not — a load already announces its target as `start`, so
+        // there is no transition left for a consumer to wait for. If a Sync
+        // engine ever needs to react to a load-position seek, close this gap
+        // deliberately rather than by accident.
         Ok(())
     }
 
@@ -244,6 +250,12 @@ impl PlayerPort for FakePlayer {
         self.calls.push(format!("seek {pos}"));
         self.pos = pos.clamp(0.0, self.duration);
         self.ended = false;
+        // Faithful to mpv (ADR 0004): our own seek does produce an event. The
+        // fake previously emitted nothing because it has no socket, which
+        // meant a `PlayerPort` consumer — the sync engine — could never see
+        // its own seek complete when testing against the fake. `load(start>0)`
+        // is the deliberate exception; see `load`.
+        self.events.push_back(PlayerEvent::Seeked { pos: self.pos });
         Ok(())
     }
 
@@ -557,13 +569,63 @@ mod tests {
         assert_eq!(f.get_pos().unwrap(), 0.0, "negative seeks clamp to 0");
         f.seek(999.0).unwrap();
         assert_eq!(f.get_pos().unwrap(), 10.0, "seeks past the end clamp to duration");
+        // Our own seek reports `Seeked` carrying the *clamped* position, so a
+        // consumer learns where it actually landed (ADR 0004; this is new —
+        // the fake used to emit nothing here).
+        assert_eq!(
+            f.poll_events(Duration::ZERO),
+            vec![
+                PlayerEvent::Seeked { pos: 0.0 },
+                PlayerEvent::Seeked { pos: 10.0 },
+            ]
+        );
 
         // Seeking back from EOF makes playback live again: time moves and a
         // second Ended is legitimate.
         f.seek(3.0).unwrap();
         assert_eq!(f.get_pos().unwrap(), 3.0);
         f.tick(20.0);
-        assert_eq!(f.poll_events(Duration::ZERO), vec![PlayerEvent::Ended]);
+        assert_eq!(
+            f.poll_events(Duration::ZERO),
+            vec![PlayerEvent::Seeked { pos: 3.0 }, PlayerEvent::Ended]
+        );
+    }
+
+    #[test]
+    fn an_injected_user_seek_is_not_swallowed_and_keeps_its_order() {
+        // The fake itself has no "user", so a `UserSeek` can only come from a
+        // test driving the port directly — it must pass through untouched and
+        // keep its place in line with the fake's own events. (`UserSeek` means
+        // "not ours", whoever issued it — ADR 0004.)
+        let mut f = FakePlayer::new(10.0);
+        f.load("m", 0.0, false).unwrap();
+        f.emit(PlayerEvent::UserSeek { pos: 4.0 });
+        f.seek(6.0).unwrap();
+        let mut expected = loaded(10.0);
+        expected.push(PlayerEvent::UserSeek { pos: 4.0 });
+        expected.push(PlayerEvent::Seeked { pos: 6.0 });
+        assert_eq!(f.poll_events(Duration::ZERO), expected);
+        assert_eq!(f.get_pos().unwrap(), 6.0, "our own seek still moved playback");
+    }
+
+    #[test]
+    fn the_fake_does_not_model_a_load_position_seek() {
+        // Deliberate, documented gap (ADR 0004): the real MpvPlayer credits a
+        // `start > 0` load as its own seek and emits `Seeked`; the fake
+        // announces the position inside `Loaded` instead, so there is no
+        // transition left to report. Asserted here so the asymmetry stays
+        // visible: if SyncEngine ever needs `Seeked` after a load, close this
+        // gap on purpose rather than by accident.
+        let mut f = FakePlayer::new(100.0);
+        f.load("file:///m.mkv", 12.0, true).unwrap();
+        assert_eq!(
+            f.poll_events(Duration::ZERO),
+            loaded(100.0),
+            "a start>0 load is not reported as a seek"
+        );
+        // A genuine own seek right after the load *is* reported.
+        f.seek(30.0).unwrap();
+        assert_eq!(f.poll_events(Duration::ZERO), vec![PlayerEvent::Seeked { pos: 30.0 }]);
     }
 
     #[test]

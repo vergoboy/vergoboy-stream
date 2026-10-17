@@ -825,3 +825,124 @@ fn a_dying_mpv_releases_a_pending_caller_instead_of_timing_out() {
     assert!(!ps_has_socket(&sock), "no mpv left running");
     let _ = std::fs::remove_file(&sock);
 }
+
+/// Our own seek must come back as `Seeked` and nothing else — never
+/// `UserSeek` — against a real mpv v0.41, for a seek we wait out before
+/// issuing the next one (ADR 0004's 1:1 credit rule).
+#[test]
+fn our_own_seek_is_reported_as_seeked_and_never_as_a_user_seek() {
+    if locate_mpv().is_none() {
+        eprintln!("SKIP: mpv not installed");
+        return;
+    }
+    let dir = fixture_dir("own-seek");
+    let wav = dir.join("own-seek.wav");
+    write_sine_wav(&wav, 30.0);
+
+    let mut p = start_player("own-seek");
+    let mut seen = Vec::new();
+
+    p.load(wav.to_str().unwrap(), 0.0, true).expect("load a local wav");
+    wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::Ready),
+        Duration::from_secs(15),
+    )
+    .expect("Ready after load");
+
+    // Two own seeks, each waited out before the next: both must be `Seeked`.
+    p.seek(5.0).expect("first seek");
+    let first = wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::Seeked { .. }),
+        Duration::from_secs(5),
+    )
+    .expect("our first seek is reported as Seeked");
+    p.seek(15.0).expect("second seek");
+    wait_from(
+        &mut p,
+        &mut seen,
+        first + 1,
+        |e| matches!(e, PlayerEvent::Seeked { .. }),
+        Duration::from_secs(5),
+    )
+    .expect("our second seek is reported as Seeked");
+
+    // Give a mislabelled late event a chance to show up before counting.
+    poll_window(&mut p, &mut seen, Duration::from_millis(1500));
+    let seeked = seen
+        .iter()
+        .filter(|e| matches!(e, PlayerEvent::Seeked { .. }))
+        .count();
+    let user_seeks = seen
+        .iter()
+        .filter(|e| matches!(e, PlayerEvent::UserSeek { .. }))
+        .count();
+    assert_eq!(seeked, 2, "exactly one Seeked per own seek: {seen:?}");
+    assert_eq!(user_seeks, 0, "our own seeks are never UserSeek: {seen:?}");
+
+    p.shutdown();
+    assert!(!p.is_running(), "shutdown must stop the player");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An mpv-*initiated* seek (loop restart at EOF) with no credit in flight must
+/// surface as `UserSeek` — evidence that `UserSeek` means "not ours", not "the
+/// local user", and that a consumer must treat it as advisory (ADR 0004).
+#[test]
+fn an_mpv_initiated_seek_is_reported_as_a_user_seek() {
+    if locate_mpv().is_none() {
+        eprintln!("SKIP: mpv not installed");
+        return;
+    }
+    let dir = fixture_dir("loop-seek");
+    let wav = dir.join("loop-seek.wav");
+    write_sine_wav(&wav, 3.0);
+
+    let mut opts = MpvOptions::new(sock_path("loop-seek"));
+    opts.headless = true;
+    opts.extra.push("--loop-file=inf".into());
+    let mut p = MpvPlayer::start(opts).expect("spawn mpv");
+    let mut seen = Vec::new();
+
+    p.load(wav.to_str().unwrap(), 0.0, true).expect("load a local wav");
+    wait_from(
+        &mut p,
+        &mut seen,
+        0,
+        |e| matches!(e, PlayerEvent::Ready),
+        Duration::from_secs(15),
+    )
+    .expect("Ready after load");
+    p.set_paused(false).expect("unpause");
+    wait_pos(&mut p, |pos| pos > 0.3, Duration::from_secs(5))
+        .expect("time advances while playing");
+
+    // Playback is confirmed running and we have issued no seek: from here,
+    // the only bare `seek` event mpv can produce is its own loop restart.
+    let from = seen.len();
+    wait_from(
+        &mut p,
+        &mut seen,
+        from,
+        |e| matches!(e, PlayerEvent::UserSeek { .. }),
+        Duration::from_secs(15),
+    )
+    .expect("the loop restart is reported as a UserSeek");
+    // No own seek was in flight, so nothing may be labelled ours.
+    assert!(
+        !seen[from..].iter().any(|e| matches!(e, PlayerEvent::Seeked { .. })),
+        "no Seeked without an own seek: {:?}",
+        &seen[from..]
+    );
+
+    p.shutdown();
+    assert!(!p.is_running(), "shutdown must stop the player");
+    drop(p);
+    let _ = std::fs::remove_dir_all(&dir);
+}

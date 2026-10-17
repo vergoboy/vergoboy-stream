@@ -109,8 +109,12 @@ pub enum PlayerEvent {
     /// restart budget spent). Fatal for the current attempt; a *recoverable*
     /// process death is [`PlayerEvent::ProcessCrashed`] instead.
     Error(String),
-    /// A seek the *user* started (drag/keyboard/click), as opposed to one we
-    /// requested — the sync layer must broadcast these, not swallow them.
+    /// A seek **we did not issue** — mpv itself, a key binding, a chapter jump,
+    /// a loop restart. Note the wording: mpv's `seek` event has no `reason`, so
+    /// the port can only ever tell *not ours* from *ours*, and "the local user
+    /// dragged the bar" is the caller's inference, not this event's promise.
+    /// The sync layer must broadcast these, not swallow them — but treat them
+    /// as advisory. Rule and measurement table: `docs/adr/0004-seek-origin-matching.md`.
     UserSeek { pos: f64 },
     /// A pause toggle that came from the player itself (media key, mpv input
     /// script), not from our own `set_paused`.
@@ -136,7 +140,10 @@ pub enum PlayerEvent {
     Paused { paused: bool },
     /// Cache/buffer telemetry: seconds buffered ahead of the playhead.
     CacheState { buffered_secs: f64 },
-    /// A seek *we* asked for completed (`UserSeek` is the user's).
+    /// A seek **we** asked for completed. Safe to treat as confirmation that
+    /// our own seek landed: it can only be emitted while a credit from
+    /// `seek()`/`load(start>0)` is outstanding. `UserSeek` is the complement,
+    /// not the user's — see `docs/adr/0004-seek-origin-matching.md`.
     Seeked { pos: f64 },
     /// The selected audio/subtitle tracks changed — by our own selection, by
     /// an added track, or by mpv itself.

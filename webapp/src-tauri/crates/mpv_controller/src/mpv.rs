@@ -11,10 +11,14 @@
 //!   first `pause` / `paused-for-cache` / `eof-reached` change is discarded
 //!   (`initial_props`). Without this the port would start with a phantom
 //!   `Buffering(false)` and a phantom `UserPause`.
-//! * the `seek` event carries **no** `reason` field — a command seek and a
-//!   keypress seek both arrive as plain `{"event":"seek"}` — so our own seeks
-//!   are tracked with a counter (`own_seeks`) and only unmatched seeks become
-//!   `UserSeek`.
+//! * the `seek` event carries **no** `reason` field — a command seek, a
+//!   keypress, a chapter jump and a loop restart all arrive as plain
+//!   `{"event":"seek"}` — so origin is tracked with a pending-credit counter
+//!   (`own_seeks`) and only unmatched seeks become `UserSeek`. Every own seek
+//!   emits exactly one `seek` event (measured, even a no-op to the current
+//!   position), so credits are 1:1 and no time window is needed. The full
+//!   rule, the measurement table and what S6 may rely on are in
+//!   `docs/adr/0004-seek-origin-matching.md`.
 //! * the `pause` echo to `set_property` races its reply (it can arrive before
 //!   *or* after), so echoes are recognised by comparing against the last value
 //!   we wrote (`own_pause`), never by timing.
@@ -89,8 +93,11 @@ pub struct MpvPlayer {
     /// observed change, so a user toggling away from and back to our value is
     /// still seen.
     own_pause: Option<bool>,
-    /// Command seeks sent but not yet matched by a `seek` event. mpv gives no
-    /// way to tell the two apart on the event itself.
+    /// Pending own seeks: command seeks sent but not yet matched by a `seek`
+    /// event. mpv gives no way to tell the two apart on the event itself, so
+    /// this is the whole of the distinction — counter only, no ids, no time
+    /// window (measured 1:1; `respawn` drops a stranded credit). Rule:
+    /// `docs/adr/0004-seek-origin-matching.md`.
     own_seeks: u32,
     /// Observed properties whose initial (on-subscription) emission has not
     /// been discarded yet. Refilled on every respawn.
@@ -308,8 +315,10 @@ impl MpvPlayer {
                 }
             }
             "seek" => {
-                // No `reason` field exists (mpv v0.41) — ours by counter,
-                // the user's if unmatched.
+                // Bare `{"event":"seek"}` (mpv v0.41): no reason, no id, no
+                // position — measured, see ADR 0004. A credit makes it ours
+                // (`Seeked`); with no credit we know only that we did *not*
+                // issue it, which is reported as `UserSeek`.
                 if self.own_seeks > 0 {
                     self.own_seeks -= 1;
                     let pos = self.time_pos_now();
@@ -828,6 +837,56 @@ mod tests {
         assert_eq!(p.own_seeks, 0);
         // No rpc in a unit test: the position falls back to `last_pos`.
         assert_eq!(p.map_event(seek), vec![PlayerEvent::UserSeek { pos: 7.5 }]);
+    }
+
+    #[test]
+    fn two_own_seeks_in_a_row_are_both_ours() {
+        // Two commands in flight before mpv answers: credits stack and are
+        // spent one per event, so neither seek is mistaken for someone else's
+        // (ADR 0004 — measured 1:1, no time window needed).
+        let mut p = observing_player();
+        p.last_pos = 7.5;
+        p.own_seeks = 2;
+        let seek = serde_json::json!({ "event": "seek" });
+        assert_eq!(p.map_event(seek.clone()), vec![PlayerEvent::Seeked { pos: 7.5 }]);
+        assert_eq!(p.map_event(seek.clone()), vec![PlayerEvent::Seeked { pos: 7.5 }]);
+        assert_eq!(p.own_seeks, 0, "each credit is consumed exactly once");
+        // Only now is a seek unambiguously not ours.
+        assert_eq!(p.map_event(seek), vec![PlayerEvent::UserSeek { pos: 7.5 }]);
+    }
+
+    #[test]
+    fn an_mpv_internal_seek_with_no_credit_is_reported_as_a_user_seek() {
+        // Chapter jump, loop restart, post-buffer recovery: mpv issues these
+        // itself and they arrive as the same bare `seek` event (measured,
+        // ADR 0004). With no credit we only know *we* did not seek — the
+        // state is indistinguishable from a local user's seek, so it is
+        // reported as `UserSeek`, and a consumer (SyncEngine) must treat that
+        // as advisory rather than as "the local user did something".
+        let mut p = observing_player();
+        p.last_pos = 12.0;
+        assert_eq!(p.own_seeks, 0, "mpv issued this one, not us");
+        assert_eq!(
+            p.map_event(serde_json::json!({ "event": "seek" })),
+            vec![PlayerEvent::UserSeek { pos: 12.0 }]
+        );
+    }
+
+    #[test]
+    fn an_internal_seek_racing_ours_consumes_the_credit_and_swaps_the_labels() {
+        // Race: our command is in flight (one credit) when mpv's own internal
+        // seek fires first. The two events are byte-identical on the wire, so
+        // the first one spends our credit: the internal seek is labelled
+        // `Seeked` and ours lands as `UserSeek`. The labels are swapped, but
+        // every event is still reported exactly once — accepted and documented
+        // in ADR 0004; SyncEngine's advisory reading of `UserSeek` covers it.
+        let mut p = observing_player();
+        p.last_pos = 5.0;
+        p.own_seeks = 1;
+        let seek = serde_json::json!({ "event": "seek" });
+        assert_eq!(p.map_event(seek.clone()), vec![PlayerEvent::Seeked { pos: 5.0 }]);
+        assert_eq!(p.own_seeks, 0, "the racing internal seek spent our credit");
+        assert_eq!(p.map_event(seek), vec![PlayerEvent::UserSeek { pos: 5.0 }]);
     }
 
     #[test]
