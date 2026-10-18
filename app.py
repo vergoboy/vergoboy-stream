@@ -65,6 +65,7 @@ from app_logging import diagnostics as log_diagnostics, record_client_error
 import db as dbmod
 from db import User as DBUser
 import permissions as permmod
+import sync_token as synctoken
 from livekit_auth import generate_livekit_token
 import mail as mailmod
 from srt_to_vtt import convert_srt_to_vtt
@@ -2515,6 +2516,28 @@ def api_new_key():
 # ────────────────────────────────────────────────────────────────────────────
 # LiveKit voice room
 # ────────────────────────────────────────────────────────────────────────────
+
+@app.route(f"{BP}/api/room/sync-token", methods=["POST"])
+def api_room_sync_token():
+    """Short-lived token for the room sync service (w2g-server).
+
+    Role = controller only when the user's *resolved* room permissions allow play, pause
+    and seek (so the owner's role/preset settings decide who may drive the room)."""
+    user = _require_user()
+    room_code = _current_room_code()
+    if not room_code:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد اتاق شو"}), 400
+    if not Config.SYNC_CONFIGURED:
+        return jsonify({"error": "سرویس همگام‌سازی روی این سرور تنظیم نشده است"}), 503
+    can_play = _has_perm(user, permmod.PERM_PLAY_VIDEO)
+    can_pause = _has_perm(user, permmod.PERM_PAUSE_VIDEO)
+    can_seek = _has_perm(user, permmod.PERM_SEEK_FORWARD) and _has_perm(user, permmod.PERM_SEEK_BACKWARD)
+    role = synctoken.role_for(can_play, can_pause, can_seek)
+    exp = int(time.time()) + Config.SYNC_TOKEN_TTL
+    token = synctoken.mint(Config.SYNC_SECRET.encode("utf-8"), user.id, room_code, role, exp)
+    return jsonify({"url": Config.SYNC_URL, "token": token, "room": room_code,
+                    "role": role, "expires_at": exp})
+
 
 @app.route(f"{BP}/api/voice/token", methods=["POST"])
 def api_voice_token():

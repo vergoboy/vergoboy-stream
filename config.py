@@ -314,6 +314,13 @@ class Config:
     LIVEKIT_ROOM = os.environ.get("STREAM_LIVEKIT_ROOM", f"{INSTANCE}-voice")
     LIVEKIT_TOKEN_TTL = int(os.environ.get("STREAM_LIVEKIT_TOKEN_TTL", "14400"))
 
+    # Room sync service (w2g-server). Tokens are signed with SYNC_SECRET; the same
+    # secret must be given to w2g-server as W2G_SECRET. Unset => /api/room/sync-token is 503.
+    SYNC_URL = os.environ.get("STREAM_SYNC_URL", "").strip()
+    SYNC_SECRET = os.environ.get("STREAM_SYNC_SECRET", "")
+    SYNC_TOKEN_TTL = int(os.environ.get("STREAM_SYNC_TOKEN_TTL", "21600"))
+    SYNC_CONFIGURED = bool(SYNC_URL and len(SYNC_SECRET) >= 32)
+
     @classmethod
     def validate(cls):
         if cls.ENVIRONMENT not in {"development", "production"}:
