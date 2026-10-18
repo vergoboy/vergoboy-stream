@@ -28,6 +28,7 @@ import { PlayerControls, type QualityOption } from "./PlayerControls";
 import { run, ripple, popIn, spring } from "@/lib/anim";
 import { useIdle, useViewport } from "@/lib/useIdle";
 import { canNativeFloat, enterNativeMini, setNativeFullscreen, isTauri, isMobileOS } from "@/lib/tauri";
+import { nativePlayerAvailable, onNativePlayerExit, startNativePlayer } from "@/lib/nativePlayer";
 import { localPoint } from "@/lib/geometry";
 
 
@@ -95,6 +96,16 @@ export function Player({
   const { settings, setSettings } = useAppSettings();
   const sc = settings.shortcuts;
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Native mpv player (desktop app only). While it runs, the web <video> stays silent so there is one voice.
+  const [nativeAvail, setNativeAvail] = useState(false);
+  const [nativeActive, setNativeActive] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    let off: (() => void) | undefined;
+    nativePlayerAvailable().then((ok) => { if (!dead) setNativeAvail(ok); });
+    onNativePlayerExit(() => setNativeActive(false)).then((f) => { if (dead) f(); else off = f; });
+    return () => { dead = true; off?.(); };
+  }, []);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -1077,9 +1088,9 @@ export function Player({
     const v = videoRef.current;
     if (v) {
       v.volume = volume;
-      v.muted = muted;
+      v.muted = muted || nativeActive;
     }
-  }, [volume, muted]);
+  }, [volume, muted, nativeActive]);
 
   // commands from the right-click menu (fullscreen / floating live in this component)
   const cmdRef = useRef({ toggleFullscreen, togglePip });
@@ -1289,6 +1300,12 @@ export function Player({
   });
 
   const title = item ? prettyTitle(item.title) : "";
+  const startNative = () => {
+    if (!mediaSrc || !item || nativeActive) return;
+    startNativePlayer({ mediaUrl: mediaSrc, title })
+      .then(() => setNativeActive(true))
+      .catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e)));
+  };
   const controls = (
     <PlayerControls
       rotated={rotated}
@@ -1355,6 +1372,9 @@ export function Player({
       qualities={qualityOptions}
       onOpenSettings={onOpenSettings}
       floatSupported={Boolean(item)}
+      nativeSupported={nativeAvail && Boolean(mediaSrc) && item?.type !== "live"}
+      nativeActive={nativeActive}
+      onNativePlay={startNative}
       floating={mini || inPip}
       onToggleFloat={togglePip}
       fullscreen={fullscreen}

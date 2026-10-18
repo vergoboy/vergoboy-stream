@@ -7,6 +7,8 @@
 //! the same `data/logs` directory as the Python backend, which lets the whole
 //! picture be read from one place after the fact.
 
+mod native_player;
+
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -263,7 +265,14 @@ pub fn run() {
     use tauri::Manager;
 
     log("info", "entering tauri builder");
-    let builder = tauri::Builder::default().setup(|app| {
+    let builder = tauri::Builder::default()
+        .manage(native_player::NativePlayer::default())
+        .invoke_handler(tauri::generate_handler![
+            native_player::native_player_available,
+            native_player::native_player_start,
+            native_player::native_player_stop
+        ])
+        .setup(|app| {
         log(
             "info",
             &format!("setup ok: webview_windows={}", app.webview_windows().len()),
