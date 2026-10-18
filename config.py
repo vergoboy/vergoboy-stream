@@ -320,6 +320,11 @@ class Config:
     SYNC_SECRET = os.environ.get("STREAM_SYNC_SECRET", "")
     SYNC_TOKEN_TTL = int(os.environ.get("STREAM_SYNC_TOKEN_TTL", "21600"))
     SYNC_CONFIGURED = bool(SYNC_URL and len(SYNC_SECRET) >= 32)
+    # Loopback control API of the sync server (Flask's relay + mirror surface).
+    # Deliberately not the public SYNC_URL: this one is never proxied by nginx.
+    SYNC_INTERNAL_URL = os.environ.get("STREAM_SYNC_INTERNAL_URL", "http://127.0.0.1:8766").strip()
+    # How often rooms with people in them are re-mirrored from the authority.
+    SYNC_MIRROR_INTERVAL = float(os.environ.get("STREAM_SYNC_MIRROR_INTERVAL", "2.0"))
 
     @classmethod
     def validate(cls):

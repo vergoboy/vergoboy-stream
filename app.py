@@ -66,6 +66,7 @@ import db as dbmod
 from db import User as DBUser
 import permissions as permmod
 import sync_token as synctoken
+import sync_relay
 from livekit_auth import generate_livekit_token
 import mail as mailmod
 from srt_to_vtt import convert_srt_to_vtt
@@ -327,6 +328,16 @@ def _may_control(user: DBUser) -> bool:
         or view.allowed(permmod.PERM_CHANGE_PLAYBACK_SPEED)
         or view.allowed(permmod.PERM_PROMOTE_USER)
     )
+
+
+def _sync_role(user: DBUser) -> str:
+    """The user's role in the room sync service — the exact rule
+    /api/room/sync-token uses, so the token a client holds and the check on a
+    relayed legacy `control` event can never disagree."""
+    can_play = _has_perm(user, permmod.PERM_PLAY_VIDEO)
+    can_pause = _has_perm(user, permmod.PERM_PAUSE_VIDEO)
+    can_seek = _has_perm(user, permmod.PERM_SEEK_FORWARD) and _has_perm(user, permmod.PERM_SEEK_BACKWARD)
+    return synctoken.role_for(can_play, can_pause, can_seek)
 
 
 def _may_youtube(user: DBUser) -> bool:
@@ -1491,6 +1502,25 @@ def _cleanup_orphans() -> dict:
     log_debug(f"Cleanup done: {len(removed['uploads'])} uploads, {len(removed['subs'])} subs, "
               f"{len(removed['hls'])} hls dirs removed.")
     return removed
+
+
+def _sync_mirror_loop():
+    """Keeps Flask's RoomState mirror in step with the sync server for rooms
+    that have people in them. `state_sync` (the webapp's bootstrap phase,
+    legacy consumers, /api/state) must never invent a second timeline; the
+    authority never calls us, so we poll its loopback state API."""
+    while True:
+        gevent.sleep(Config.SYNC_MIRROR_INTERVAL)
+        if not sync_relay.configured():
+            continue
+        for code, rs in list(rooms._rooms.items()):
+            if not rs.users:
+                continue
+            state = sync_relay.fetch_state(code)
+            if state is None:
+                continue
+            with LOCK:
+                sync_relay.mirror_room(rs, state)
 
 
 def _chat_purge_loop():
@@ -3969,6 +3999,14 @@ def on_voice_left(data):
 
 @socketio.on("control")
 def on_control(data):
+    """Playback timing (play/pause/seek/rate) is RELAYED to the sync server —
+    the single source of truth every client (web, mpv) also follows directly.
+    Flask keeps playlist moves (select/shuffle), the permission model and the
+    encoded-frontier seek clamp, then mirrors the authority's answer back into
+    state_sync so nothing here maintains a second timeline.
+
+    play/pause deliberately carry no position (the server computes it), which
+    closes the old hole where a stale client-supplied `at` dragged the room."""
     code, user = _socket_session()
     if not code or not user:
         return
@@ -3976,9 +4014,19 @@ def on_control(data):
     action = data.get("action")
     if action not in ("play", "pause", "seek", "rate", "select", "shuffle"):
         return
-    # play/pause/seek are open to everyone in the room; changing the shared
-    # speed or switching the selected media needs a room manager.
-    if action in ("rate", "select", "shuffle") and not _may_control(user):
+    is_playlist = action in ("select", "shuffle")
+    is_timing_rate = action == "rate"
+    # Legacy semantics:
+    # - play/pause/seek: open to everyone in the room
+    # - rate/select/shuffle: require _may_control (room manager)
+    if action in ("select", "shuffle") and not _may_control(user):
+        emit("notify", {
+            "type": "control_denied", "name": user.username,
+            "ts": time.time(),
+            "extra": {"action": action},
+        })
+        return
+    if action == "rate" and not _may_control(user):
         emit("notify", {
             "type": "control_denied", "name": user.username,
             "ts": time.time(),
@@ -3989,33 +4037,77 @@ def on_control(data):
     name = user.username or "ناشناس"
     clamped_to = None
 
-    with LOCK:
-        if action == "play":
-            rs.set_play(float(data.get("at", rs.current_position())))
-        elif action == "pause":
-            rs.set_pause(float(data.get("at", rs.current_position())))
-        elif action == "seek":
-            target = float(data.get("to", 0))
-            # Enforce the encoded frontier here rather than trusting the client's
-            # own guard: `control` is a plain socket event, so without this a
-            # hand-crafted seek lands past the encoded timeline and the room
-            # stares at a black screen. See seek_frontier / clamp_seek_target.
+    if action == "shuffle":
+        # Playback ORDER is Flask's playlist domain; it has no timing meaning.
+        with LOCK:
+            rs.set_shuffle(bool(data.get("on", not rs.shuffle)))
+            safe_save(rs)
+            payload = rs.to_public_dict()
+    elif action == "select":
+        try:
+            index = int(data.get("index"))
+        except (TypeError, ValueError):
+            return
+        with LOCK:
+            rs.select_item(index)
+            item = _current_item(rs)
+            if not item:
+                return
+            item_id = str(item.get("id"))
+            safe_save(rs)
+        # Selecting an item also resets the room's clock — exactly what the
+        # sync server's `item` command does (position 0, paused).
+        state = sync_relay.forward_cmd(code, {"c": "item", "item": item_id})
+        with LOCK:
+            if state is not None:
+                sync_relay.mirror_room(rs, state)
+            payload = rs.to_public_dict()
+    else:
+        if action == "seek":
+            target = float(data.get("to", 0) or 0)
             frontier = _encoded_frontier(_current_item(rs))
             safe_target = clamp_seek_target(target, frontier)
             if safe_target != target:
                 clamped_to = safe_target
-            target = safe_target
-            rs.seek(target)
+            cmd = {"c": "seek", "target": safe_target}
         elif action == "rate":
-            rs.set_rate(float(data.get("rate", 1.0)))
-        elif action == "select":
-            rs.select_item(int(data.get("index")))
-        elif action == "shuffle":
-            rs.set_shuffle(bool(data.get("on", not rs.shuffle)))
+            try:
+                rate = float(data.get("rate", 1.0))
+            except (TypeError, ValueError):
+                return
+            cmd = {"c": "rate", "rate": rate}
+        elif action == "play":
+            cmd = {"c": "play"}
         else:
-            return
-        safe_save(rs)
-        payload = rs.to_public_dict()
+            cmd = {"c": "pause"}
+        state = sync_relay.forward_cmd(code, cmd)
+        if state is None:
+            # Fallback: if sync is not configured (dev/tests), apply locally.
+            if not sync_relay.configured():
+                with LOCK:
+                    if action == "seek":
+                        rs.seek(safe_target if 'safe_target' in locals() else float(data.get("to", 0) or 0))
+                    elif action == "play":
+                        rs.set_play(rs.current_position())
+                    elif action == "pause":
+                        rs.set_pause(rs.current_position())
+                    elif action == "rate":
+                        rs.set_rate(float(data.get("rate", 1.0)))
+                    safe_save(rs)
+                payload = rs.to_public_dict()
+            else:
+                emit("notify", {
+                    "type": "sync_unavailable", "name": name, "ts": time.time(),
+                    "extra": {"action": action},
+                })
+                return
+        else:
+            with LOCK:
+                sync_relay.mirror_room(rs, state)
+            payload = rs.to_public_dict()
+            with LOCK:
+                sync_relay.mirror_room(rs, state)
+                payload = rs.to_public_dict()
 
     if clamped_to is not None:
         # Tell the room why the seek landed short, so the client can say so
@@ -4116,6 +4208,7 @@ if __name__ == "__main__":
         log_debug(f"Boot cleanup of partial encodes failed: {e}")
     gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
+    gevent.spawn(_sync_mirror_loop)
     if archive_scraper.enabled_collectors(Config):
         archive_scraper.get_collector().auth.start()
         log_debug("COLLECTOR_ENABLED name=digimoviez kind=movies")
