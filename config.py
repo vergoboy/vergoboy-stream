@@ -331,6 +331,9 @@ class Config:
     NATIVE_MEDIA_SECRET = os.environ.get("STREAM_NATIVE_MEDIA_SECRET", "")
     NATIVE_MEDIA_BASE = os.environ.get("STREAM_NATIVE_MEDIA_BASE", "/w2g/native/uploads")
     NATIVE_MEDIA_CONFIGURED = len(NATIVE_MEDIA_SECRET) >= 32
+    # Let native clients play an item's http(s) source link directly (e.g. archive/URL imports).
+    # Off by default: the link becomes visible to every member of the room.
+    NATIVE_REMOTE_SOURCES = os.environ.get("STREAM_NATIVE_REMOTE_SOURCES", "0") == "1"
 
     @classmethod
     def validate(cls):

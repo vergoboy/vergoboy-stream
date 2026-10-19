@@ -53,3 +53,66 @@ def test_short_secret_is_refused():
 ])
 def test_ttl_is_max_6h_or_twice_the_film_capped(dur, want):
     assert nm.ttl_seconds(dur) == want
+
+
+# ---------------------------------------------------------------- source selection
+import os  # noqa: E402
+
+UP = "/srv/media/uploads"
+KW = dict(user_id="u-1", upload_dir=UP, base_path="/w2g/native/uploads", secret=SECRET, now=1_000_000)
+
+
+def pick(item, **over):
+    kw = dict(KW, remote_ok=False, isfile=lambda p: True)
+    kw.update(over)
+    return nm.pick_source(item, **kw)
+
+
+def test_uploaded_file_still_on_disk_is_served_as_original_with_a_signed_url():
+    got = pick({"_raw_path": f"{UP}/it1_src.mkv", "duration": 7200, "src": "/w2g/media/hls/it1/master.m3u8"})
+    assert got["kind"] == "original"
+    assert got["expires_at"] == 1_000_000 + 6 * 3600
+    assert got["url"].startswith("/w2g/native/uploads/it1_src.mkv?exp=")
+    assert f"&md5={nm.signature(SECRET, got['expires_at'], '/w2g/native/uploads/it1_src.mkv', 'u-1')}" in got["url"]
+
+
+def test_long_film_gets_a_longer_token():
+    got = pick({"_raw_path": f"{UP}/a.mkv", "duration": 5 * 3600})
+    assert got["expires_at"] == 1_000_000 + 10 * 3600
+
+
+def test_only_files_that_exist_in_the_uploads_dir_are_signed():
+    seen = []
+    pick({"_raw_path": "/somewhere/else/it1_src.mkv", "src": "/h"}, isfile=lambda p: seen.append(p) or False)
+    assert seen == [f"{UP}/it1_src.mkv"]          # looks only inside the uploads dir (by basename)
+    assert pick({"_raw_path": "/x/it1_src.mkv", "src": "/h"}, isfile=lambda p: False)["kind"] == "hls"
+
+
+def test_without_a_secret_there_is_no_original_but_hls_still_works():
+    assert pick({"_raw_path": f"{UP}/a.mkv", "src": "/h"}, secret="")["kind"] == "hls"
+
+
+def test_url_imports_play_directly_only_when_the_owner_opted_in():
+    item = {"_source": "https://cdn.example.org/film.mkv", "src": "/w2g/media/hls/x/master.m3u8"}
+    assert pick(item)["kind"] == "hls"                                   # default: not exposed
+    got = pick(item, remote_ok=True)
+    assert got == {"kind": "remote", "url": "https://cdn.example.org/film.mkv", "expires_at": None}
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost/a.mkv", "http://127.0.0.1/a.mkv", "http://10.0.0.5/a.mkv", "http://192.168.1.2/a.mkv",
+    "http://169.254.169.254/latest/meta-data", "http://[::1]/a", "http://0.0.0.0/a", "ftp://example.org/a.mkv",
+    "file:///etc/passwd", "/srv/library/film.mkv", "", None, "https:///nohost", "http://foo.localhost/a",
+])
+def test_internal_or_non_http_sources_are_never_handed_out(url):
+    assert nm.is_public_http_url(url) is False
+    assert pick({"_source": url, "src": "/h"}, remote_ok=True)["kind"] == "hls"
+
+
+@pytest.mark.parametrize("url", ["https://example.org/a.mkv", "http://dl.example.ir:8080/x.mp4?t=1", "https://8.8.8.8/a"])
+def test_public_urls_are_accepted(url):
+    assert nm.is_public_http_url(url) is True
+
+
+def test_nothing_playable_returns_none():
+    assert pick({"title": "x"}) is None

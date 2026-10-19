@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
+import os
 import re
+from urllib.parse import urlsplit
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _SAFE_USER = re.compile(r"^[A-Za-z0-9-]+$")
@@ -51,3 +54,48 @@ def signed_path(secret: str, base_path: str, filename: str, user_id: str, exp: i
         raise ValueError(f"unsafe user id: {user_id!r}")
     path = f"{base_path.rstrip('/')}/{filename}"
     return f"{path}?exp={int(exp)}&u={user_id}&md5={signature(secret, exp, path, user_id)}"
+
+
+def is_public_http_url(url) -> bool:
+    """http(s) URL whose host is not obviously internal (loopback/private/link-local/localhost)."""
+    if not isinstance(url, str):
+        return False
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    if u.scheme not in ("http", "https") or not host or host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a hostname; the CLIENT fetches it, so this is not a server-side request
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def pick_source(item: dict, *, user_id: str, upload_dir: str, base_path: str, secret: str,
+                remote_ok: bool, now: float, isfile=os.path.isfile) -> dict | None:
+    """Best source for a native client, in this order:
+    1. `original`: the uploaded/downloaded file still in `upload_dir`, behind a signed nginx URL.
+    2. `remote`  : the item's http(s) source link itself (opt-in; the player fetches it directly,
+                   which also keeps the bytes off our server). Never carries our credentials.
+    3. `hls`     : the transcoded stream the web player uses.
+    """
+    raw = item.get("_raw_path")
+    if secret and raw:
+        name = os.path.basename(raw)
+        if isfile(os.path.join(upload_dir, name)):  # only files nginx can serve from the uploads dir
+            exp = int(now) + ttl_seconds(item.get("duration"))
+            try:
+                url = signed_path(secret, base_path, name, user_id, exp)
+            except ValueError:
+                url = None
+            if url:
+                return {"kind": "original", "url": url, "expires_at": exp}
+    src = item.get("_source")
+    if remote_ok and is_public_http_url(src):
+        return {"kind": "remote", "url": src, "expires_at": None}
+    if item.get("src"):
+        return {"kind": "hls", "url": item["src"], "expires_at": None}
+    return None

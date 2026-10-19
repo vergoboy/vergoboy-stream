@@ -2553,8 +2553,8 @@ def api_item_native_source(item_id):
     """Where a native client (mpv) should read this item from.
 
     `original`: the uploaded file itself (no transcode, no quality loss, any container/codec),
-    behind a short-lived nginx-verified token bound to (user, file). `hls`: fallback when the
-    original is not on disk (e.g. already cleaned up)."""
+    behind a short-lived nginx-verified token bound to (user, file). `remote`: the item's own
+    http(s) source link (opt-in). `hls`: the transcoded fallback."""
     user = _require_user()
     rs = _room_for_item(item_id)
     if rs is None or rs.room_id != _current_room_code():
@@ -2562,19 +2562,14 @@ def api_item_native_source(item_id):
     item = next((it for it in rs.playlist if it.get("id") == item_id), None)
     if item is None:
         return jsonify({"error": "آیتم پیدا نشد"}), 404
-    raw = item.get("_raw_path")
-    if Config.NATIVE_MEDIA_CONFIGURED and raw and os.path.isfile(raw):
-        exp = int(time.time()) + nativemedia.ttl_seconds(item.get("duration"))
-        try:
-            url = nativemedia.signed_path(Config.NATIVE_MEDIA_SECRET, Config.NATIVE_MEDIA_BASE,
-                                          os.path.basename(raw), user.id, exp)
-        except ValueError:
-            url = None
-        if url:
-            return jsonify({"kind": "original", "url": url, "expires_at": exp, "title": item.get("title")})
-    if item.get("src"):
-        return jsonify({"kind": "hls", "url": item["src"], "expires_at": None, "title": item.get("title")})
-    return jsonify({"error": "این آیتم هنوز منبع قابل پخش ندارد"}), 409
+    picked = nativemedia.pick_source(
+        item, user_id=user.id, upload_dir=Config.UPLOAD_DIR, base_path=Config.NATIVE_MEDIA_BASE,
+        secret=Config.NATIVE_MEDIA_SECRET if Config.NATIVE_MEDIA_CONFIGURED else "",
+        remote_ok=Config.NATIVE_REMOTE_SOURCES, now=time.time())
+    if picked is None:
+        return jsonify({"error": "این آیتم هنوز منبع قابل پخش ندارد"}), 409
+    picked["title"] = item.get("title")
+    return jsonify(picked)
 
 
 @app.route(f"{BP}/api/room/sync-token", methods=["POST"])
