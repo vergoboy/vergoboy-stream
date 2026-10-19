@@ -32,9 +32,9 @@ export async function fetchSyncInfo(): Promise<SyncInfo> {
   return data as SyncInfo;
 }
 
-export type NativeSource = { kind: "original" | "hls"; url: string; expires_at: number | null };
+export type NativeSource = { kind: "original" | "remote" | "hls"; url: string; expires_at: number | null };
 
-/** Original file (no transcode) behind a short-lived signed URL, or the HLS fallback. */
+/** Original file (signed URL), the item's own source link (opt-in), or the HLS fallback. */
 export async function fetchNativeSource(itemId: string): Promise<NativeSource> {
   const res = await authFetch(`${API_PREFIX}/items/${encodeURIComponent(itemId)}/native-source`);
   const data = await res.json().catch(() => ({}));
@@ -51,7 +51,8 @@ export async function startNativePlayer(opts: { itemId: string; fallbackUrl: str
   try {
     const src = await fetchNativeSource(opts.itemId);
     url = mediaUrl(src.url);
-    if (src.kind === "original") bearer = null; // the signed URL is the credential; never send the JWT with it
+    // original: the signed URL is the credential; remote: a third-party host. Never send our JWT to either.
+    if (src.kind !== "hls") bearer = null;
   } catch {
     /* keep the HLS fallback */
   }
