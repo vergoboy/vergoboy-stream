@@ -1302,7 +1302,7 @@ export function Player({
   const title = item ? prettyTitle(item.title) : "";
   const startNative = () => {
     if (!mediaSrc || !item || nativeActive) return;
-    startNativePlayer({ mediaUrl: mediaSrc, title })
+    startNativePlayer({ itemId: item.id, fallbackUrl: mediaSrc, title })
       .then(() => setNativeActive(true))
       .catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e)));
   };
