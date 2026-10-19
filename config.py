@@ -326,6 +326,12 @@ class Config:
     # How often rooms with people in them are re-mirrored from the authority.
     SYNC_MIRROR_INTERVAL = float(os.environ.get("STREAM_SYNC_MIRROR_INTERVAL", "2.0"))
 
+    # Original-file (no transcode) delivery for native clients: nginx `secure_link` verifies these URLs.
+    # NATIVE_MEDIA_SECRET must equal the secret in nginx's `w2g-media-secret.conf`.
+    NATIVE_MEDIA_SECRET = os.environ.get("STREAM_NATIVE_MEDIA_SECRET", "")
+    NATIVE_MEDIA_BASE = os.environ.get("STREAM_NATIVE_MEDIA_BASE", "/w2g/native/uploads")
+    NATIVE_MEDIA_CONFIGURED = len(NATIVE_MEDIA_SECRET) >= 32
+
     @classmethod
     def validate(cls):
         if cls.ENVIRONMENT not in {"development", "production"}:
