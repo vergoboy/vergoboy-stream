@@ -1706,11 +1706,6 @@ def api_log_diagnostics():
     return jsonify(log_diagnostics()), 200
 
 
-@app.route(f"{BP}/media/uploads/<path:filename>")
-def serve_upload(filename):
-    return send_from_directory(Config.UPLOAD_DIR, filename, conditional=True)
-
-
 @app.route(f"{BP}/media/subs/<path:filename>")
 def serve_sub(filename):
     return send_from_directory(Config.SUBS_DIR, filename, conditional=True)
