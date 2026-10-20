@@ -38,7 +38,7 @@ export interface AdminUser extends AuthUser {
   own_room_id?: string | null;
 }
 
-export type ItemStatus = "queued" | "encoding" | "ready" | "complete" | "error";
+export type ItemStatus = "idle" | "queued" | "encoding" | "ready" | "complete" | "error";
 export type RenditionStatus = "pending" | "queued" | "encoding" | "ready" | "complete" | "error";
 
 export interface Rendition {
