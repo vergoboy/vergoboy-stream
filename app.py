@@ -1338,10 +1338,12 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
         broadcast_state(rs)
         broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
 
-    free_mb = free_space_mb(Config.MEDIA_DIR)
-    if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
-        fail_all(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن.")
-        return
+    lazy = bool(Config.LAZY_ENCODE)   # lazy: store + probe now, build HLS only when something needs it
+    if not lazy:
+        free_mb = free_space_mb(Config.MEDIA_DIR)
+        if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
+            fail_all(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن.")
+            return
 
     probe = _ffprobe_source(source)
     duration_s = get_duration_s(probe)
@@ -1355,7 +1357,7 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
 
     renditions = [
         {"label": l, "height": h, "vbr": v, "abr": a,
-         "status": "queued" if l == default_label else "pending",
+         "status": "queued" if (l == default_label and not lazy) else "pending",
          "is_default": (l == default_label)}
         for (l, h, v, a) in ladder
     ]
@@ -1370,9 +1372,10 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
             log_debug(f"Item {item_id} vanished before encoding could start.")
             return
         item["renditions"] = renditions
-        item["status"] = "queued"
+        item["status"] = "idle" if lazy else "queued"
         item["_source"] = source
         item["_aspect"] = aspect
+        item["_duration"] = duration_s
         if local_raw_path:
             item["_raw_path"] = local_raw_path
         safe_save(rs)
@@ -1380,8 +1383,57 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
 
     os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
     gevent.spawn(_extract_subtitles_async, item_id, source, sub_streams, requester_name)
-    gevent.spawn(_encode_rendition, item_id, source, default_label, default_height,
-                 default_vbr, default_abr, requester_name, True, duration_s)
+    if not lazy:
+        gevent.spawn(_encode_rendition, item_id, source, default_label, default_height,
+                     default_vbr, default_abr, requester_name, True, duration_s)
+
+
+def ensure_hls(item_id: str, requester_name: str):
+    """Lazy encoding: builds the default HLS rendition of an `idle` item, exactly once.
+
+    Called when a web client opens the item (or a controller asks for it explicitly).
+    The idle -> queued flip happens under LOCK, so any number of concurrent calls start
+    exactly one encode; every later call is a no-op. Native players never call this."""
+    rs = _room_for_item(item_id)
+    if rs is None:
+        return False, "آیتم پیدا نشد"
+    with LOCK:
+        item = rs.find_item(item_id)
+        if not item:
+            return False, "آیتم پیدا نشد"
+        if item.get("status") != "idle":
+            return True, "already started"
+        source = item.get("_source")
+        default = next((r for r in item.get("renditions", []) if r.get("is_default")), None)
+        if not source or not default:
+            return False, "این آیتم هنوز آماده نیست"
+        free_mb = free_space_mb(Config.MEDIA_DIR)
+        if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
+            item["status"] = "error"
+            item["error"] = f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن."
+            safe_save(rs)
+            title = item.get("title", "")
+            low_disk = True
+        else:
+            item["status"] = "queued"
+            default["status"] = "queued"
+            duration_s = item.get("_duration")
+            safe_save(rs)
+            low_disk = False
+    broadcast_state(rs)
+    if low_disk:
+        broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
+        return False, "فضای دیسک ناکافی است"
+    os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
+    gevent.spawn(_encode_rendition, item_id, source, default["label"], default["height"],
+                 default["vbr"], default["abr"], requester_name, True, duration_s)
+    return True, "started"
+
+
+def can_trigger_hls(current_item_id, item_id: str, may_control: bool) -> bool:
+    """Any member may start the encode for the item the room is on; other items need control rights,
+    so a watcher cannot queue an encode for every film in the playlist."""
+    return may_control or (current_item_id is not None and current_item_id == item_id)
 
 
 def request_quality(item_id: str, label: str, requester_name: str):
@@ -1404,6 +1456,8 @@ def request_quality(item_id: str, label: str, requester_name: str):
         if target["status"] in ("queued", "encoding", "ready", "complete"):
             return True, "already in progress"
         target["status"] = "queued"
+        if item.get("status") == "idle":
+            item["status"] = "queued"
         height, vbr, abr = target["height"], target["vbr"], target["abr"]
         safe_save(rs)
     broadcast_state(rs)
@@ -2547,6 +2601,21 @@ def api_new_key():
 # ────────────────────────────────────────────────────────────────────────────
 # LiveKit voice room
 # ────────────────────────────────────────────────────────────────────────────
+
+@app.route(f"{BP}/api/items/<item_id>/ensure-hls", methods=["POST"])
+def api_item_ensure_hls(item_id):
+    """Start the (lazy) HLS build for an item. Idempotent; see ensure_hls()."""
+    user = _require_user()
+    rs = _room_for_item(item_id)
+    if rs is None or rs.room_id != _current_room_code():
+        return jsonify({"error": "این آیتم در اتاق فعلی تو نیست"}), 404
+    idx = rs.current_index
+    current_id = rs.playlist[idx].get("id") if isinstance(idx, int) and 0 <= idx < len(rs.playlist) else None
+    if not can_trigger_hls(current_id, item_id, _may_control(user)):
+        return jsonify({"error": "فقط کنترل‌کننده می‌تواند پردازش آیتم دیگر را شروع کند"}), 403
+    ok, msg = ensure_hls(item_id, user.username or "ناشناس")
+    return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
+
 
 @app.route(f"{BP}/api/items/<item_id>/native-source", methods=["GET"])
 def api_item_native_source(item_id):

@@ -335,6 +335,10 @@ class Config:
     # Off by default: the link becomes visible to every member of the room.
     NATIVE_REMOTE_SOURCES = os.environ.get("STREAM_NATIVE_REMOTE_SOURCES", "0") == "1"
 
+    # Lazy encoding: adding an item only stores + probes it; the HLS ladder is built (once) when a
+    # web client opens the item or a controller asks for it. Native clients never trigger an encode.
+    LAZY_ENCODE = os.environ.get("STREAM_LAZY_ENCODE", "0") == "1"
+
     @classmethod
     def validate(cls):
         if cls.ENVIRONMENT not in {"development", "production"}:
