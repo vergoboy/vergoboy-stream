@@ -78,6 +78,8 @@ export interface PlaylistItem {
   status: ItemStatus;
   error?: string;
   renditions?: Rendition[];
+  /** Facts about the ORIGINAL file (tracks, bit depth, HDR); set when the server probed it. */
+  media?: MediaSummary;
   yt_url?: string;
   key?: string;
 }
@@ -291,3 +293,21 @@ export interface ArchiveFile {
   name: string;
   url: string;
 }
+
+export type MediaVideoTrack = {
+  index: number | null; codec: string; default: boolean; profile: string | null;
+  width: number | null; height: number | null; fps: number | null; pix_fmt: string | null;
+  bit_depth: number | null; hdr: "hdr10" | "hlg" | "dolby_vision" | null;
+};
+export type MediaAudioTrack = {
+  index: number | null; codec: string; default: boolean; lang: string; title: string;
+  channels: number | null; layout: string | null;
+};
+export type MediaSubtitleTrack = {
+  index: number | null; codec: string; default: boolean; lang: string; title: string; forced: boolean;
+  text: boolean; // false = bitmap (PGS/DVD), needs a player that renders images
+};
+export type MediaSummary = {
+  duration: number; container: string; size: number | null; bit_rate: number | null;
+  video: MediaVideoTrack[]; audio: MediaAudioTrack[]; subtitles: MediaSubtitleTrack[];
+};

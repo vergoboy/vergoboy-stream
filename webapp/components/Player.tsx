@@ -30,6 +30,7 @@ import { run, ripple, popIn, spring } from "@/lib/anim";
 import { useIdle, useViewport } from "@/lib/useIdle";
 import { canNativeFloat, enterNativeMini, setNativeFullscreen, isTauri, isMobileOS } from "@/lib/tauri";
 import { nativePlayerAvailable, onNativePlayerExit, startNativePlayer } from "@/lib/nativePlayer";
+import { fetchCapabilities } from "@/lib/capabilities";
 import { localPoint } from "@/lib/geometry";
 
 
@@ -104,7 +105,15 @@ export function Player({
   useEffect(() => {
     let dead = false;
     let off: (() => void) | undefined;
-    nativePlayerAvailable().then((ok) => { if (!dead) { setNativeAvail(ok); setNativeChecked(true); } });
+    nativePlayerAvailable().then(async (ok) => {
+      // mpv is only useful if the server also runs the sync service; otherwise the button could only fail.
+      // If the server cannot tell us (old server, network), assume yes and let a real error surface.
+      let usable = ok;
+      if (ok) {
+        try { usable = (await fetchCapabilities()).server.sync; } catch { /* keep the button */ }
+      }
+      if (!dead) { setNativeAvail(usable); setNativeChecked(true); }
+    });
     onNativePlayerExit(() => setNativeActive(false)).then((f) => { if (dead) f(); else off = f; });
     return () => { dead = true; off?.(); };
   }, []);
