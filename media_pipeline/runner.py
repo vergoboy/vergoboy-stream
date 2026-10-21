@@ -54,6 +54,11 @@ PARTIAL_SUFFIX = ".partial"
 #: without bound.
 STDERR_RING_LINES = 50
 
+#: After the process has exited, how long to wait for the stderr reader to finish draining the pipe
+#: before the ring is read. Normally instant (EOF); it only matters if a leaked grandchild still
+#: holds the pipe open, in which case we stop waiting and close it ourselves.
+STDERR_DRAIN_S = 5.0
+
 #: How often progress is reported to the caller. ffmpeg emits a progress line
 #: several times a second; forwarding every one would flood the socket.
 PROGRESS_THROTTLE_S = 0.5
@@ -588,7 +593,7 @@ class EncodeRunner:
                     return
                 _sleep(0.5)
 
-        _spawn(read_stderr)
+        stderr_reader = _spawn(read_stderr)
         _spawn(watchdog)
 
         try:
@@ -628,22 +633,34 @@ class EncodeRunner:
                     except Exception as exc:
                         log.warning("on_progress callback failed: %s", exc)
         finally:
-            for stream in (proc.stdout, proc.stderr):
-                try:
-                    stream.close()
-                except Exception:
-                    pass
+            # Only stdout is closed here. stderr belongs to its reader thread: closing it from this
+            # thread while the reader still had buffered lines to consume threw the END of the
+            # output away, and the end is where the cause of a failure is.
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
 
         try:
             proc.wait(timeout=TERM_GRACE_S + 5)
         except Exception:
             self._kill_group(proc, "wait timed out")
 
+        # The process is gone, so stderr reaches EOF: let the reader take every last line before
+        # the ring is read. If something still holds the pipe open, stop waiting and unblock it.
+        stderr_reader.join(timeout=STDERR_DRAIN_S)
+        if stderr_reader.is_alive():
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+            stderr_reader.join(timeout=1.0)
+
         with self._active_lock:
             self._active.discard(proc.pid)
 
         outcome.returncode = proc.returncode if proc.returncode is not None else -1
-        outcome.stderr_text = "\n".join(ring)
+        outcome.stderr_text = "\n".join(list(ring))
         outcome.duration = state["duration"] or duration_guess or None
         return outcome
 
