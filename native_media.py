@@ -99,3 +99,16 @@ def pick_source(item: dict, *, user_id: str, upload_dir: str, base_path: str, se
     if item.get("src"):
         return {"kind": "hls", "url": item["src"], "expires_at": None}
     return None
+
+
+def server_capabilities(*, native_original: bool, native_remote: bool, lazy_encode: bool, sync: bool) -> dict:
+    """What this server offers, so a client can hide features that would only fail (no secrets in here)."""
+    return {
+        "version": 1,
+        "server": {
+            "native_original": bool(native_original),   # signed original-file URLs work
+            "native_remote": bool(native_remote),       # item source links may be played directly
+            "lazy_encode": bool(lazy_encode),           # HLS is built on demand, not at add time
+            "sync": bool(sync),                         # the room sync service is configured
+        },
+    }

@@ -123,3 +123,19 @@ def test_asking_for_a_quality_on_an_idle_item_makes_it_in_progress(env, monkeypa
 ])
 def test_who_may_trigger_the_build(current, item, may, want):
     assert app_module.can_trigger_hls(current, item, may) is want
+
+
+def test_add_stores_a_bounded_media_summary_of_the_original(env, monkeypatch):
+    import json, pathlib
+    rs, _ = env
+    probe = json.loads((pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "probe" / "hevc_hdr10.json").read_text())
+    monkeypatch.setattr(app_module, "_ffprobe_source", lambda *a, **k: probe)
+    item = add(rs, True, monkeypatch)
+    v = item["media"]["video"][0]
+    assert (v["codec"], v["bit_depth"], v["hdr"]) == ("hevc", 10, "hdr10")
+    assert not any(k.startswith("_") for k in item["media"])      # public data only
+
+
+def test_a_failed_probe_leaves_no_media_summary(env, monkeypatch):
+    rs, _ = env                                                    # fixture probe is {}
+    assert "media" not in add(rs, True, monkeypatch)

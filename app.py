@@ -44,6 +44,7 @@ from media_domain.services.metadata import (
     get_duration_s,
     get_video_height,
     get_video_width,
+    summarize_media,
 )
 from media_domain.services.source_policy import (
     MEDIA_PROTO_WHITELIST,
@@ -1376,6 +1377,9 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
         item["_source"] = source
         item["_aspect"] = aspect
         item["_duration"] = duration_s
+        media = summarize_media(probe)       # tracks, bit depth, HDR of the ORIGINAL (for native clients)
+        if media:
+            item["media"] = media
         if local_raw_path:
             item["_raw_path"] = local_raw_path
         safe_save(rs)
@@ -2612,6 +2616,15 @@ def api_item_ensure_hls(item_id):
     return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
 
 
+@app.route(f"{BP}/api/capabilities", methods=["GET"])
+def api_capabilities():
+    """Which optional features this server has switched on (clients hide what would only fail)."""
+    _require_user()
+    return jsonify(nativemedia.server_capabilities(
+        native_original=Config.NATIVE_MEDIA_CONFIGURED, native_remote=Config.NATIVE_REMOTE_SOURCES,
+        lazy_encode=Config.LAZY_ENCODE, sync=Config.SYNC_CONFIGURED))
+
+
 @app.route(f"{BP}/api/items/<item_id>/native-source", methods=["GET"])
 def api_item_native_source(item_id):
     """Where a native client (mpv) should read this item from.
@@ -2633,6 +2646,8 @@ def api_item_native_source(item_id):
     if picked is None:
         return jsonify({"error": "این آیتم هنوز منبع قابل پخش ندارد"}), 409
     picked["title"] = item.get("title")
+    if item.get("media"):
+        picked["media"] = item["media"]
     return jsonify(picked)
 
 

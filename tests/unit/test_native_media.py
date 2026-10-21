@@ -116,3 +116,10 @@ def test_public_urls_are_accepted(url):
 
 def test_nothing_playable_returns_none():
     assert pick({"title": "x"}) is None
+
+
+def test_server_capabilities_shape_and_no_secrets():
+    caps = nm.server_capabilities(native_original=True, native_remote=False, lazy_encode=True, sync=0)
+    assert caps == {"version": 1, "server": {"native_original": True, "native_remote": False,
+                                             "lazy_encode": True, "sync": False}}
+    assert "secret" not in str(caps).lower()
