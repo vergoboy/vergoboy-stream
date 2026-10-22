@@ -27,6 +27,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import selectinload
 
 from config import Config
+from sqlalchemy.exc import IntegrityError
 from media_pipeline import (
     Attempt,
     EncodeError,
@@ -66,6 +67,7 @@ from app_logging import diagnostics as log_diagnostics, record_client_error
 import db as dbmod
 from db import User as DBUser
 import permissions as permmod
+import account_names
 import native_media as nativemedia
 import sync_token as synctoken
 import sync_relay
@@ -2994,12 +2996,9 @@ def api_auth_register():
     display_name = (data.get("display_name") or "").strip()
     email = (data.get("email") or "").strip().lower()
 
-    if len(username) < 3 or len(username) > 24:
-        return jsonify({"error": "نام کاربری باید ۳ تا ۲۴ حرف باشد"}), 400
-    if not _re.match(r"^[A-Za-z0-9_.\-]+$", username):
-        return jsonify({"error": "نام کاربری فقط حروف انگلیسی، عدد، _ و - می‌تواند باشد"}), 400
-    if len(password) < 6:
-        return jsonify({"error": "رمز عبور باید حداقل ۶ کاراکتر باشد"}), 400
+    bad = account_names.username_error(username) or account_names.password_error(password)
+    if bad:
+        return jsonify({"error": bad}), 400
     if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         return jsonify({"error": "یک ایمیل معتبر وارد کن"}), 400
 
@@ -3413,10 +3412,8 @@ def _oauth_finish_session(session, info: dict) -> dict | None:
             if info.get("verified"):
                 user.email_verified = True
     if user is None:
-        base = (_re.sub(r"[^A-Za-z0-9_.\-]", "", info.get("email") or "").split("@")[0]) or "user"
-        username = base[:24]
-        if dbmod.get_user_by_username_or_email(session, username):
-            username = f"{base[:20]}{secrets.choice('0123456789')}{secrets.choice('0123456789')}"
+        username = account_names.username_from_email(
+            info.get("email"), lambda n: bool(dbmod.get_user_by_username_or_email(session, n)))
         verified_email = bool(info.get("verified"))
         is_admin = verified_email and dbmod.is_special_account(info.get("email"))
         user = DBUser(
@@ -3431,6 +3428,7 @@ def _oauth_finish_session(session, info: dict) -> dict | None:
             upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
             oauth_provider=info["provider"],
             oauth_id=info["oauth_id"],
+            profile_complete=False,   # must pick their own username + password before using the app
         )
         session.add(user)
         session.flush()
@@ -3539,6 +3537,43 @@ def api_auth_logout():
         finally:
             session.close()
     return jsonify({"ok": True})
+
+
+@app.route(f"{BP}/api/auth/complete-profile", methods=["POST"])
+def api_auth_complete_profile():
+    """First sign-in with Google/GitHub: the account exists with a generated username and a random
+    password. The person chooses both here. Only for accounts still marked incomplete."""
+    user = _require_user()
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    bad = account_names.username_error(username) or account_names.password_error(password)
+    if bad:
+        return jsonify({"error": bad}), 400
+    session = dbmod.SessionLocal()
+    try:
+        fresh = session.get(DBUser, user.id)
+        if not fresh or not fresh.is_active:
+            return jsonify({"error": "حساب غیرفعال است"}), 401
+        if fresh.profile_complete is not False:
+            return jsonify({"error": "پروفایل قبلاً کامل شده است"}), 409
+        other = dbmod.get_user_by_username_or_email(session, username)
+        if other is not None and other.id != fresh.id:
+            return jsonify({"error": "این نام کاربری قبلاً ثبت شده است"}), 409
+        old_username = fresh.username
+        fresh.username = username
+        fresh.password_hash = dbmod.hash_password(password)
+        fresh.profile_complete = True
+        if not fresh.display_name or fresh.display_name == old_username:
+            fresh.display_name = username   # still the generated name: follow the chosen one
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return jsonify({"error": "این نام کاربری قبلاً ثبت شده است"}), 409
+        return jsonify({"user": fresh.public_dict()})
+    finally:
+        session.close()
 
 
 @app.route(f"{BP}/api/auth/me")

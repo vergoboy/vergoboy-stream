@@ -589,3 +589,13 @@ also carries ONE `src` shared by every member, so a per-user signed URL cannot l
    `hls.loadSource`. Strongest, but every consumer (hls.js, Safari, `<track>`) needs the new flow.
 
 *Recommendation:* do 1 now, decide 2 vs 3 once it is clear whether rooms hold content that must not leak.
+
+## From the account work (2026-10) — usernames are case-sensitive
+
+`users.username` is unique but compared exactly, so "Alice" and "alice" can both exist (registration, login and the new
+`complete-profile` all behave this way). Login by exact name is fine, but anywhere a username is shown, a look-alike
+("Alice" vs "alice") can impersonate. Decide: make the unique index case-insensitive (`lower(username)`), after checking
+the production table for existing case-collisions. Not changed here because it needs a data check first.
+
+Also open: an account that signed in with Google/GitHub and has not completed its profile can still call other API
+endpoints with its token (only the web UI gates it). Enforce server-side if that matters.
