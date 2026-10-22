@@ -10,6 +10,8 @@ export interface AuthUser {
   display_name: string;
   email: string | null;
   email_verified: boolean;
+  /** false only right after a first Google/GitHub sign-in, until the person picks a username + password */
+  profile_complete?: boolean;
   role: UserRole;
   can_control: boolean;
   youtube_allowed: boolean;

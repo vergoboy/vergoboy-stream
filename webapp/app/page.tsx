@@ -24,6 +24,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { MembersPanel } from "@/components/MembersPanel";
 import { Toasts, type Toast } from "@/components/Toasts";
 import { AuthGate } from "@/components/AuthGate";
+import { CompleteProfile } from "@/components/CompleteProfile";
 import { RoomBar } from "@/components/RoomBar";
 import { OnboardingModal } from "@/components/OnboardingModal";
 import { ShortcutsModal } from "@/components/ShortcutsModal";
@@ -478,6 +479,7 @@ function PageInner() {
 
   if (!hydrated) return null;
   if (!user) return <AuthGate />;
+  if (user.profile_complete === false) return <CompleteProfile user={user} />;
 
   const voiceLive = voice.connected;
   const compactAudience = shortScreen || vp.w < 760;
