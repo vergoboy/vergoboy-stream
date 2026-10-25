@@ -29,7 +29,7 @@ import { PlayerControls, type QualityOption } from "./PlayerControls";
 import { run, ripple, popIn, spring } from "@/lib/anim";
 import { useIdle, useViewport } from "@/lib/useIdle";
 import { canNativeFloat, enterNativeMini, setNativeFullscreen, isTauri, isMobileOS } from "@/lib/tauri";
-import { nativePlayerAvailable, onNativePlayerExit, startNativePlayer } from "@/lib/nativePlayer";
+import { nativePlayerAvailable, onNativePlayerExit, startNativePlayer, trace } from "@/lib/nativePlayer";
 import { fetchCapabilities } from "@/lib/capabilities";
 import { localPoint } from "@/lib/geometry";
 
@@ -112,6 +112,7 @@ export function Player({
       if (ok) {
         try { usable = (await fetchCapabilities()).server.sync; } catch { /* keep the button */ }
       }
+      trace(`native player: mpv available=${ok} usable=${usable}`);
       if (!dead) { setNativeAvail(usable); setNativeChecked(true); }
     });
     onNativePlayerExit(() => setNativeActive(false)).then((f) => { if (dead) f(); else off = f; });
@@ -1324,6 +1325,7 @@ export function Player({
 
   const title = item ? prettyTitle(item.title) : "";
   const startNative = () => {
+    trace(`native player: button clicked (mediaSrc=${Boolean(mediaSrc)} item=${Boolean(item)} active=${nativeActive})`);
     if (!mediaSrc || !item || nativeActive) return;
     startNativePlayer({ itemId: item.id, fallbackUrl: mediaSrc, title })
       .then(() => setNativeActive(true))

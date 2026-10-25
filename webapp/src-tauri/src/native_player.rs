@@ -63,6 +63,15 @@ pub fn command_line(plugin: &Path, a: &StartArgs) -> (Vec<String>, Vec<(String, 
     (args, env)
 }
 
+/// Lets the web UI write into the app's own log (`app.log`), so what happens in the webview can be
+/// diagnosed from the same file as everything else. Level and size are bounded; newlines are removed.
+#[tauri::command]
+pub fn client_log(level: String, message: String) {
+    let level = match level.as_str() { "debug" | "info" | "warn" | "error" => level.as_str(), _ => "info" };
+    let one_line: String = message.chars().filter(|c| !c.is_control()).take(500).collect();
+    crate::log(level, &format!("[web] {one_line}"));
+}
+
 #[tauri::command]
 pub fn native_player_available() -> bool {
     let (mpv, plugin) = paths();
@@ -71,21 +80,31 @@ pub fn native_player_available() -> bool {
 
 #[tauri::command]
 pub fn native_player_start(app: AppHandle, state: State<'_, NativePlayer>, args: StartArgs) -> Result<(), String> {
+    // Every refusal is logged here, not only returned: the UI shows it as a short toast that is easy to miss.
+    let fail = |msg: String| -> Result<(), String> {
+        crate::log("warn", &format!("native player refused: {msg}"));
+        Err(msg)
+    };
+    crate::log("info", &format!("native player: start requested room={} role={} media={}", args.room, args.role,
+                                args.media_url.split('?').next().unwrap_or("")));
     let (mpv, plugin) = paths();
     for (what, p) in [("mpv", &mpv), ("plugin", &plugin)] {
         if !p.is_file() {
-            return Err(format!("{what} not found at {} (set W2G_{})", p.display(), what.to_uppercase()));
+            return fail(format!("{what} not found at {} (set W2G_{})", p.display(), what.to_uppercase()));
         }
     }
     let slot = state.0.clone();
     let mut guard = slot.lock().map_err(|_| "player state poisoned".to_string())?;
     if let Some(child) = guard.as_mut() {
         if matches!(child.try_wait(), Ok(None)) {
-            return Err("the player is already running".into());
+            return fail("the player is already running".into());
         }
     }
     let (argv, env) = command_line(&plugin, &args);
-    let child = Command::new(&mpv).args(&argv).envs(env).spawn().map_err(|e| format!("cannot start {}: {e}", mpv.display()))?;
+    let child = match Command::new(&mpv).args(&argv).envs(env).spawn() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("cannot start {}: {e}", mpv.display())),
+    };
     crate::log("info", &format!("native player started: room={} role={}", args.room, args.role));
     *guard = Some(child);
     drop(guard);
@@ -159,6 +178,12 @@ mod tests {
         let (a2, e2) = command_line(Path::new("p"), &args("anything", Some("")));
         assert!(e2.contains(&("W2G_ROLE".into(), "watcher".into())));
         assert!(!a2.iter().any(|x| x.starts_with("--http-header-fields")));
+    }
+
+    #[test]
+    fn client_log_accepts_any_input_without_panicking() {
+        client_log("info".into(), "a\nb\x1b[31m".repeat(1000));
+        client_log("nonsense".into(), String::new());
     }
 
     #[test]

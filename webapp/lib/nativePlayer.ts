@@ -42,8 +42,19 @@ export async function fetchNativeSource(itemId: string): Promise<NativeSource> {
   return data as NativeSource;
 }
 
+/** Best-effort line in the app's log (app.log); never throws. */
+export function trace(message: string, level: "debug" | "info" | "warn" | "error" = "info"): void {
+  if (!isTauri()) return;
+  call<void>("client_log", { level, message }).catch(() => {});
+}
+
 export async function startNativePlayer(opts: { itemId: string; fallbackUrl: string; title: string }): Promise<void> {
-  const sync = await fetchSyncInfo();
+  trace(`native player: requested item=${opts.itemId}`);
+  const sync = await fetchSyncInfo().catch((e: unknown) => {
+    trace(`native player: sync token failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+    throw e;
+  });
+  trace(`native player: sync token ok role=${sync.role}`);
   // Prefer the original file. Any failure (feature not configured on the server yet, file already
   // cleaned up, ...) falls back to the HLS the web player uses, so the button keeps working.
   let url = opts.fallbackUrl;
@@ -51,6 +62,7 @@ export async function startNativePlayer(opts: { itemId: string; fallbackUrl: str
   try {
     const src = await fetchNativeSource(opts.itemId);
     url = mediaUrl(src.url);
+    trace(`native player: source kind=${src.kind}`);
     // original: the signed URL is the credential; remote: a third-party host. Never send our JWT to either.
     if (src.kind !== "hls") bearer = null;
   } catch {

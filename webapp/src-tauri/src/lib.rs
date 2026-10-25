@@ -268,6 +268,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(native_player::NativePlayer::default())
         .invoke_handler(tauri::generate_handler![
+            native_player::client_log,
             native_player::native_player_available,
             native_player::native_player_start,
             native_player::native_player_stop
