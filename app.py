@@ -27,6 +27,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import selectinload
 
 from config import Config
+from sqlalchemy.exc import IntegrityError
 from media_pipeline import (
     Attempt,
     EncodeError,
@@ -44,6 +45,7 @@ from media_domain.services.metadata import (
     get_duration_s,
     get_video_height,
     get_video_width,
+    summarize_media,
 )
 from media_domain.services.source_policy import (
     MEDIA_PROTO_WHITELIST,
@@ -65,6 +67,10 @@ from app_logging import diagnostics as log_diagnostics, record_client_error
 import db as dbmod
 from db import User as DBUser
 import permissions as permmod
+import account_names
+import native_media as nativemedia
+import sync_token as synctoken
+import sync_relay
 from livekit_auth import generate_livekit_token
 import mail as mailmod
 from srt_to_vtt import convert_srt_to_vtt
@@ -326,6 +332,16 @@ def _may_control(user: DBUser) -> bool:
         or view.allowed(permmod.PERM_CHANGE_PLAYBACK_SPEED)
         or view.allowed(permmod.PERM_PROMOTE_USER)
     )
+
+
+def _sync_role(user: DBUser) -> str:
+    """The user's role in the room sync service — the exact rule
+    /api/room/sync-token uses, so the token a client holds and the check on a
+    relayed legacy `control` event can never disagree."""
+    can_play = _has_perm(user, permmod.PERM_PLAY_VIDEO)
+    can_pause = _has_perm(user, permmod.PERM_PAUSE_VIDEO)
+    can_seek = _has_perm(user, permmod.PERM_SEEK_FORWARD) and _has_perm(user, permmod.PERM_SEEK_BACKWARD)
+    return synctoken.role_for(can_play, can_pause, can_seek)
 
 
 def _may_youtube(user: DBUser) -> bool:
@@ -1325,10 +1341,12 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
         broadcast_state(rs)
         broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
 
-    free_mb = free_space_mb(Config.MEDIA_DIR)
-    if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
-        fail_all(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن.")
-        return
+    lazy = bool(Config.LAZY_ENCODE)   # lazy: store + probe now, build HLS only when something needs it
+    if not lazy:
+        free_mb = free_space_mb(Config.MEDIA_DIR)
+        if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
+            fail_all(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن.")
+            return
 
     probe = _ffprobe_source(source)
     duration_s = get_duration_s(probe)
@@ -1342,7 +1360,7 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
 
     renditions = [
         {"label": l, "height": h, "vbr": v, "abr": a,
-         "status": "queued" if l == default_label else "pending",
+         "status": "queued" if (l == default_label and not lazy) else "pending",
          "is_default": (l == default_label)}
         for (l, h, v, a) in ladder
     ]
@@ -1357,9 +1375,13 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
             log_debug(f"Item {item_id} vanished before encoding could start.")
             return
         item["renditions"] = renditions
-        item["status"] = "queued"
+        item["status"] = "idle" if lazy else "queued"
         item["_source"] = source
         item["_aspect"] = aspect
+        item["_duration"] = duration_s
+        media = summarize_media(probe)       # tracks, bit depth, HDR of the ORIGINAL (for native clients)
+        if media:
+            item["media"] = media
         if local_raw_path:
             item["_raw_path"] = local_raw_path
         safe_save(rs)
@@ -1367,8 +1389,57 @@ def start_item_encoding(item_id: str, source: str, requester_name: str, local_ra
 
     os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
     gevent.spawn(_extract_subtitles_async, item_id, source, sub_streams, requester_name)
-    gevent.spawn(_encode_rendition, item_id, source, default_label, default_height,
-                 default_vbr, default_abr, requester_name, True, duration_s)
+    if not lazy:
+        gevent.spawn(_encode_rendition, item_id, source, default_label, default_height,
+                     default_vbr, default_abr, requester_name, True, duration_s)
+
+
+def ensure_hls(item_id: str, requester_name: str):
+    """Lazy encoding: builds the default HLS rendition of an `idle` item, exactly once.
+
+    Called when a web client opens the item (or a controller asks for it explicitly).
+    The idle -> queued flip happens under LOCK, so any number of concurrent calls start
+    exactly one encode; every later call is a no-op. Native players never call this."""
+    rs = _room_for_item(item_id)
+    if rs is None:
+        return False, "آیتم پیدا نشد"
+    with LOCK:
+        item = rs.find_item(item_id)
+        if not item:
+            return False, "آیتم پیدا نشد"
+        if item.get("status") != "idle":
+            return True, "already started"
+        source = item.get("_source")
+        default = next((r for r in item.get("renditions", []) if r.get("is_default")), None)
+        if not source or not default:
+            return False, "این آیتم هنوز آماده نیست"
+        free_mb = free_space_mb(Config.MEDIA_DIR)
+        if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
+            item["status"] = "error"
+            item["error"] = f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن."
+            safe_save(rs)
+            title = item.get("title", "")
+            low_disk = True
+        else:
+            item["status"] = "queued"
+            default["status"] = "queued"
+            duration_s = item.get("_duration")
+            safe_save(rs)
+            low_disk = False
+    broadcast_state(rs)
+    if low_disk:
+        broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
+        return False, "فضای دیسک ناکافی است"
+    os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
+    gevent.spawn(_encode_rendition, item_id, source, default["label"], default["height"],
+                 default["vbr"], default["abr"], requester_name, True, duration_s)
+    return True, "started"
+
+
+def can_trigger_hls(current_item_id, item_id: str, may_control: bool) -> bool:
+    """Any member may start the encode for the item the room is on; other items need control rights,
+    so a watcher cannot queue an encode for every film in the playlist."""
+    return may_control or (current_item_id is not None and current_item_id == item_id)
 
 
 def request_quality(item_id: str, label: str, requester_name: str):
@@ -1391,6 +1462,8 @@ def request_quality(item_id: str, label: str, requester_name: str):
         if target["status"] in ("queued", "encoding", "ready", "complete"):
             return True, "already in progress"
         target["status"] = "queued"
+        if item.get("status") == "idle":
+            item["status"] = "queued"
         height, vbr, abr = target["height"], target["vbr"], target["abr"]
         safe_save(rs)
     broadcast_state(rs)
@@ -1490,6 +1563,25 @@ def _cleanup_orphans() -> dict:
     log_debug(f"Cleanup done: {len(removed['uploads'])} uploads, {len(removed['subs'])} subs, "
               f"{len(removed['hls'])} hls dirs removed.")
     return removed
+
+
+def _sync_mirror_loop():
+    """Keeps Flask's RoomState mirror in step with the sync server for rooms
+    that have people in them. `state_sync` (the webapp's bootstrap phase,
+    legacy consumers, /api/state) must never invent a second timeline; the
+    authority never calls us, so we poll its loopback state API."""
+    while True:
+        gevent.sleep(Config.SYNC_MIRROR_INTERVAL)
+        if not sync_relay.configured():
+            continue
+        for code, rs in list(rooms._rooms.items()):
+            if not rs.users:
+                continue
+            state = sync_relay.fetch_state(code)
+            if state is None:
+                continue
+            with LOCK:
+                sync_relay.mirror_room(rs, state)
 
 
 def _chat_purge_loop():
@@ -1618,11 +1710,6 @@ def api_log_client():
 def api_log_diagnostics():
     """Log files, sizes, mtimes and the tail of error/crash logs."""
     return jsonify(log_diagnostics()), 200
-
-
-@app.route(f"{BP}/media/uploads/<path:filename>")
-def serve_upload(filename):
-    return send_from_directory(Config.UPLOAD_DIR, filename, conditional=True)
 
 
 @app.route(f"{BP}/media/subs/<path:filename>")
@@ -2516,6 +2603,78 @@ def api_new_key():
 # LiveKit voice room
 # ────────────────────────────────────────────────────────────────────────────
 
+@app.route(f"{BP}/api/items/<item_id>/ensure-hls", methods=["POST"])
+def api_item_ensure_hls(item_id):
+    """Start the (lazy) HLS build for an item. Idempotent; see ensure_hls()."""
+    user = _require_user()
+    rs = _room_for_item(item_id)
+    if rs is None or rs.room_id != _current_room_code():
+        return jsonify({"error": "این آیتم در اتاق فعلی تو نیست"}), 404
+    idx = rs.current_index
+    current_id = rs.playlist[idx].get("id") if isinstance(idx, int) and 0 <= idx < len(rs.playlist) else None
+    if not can_trigger_hls(current_id, item_id, _may_control(user)):
+        return jsonify({"error": "فقط کنترل‌کننده می‌تواند پردازش آیتم دیگر را شروع کند"}), 403
+    ok, msg = ensure_hls(item_id, user.username or "ناشناس")
+    return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
+
+
+@app.route(f"{BP}/api/capabilities", methods=["GET"])
+def api_capabilities():
+    """Which optional features this server has switched on (clients hide what would only fail)."""
+    _require_user()
+    return jsonify(nativemedia.server_capabilities(
+        native_original=Config.NATIVE_MEDIA_CONFIGURED, native_remote=Config.NATIVE_REMOTE_SOURCES,
+        lazy_encode=Config.LAZY_ENCODE, sync=Config.SYNC_CONFIGURED))
+
+
+@app.route(f"{BP}/api/items/<item_id>/native-source", methods=["GET"])
+def api_item_native_source(item_id):
+    """Where a native client (mpv) should read this item from.
+
+    `original`: the uploaded file itself (no transcode, no quality loss, any container/codec),
+    behind a short-lived nginx-verified token bound to (user, file). `remote`: the item's own
+    http(s) source link (opt-in). `hls`: the transcoded fallback."""
+    user = _require_user()
+    rs = _room_for_item(item_id)
+    if rs is None or rs.room_id != _current_room_code():
+        return jsonify({"error": "این آیتم در اتاق فعلی تو نیست"}), 404
+    item = next((it for it in rs.playlist if it.get("id") == item_id), None)
+    if item is None:
+        return jsonify({"error": "آیتم پیدا نشد"}), 404
+    picked = nativemedia.pick_source(
+        item, user_id=user.id, upload_dir=Config.UPLOAD_DIR, base_path=Config.NATIVE_MEDIA_BASE,
+        secret=Config.NATIVE_MEDIA_SECRET if Config.NATIVE_MEDIA_CONFIGURED else "",
+        remote_ok=Config.NATIVE_REMOTE_SOURCES, now=time.time())
+    if picked is None:
+        return jsonify({"error": "این آیتم هنوز منبع قابل پخش ندارد"}), 409
+    picked["title"] = item.get("title")
+    if item.get("media"):
+        picked["media"] = item["media"]
+    return jsonify(picked)
+
+
+@app.route(f"{BP}/api/room/sync-token", methods=["POST"])
+def api_room_sync_token():
+    """Short-lived token for the room sync service (w2g-server).
+
+    Role = controller only when the user's *resolved* room permissions allow play, pause
+    and seek (so the owner's role/preset settings decide who may drive the room)."""
+    user = _require_user()
+    room_code = _current_room_code()
+    if not room_code:
+        return jsonify({"error": "اتاق فعال نیست — اول وارد اتاق شو"}), 400
+    if not Config.SYNC_CONFIGURED:
+        return jsonify({"error": "سرویس همگام‌سازی روی این سرور تنظیم نشده است"}), 503
+    can_play = _has_perm(user, permmod.PERM_PLAY_VIDEO)
+    can_pause = _has_perm(user, permmod.PERM_PAUSE_VIDEO)
+    can_seek = _has_perm(user, permmod.PERM_SEEK_FORWARD) and _has_perm(user, permmod.PERM_SEEK_BACKWARD)
+    role = synctoken.role_for(can_play, can_pause, can_seek)
+    exp = int(time.time()) + Config.SYNC_TOKEN_TTL
+    token = synctoken.mint(Config.SYNC_SECRET.encode("utf-8"), user.id, room_code, role, exp)
+    return jsonify({"url": Config.SYNC_URL, "token": token, "room": room_code,
+                    "role": role, "expires_at": exp})
+
+
 @app.route(f"{BP}/api/voice/token", methods=["POST"])
 def api_voice_token():
     """Issues a short-lived LiveKit access token scoped to the user's current
@@ -2837,12 +2996,9 @@ def api_auth_register():
     display_name = (data.get("display_name") or "").strip()
     email = (data.get("email") or "").strip().lower()
 
-    if len(username) < 3 or len(username) > 24:
-        return jsonify({"error": "نام کاربری باید ۳ تا ۲۴ حرف باشد"}), 400
-    if not _re.match(r"^[A-Za-z0-9_.\-]+$", username):
-        return jsonify({"error": "نام کاربری فقط حروف انگلیسی، عدد، _ و - می‌تواند باشد"}), 400
-    if len(password) < 6:
-        return jsonify({"error": "رمز عبور باید حداقل ۶ کاراکتر باشد"}), 400
+    bad = account_names.username_error(username) or account_names.password_error(password)
+    if bad:
+        return jsonify({"error": bad}), 400
     if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         return jsonify({"error": "یک ایمیل معتبر وارد کن"}), 400
 
@@ -3256,10 +3412,8 @@ def _oauth_finish_session(session, info: dict) -> dict | None:
             if info.get("verified"):
                 user.email_verified = True
     if user is None:
-        base = (_re.sub(r"[^A-Za-z0-9_.\-]", "", info.get("email") or "").split("@")[0]) or "user"
-        username = base[:24]
-        if dbmod.get_user_by_username_or_email(session, username):
-            username = f"{base[:20]}{secrets.choice('0123456789')}{secrets.choice('0123456789')}"
+        username = account_names.username_from_email(
+            info.get("email"), lambda n: bool(dbmod.get_user_by_username_or_email(session, n)))
         verified_email = bool(info.get("verified"))
         is_admin = verified_email and dbmod.is_special_account(info.get("email"))
         user = DBUser(
@@ -3274,6 +3428,7 @@ def _oauth_finish_session(session, info: dict) -> dict | None:
             upload_quota=Config.DEFAULT_UPLOAD_QUOTA,
             oauth_provider=info["provider"],
             oauth_id=info["oauth_id"],
+            profile_complete=False,   # must pick their own username + password before using the app
         )
         session.add(user)
         session.flush()
@@ -3382,6 +3537,43 @@ def api_auth_logout():
         finally:
             session.close()
     return jsonify({"ok": True})
+
+
+@app.route(f"{BP}/api/auth/complete-profile", methods=["POST"])
+def api_auth_complete_profile():
+    """First sign-in with Google/GitHub: the account exists with a generated username and a random
+    password. The person chooses both here. Only for accounts still marked incomplete."""
+    user = _require_user()
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    bad = account_names.username_error(username) or account_names.password_error(password)
+    if bad:
+        return jsonify({"error": bad}), 400
+    session = dbmod.SessionLocal()
+    try:
+        fresh = session.get(DBUser, user.id)
+        if not fresh or not fresh.is_active:
+            return jsonify({"error": "حساب غیرفعال است"}), 401
+        if fresh.profile_complete is not False:
+            return jsonify({"error": "پروفایل قبلاً کامل شده است"}), 409
+        other = dbmod.get_user_by_username_or_email(session, username)
+        if other is not None and other.id != fresh.id:
+            return jsonify({"error": "این نام کاربری قبلاً ثبت شده است"}), 409
+        old_username = fresh.username
+        fresh.username = username
+        fresh.password_hash = dbmod.hash_password(password)
+        fresh.profile_complete = True
+        if not fresh.display_name or fresh.display_name == old_username:
+            fresh.display_name = username   # still the generated name: follow the chosen one
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return jsonify({"error": "این نام کاربری قبلاً ثبت شده است"}), 409
+        return jsonify({"user": fresh.public_dict()})
+    finally:
+        session.close()
 
 
 @app.route(f"{BP}/api/auth/me")
@@ -3946,6 +4138,14 @@ def on_voice_left(data):
 
 @socketio.on("control")
 def on_control(data):
+    """Playback timing (play/pause/seek/rate) is RELAYED to the sync server —
+    the single source of truth every client (web, mpv) also follows directly.
+    Flask keeps playlist moves (select/shuffle), the permission model and the
+    encoded-frontier seek clamp, then mirrors the authority's answer back into
+    state_sync so nothing here maintains a second timeline.
+
+    play/pause deliberately carry no position (the server computes it), which
+    closes the old hole where a stale client-supplied `at` dragged the room."""
     code, user = _socket_session()
     if not code or not user:
         return
@@ -3953,9 +4153,19 @@ def on_control(data):
     action = data.get("action")
     if action not in ("play", "pause", "seek", "rate", "select", "shuffle"):
         return
-    # play/pause/seek are open to everyone in the room; changing the shared
-    # speed or switching the selected media needs a room manager.
-    if action in ("rate", "select", "shuffle") and not _may_control(user):
+    is_playlist = action in ("select", "shuffle")
+    is_timing_rate = action == "rate"
+    # Legacy semantics:
+    # - play/pause/seek: open to everyone in the room
+    # - rate/select/shuffle: require _may_control (room manager)
+    if action in ("select", "shuffle") and not _may_control(user):
+        emit("notify", {
+            "type": "control_denied", "name": user.username,
+            "ts": time.time(),
+            "extra": {"action": action},
+        })
+        return
+    if action == "rate" and not _may_control(user):
         emit("notify", {
             "type": "control_denied", "name": user.username,
             "ts": time.time(),
@@ -3966,33 +4176,77 @@ def on_control(data):
     name = user.username or "ناشناس"
     clamped_to = None
 
-    with LOCK:
-        if action == "play":
-            rs.set_play(float(data.get("at", rs.current_position())))
-        elif action == "pause":
-            rs.set_pause(float(data.get("at", rs.current_position())))
-        elif action == "seek":
-            target = float(data.get("to", 0))
-            # Enforce the encoded frontier here rather than trusting the client's
-            # own guard: `control` is a plain socket event, so without this a
-            # hand-crafted seek lands past the encoded timeline and the room
-            # stares at a black screen. See seek_frontier / clamp_seek_target.
+    if action == "shuffle":
+        # Playback ORDER is Flask's playlist domain; it has no timing meaning.
+        with LOCK:
+            rs.set_shuffle(bool(data.get("on", not rs.shuffle)))
+            safe_save(rs)
+            payload = rs.to_public_dict()
+    elif action == "select":
+        try:
+            index = int(data.get("index"))
+        except (TypeError, ValueError):
+            return
+        with LOCK:
+            rs.select_item(index)
+            item = _current_item(rs)
+            if not item:
+                return
+            item_id = str(item.get("id"))
+            safe_save(rs)
+        # Selecting an item also resets the room's clock — exactly what the
+        # sync server's `item` command does (position 0, paused).
+        state = sync_relay.forward_cmd(code, {"c": "item", "item": item_id})
+        with LOCK:
+            if state is not None:
+                sync_relay.mirror_room(rs, state)
+            payload = rs.to_public_dict()
+    else:
+        if action == "seek":
+            target = float(data.get("to", 0) or 0)
             frontier = _encoded_frontier(_current_item(rs))
             safe_target = clamp_seek_target(target, frontier)
             if safe_target != target:
                 clamped_to = safe_target
-            target = safe_target
-            rs.seek(target)
+            cmd = {"c": "seek", "target": safe_target}
         elif action == "rate":
-            rs.set_rate(float(data.get("rate", 1.0)))
-        elif action == "select":
-            rs.select_item(int(data.get("index")))
-        elif action == "shuffle":
-            rs.set_shuffle(bool(data.get("on", not rs.shuffle)))
+            try:
+                rate = float(data.get("rate", 1.0))
+            except (TypeError, ValueError):
+                return
+            cmd = {"c": "rate", "rate": rate}
+        elif action == "play":
+            cmd = {"c": "play"}
         else:
-            return
-        safe_save(rs)
-        payload = rs.to_public_dict()
+            cmd = {"c": "pause"}
+        state = sync_relay.forward_cmd(code, cmd)
+        if state is None:
+            # Fallback: if sync is not configured (dev/tests), apply locally.
+            if not sync_relay.configured():
+                with LOCK:
+                    if action == "seek":
+                        rs.seek(safe_target if 'safe_target' in locals() else float(data.get("to", 0) or 0))
+                    elif action == "play":
+                        rs.set_play(rs.current_position())
+                    elif action == "pause":
+                        rs.set_pause(rs.current_position())
+                    elif action == "rate":
+                        rs.set_rate(float(data.get("rate", 1.0)))
+                    safe_save(rs)
+                payload = rs.to_public_dict()
+            else:
+                emit("notify", {
+                    "type": "sync_unavailable", "name": name, "ts": time.time(),
+                    "extra": {"action": action},
+                })
+                return
+        else:
+            with LOCK:
+                sync_relay.mirror_room(rs, state)
+            payload = rs.to_public_dict()
+            with LOCK:
+                sync_relay.mirror_room(rs, state)
+                payload = rs.to_public_dict()
 
     if clamped_to is not None:
         # Tell the room why the seek landed short, so the client can say so
@@ -4093,6 +4347,7 @@ if __name__ == "__main__":
         log_debug(f"Boot cleanup of partial encodes failed: {e}")
     gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
+    gevent.spawn(_sync_mirror_loop)
     if archive_scraper.enabled_collectors(Config):
         archive_scraper.get_collector().auth.start()
         log_debug("COLLECTOR_ENABLED name=digimoviez kind=movies")

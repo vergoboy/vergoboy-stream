@@ -1,0 +1,25 @@
+[Unit]
+Description=w2g-server - room sync timing authority
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/w2g
+Environment="W2G_BIND=127.0.0.1:8765"
+Environment="W2G_HTTP_BIND=127.0.0.1:8766"
+Environment="W2G_STATE_DIR=/opt/w2g/data/sync-state"
+Environment="W2G_SECRET="
+EnvironmentFile=/opt/w2g/.stream_db.env
+
+ExecStart=/opt/w2g/current/w2g-server
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/w2g/data
+
+[Install]
+WantedBy=multi-user.target

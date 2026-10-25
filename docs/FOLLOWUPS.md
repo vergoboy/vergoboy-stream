@@ -563,3 +563,39 @@ are unaffected either way: they always direct-play the original bytes. The
 S4 gate must therefore report, per scenario, encodes started before vs after
 and the CPU time saved in the test scenario — the numbers that decide whether
 this retirement is worth a phase.
+
+## From native-media (2026-10) — `/media/hls`, `/media/subs`, `/media/chat` are still unauthenticated
+
+**Done:** the raw uploads (full-quality originals) are no longer public. nginx `location ^~ /w2g/media/uploads/`
+returns 404 and the Flask route `/media/uploads/<file>` is gone; native clients read originals only through
+signed, short-lived `secure_link` URLs bound to (user, file, expiry).
+
+**Still open:** HLS (`/media/hls/<item>/…`), subtitles (`/media/subs/…`), chat images (`/media/chat/…`) and avatars
+are served to anyone who has the URL. The ids in them are unguessable (uuid4), so today the URL itself is the
+credential; it leaks the same way any shared link does (screenshots, logs, a copied address).
+
+*Why not now:* a header cannot protect these. `<track src>`, `<img src>` and Safari's native HLS cannot send
+`Authorization`, and hls.js would need `xhrSetup` for the playlist but not for the rest. The broadcast room state
+also carries ONE `src` shared by every member, so a per-user signed URL cannot live in it.
+
+*Options, cheapest first:*
+1. **Keep capability URLs, harden them.** No autoindex, delete the HLS/subs tree when the item is removed (check it
+   really happens), never log full media URLs. Cost: none. Leaves the "leaked link works until the item is removed" risk.
+2. **Room-level signed path.** `/w2g/media/hls/<room>.<exp>.<sig>/<item>/master.m3u8`: nginx `secure_link` over
+   (room, expiry), relative segment URLs inherit the prefix. `src`/subtitle urls are signed when the public state is
+   serialized (state.py `_sanitize_item`), TTL >= max(6 h, 2x the film), refreshed on reconnect. Cost: medium
+   (state.py, Player source loading, nginx regex location, tests). Leaves "ex-member keeps access until expiry".
+3. **Per-user signed path** (like native originals) via a `GET /api/items/<id>/hls-url` the Player calls before
+   `hls.loadSource`. Strongest, but every consumer (hls.js, Safari, `<track>`) needs the new flow.
+
+*Recommendation:* do 1 now, decide 2 vs 3 once it is clear whether rooms hold content that must not leak.
+
+## From the account work (2026-10) — usernames are case-sensitive
+
+`users.username` is unique but compared exactly, so "Alice" and "alice" can both exist (registration, login and the new
+`complete-profile` all behave this way). Login by exact name is fine, but anywhere a username is shown, a look-alike
+("Alice" vs "alice") can impersonate. Decide: make the unique index case-insensitive (`lower(username)`), after checking
+the production table for existing case-collisions. Not changed here because it needs a data check first.
+
+Also open: an account that signed in with Google/GitHub and has not completed its profile can still call other API
+endpoints with its token (only the web UI gates it). Enforce server-side if that matters.

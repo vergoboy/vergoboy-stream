@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -457,6 +458,38 @@ class ProcessHandling(unittest.TestCase):
         self.assertIn("line 500", outcome.stderr_text,
                       "the newest line must be kept — that is where causes live")
         self.assertNotIn("line 1\n", outcome.stderr_text + "\n")
+
+    def test_the_last_stderr_lines_are_never_lost_when_a_process_exits_fast(self):
+        """Regression: stderr was closed from the main thread while its reader still had buffered
+        lines, so a fast-exiting process lost the tail of its stderr (the cause of the failure).
+
+        It only shows under gevent's monkey patching (threads are greenlets there: the reader runs
+        only when the main one yields), which is how the app runs. So run it in a child process
+        that patches first, exactly like the app, and repeat: one run can pass by luck."""
+        script = os.path.join(self.tmp, "noisy_fail.sh")
+        with open(script, "w") as fh:
+            fh.write("#!/bin/bash\nfor i in $(seq 1 500); do echo \"line $i\" >&2; done\n"
+                     "echo \"fatal: the real cause\" >&2\nexit 1\n")
+        os.chmod(script, 0o755)
+        child = (
+            "from gevent import monkey; monkey.patch_all()\n"
+            "import sys, tempfile\n"
+            "from media_pipeline.runner import Attempt, EncodeRequest, EncodeRunner\n"
+            "from media_pipeline import HwCircuitBreaker\n"
+            "from tests.test_media_runner import FakeConfig\n"
+            "r = EncodeRunner(config=FakeConfig, breaker=HwCircuitBreaker(threshold=2, cooldown_s=30.0))\n"
+            "bad = 0\n"
+            "for n in range(40):\n"
+            "    out = r._run_attempt(EncodeRequest(output_dir=tempfile.mkdtemp(), source='', log_prefix='t'),\n"
+            "                        Attempt([sys.argv[1]], 'noisy_fail'))\n"
+            "    if not out.stderr_text.endswith('fatal: the real cause'):\n"
+            "        bad += 1\n"
+            "print('LOST', bad)\n"
+        )
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        proc = subprocess.run([sys.executable, "-c", child, script], cwd=root, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-800:])
+        self.assertIn("LOST 0", proc.stdout, "the tail of stderr was lost in some runs: " + proc.stdout[-200:])
 
     def test_shutdown_kills_running_processes(self):
         script = os.path.join(self.tmp, "forever.sh")

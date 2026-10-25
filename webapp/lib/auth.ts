@@ -217,6 +217,24 @@ export async function login(username: string, password: string): Promise<AuthUse
   return data.user;
 }
 
+/** First Google/GitHub sign-in: choose a username and password. Updates the stored user on success. */
+export async function completeProfile(username: string, password: string): Promise<AuthUser> {
+  let res: Response;
+  try {
+    res = await authFetch(API_PREFIX + "/auth/complete-profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+  } catch (e) {
+    throw friendlyError(e);
+  }
+  const data = (await res.json().catch(() => ({}))) as { user?: AuthUser; error?: string };
+  if (!res.ok || !data.user) throw new Error(data.error || "ذخیره‌ی پروفایل ناموفق بود");
+  updateUser(data.user);
+  return data.user;
+}
+
 export async function register(username: string, password: string, display_name = "", email = ""): Promise<AuthUser> {
   let res: Response;
   try {

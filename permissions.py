@@ -36,6 +36,9 @@ PERM_DELETE_ARCHIVE_ITEM = "delete_archive_item"
 PERM_SEND_CHAT = "send_chat"
 PERM_SEND_CHAT_IMAGE = "send_chat_image"
 PERM_CLEAR_CHAT = "clear_chat"
+PERM_DELETE_CHAT_OTHERS = "delete_chat_others"   # delete anyone's message (authors may always delete their own)
+PERM_PIN_CHAT = "pin_chat"
+PERM_MUTE_CHAT = "mute_chat"                     # mute / unmute members in the chat
 PERM_PROMOTE_USER = "promote_user"
 PERM_DEMOTE_USER = "demote_user"
 PERM_MANAGE_PERMISSIONS = "manage_permissions"
@@ -57,7 +60,8 @@ CATEGORIES: list[tuple[str, str, tuple[str, ...]]] = [
     ("archive", "آرشیو", (
         PERM_ACCESS_ARCHIVE, PERM_SEARCH_ARCHIVE, PERM_DELETE_ARCHIVE_ITEM,
     )),
-    ("chat", "چت", (PERM_SEND_CHAT, PERM_SEND_CHAT_IMAGE, PERM_CLEAR_CHAT)),
+    ("chat", "چت", (PERM_SEND_CHAT, PERM_SEND_CHAT_IMAGE, PERM_CLEAR_CHAT,
+                    PERM_DELETE_CHAT_OTHERS, PERM_PIN_CHAT, PERM_MUTE_CHAT)),
     ("administration", "مدیریت", (
         PERM_PROMOTE_USER, PERM_DEMOTE_USER, PERM_ADD_ADMIN, PERM_REMOVE_ADMIN,
         PERM_MANAGE_PERMISSIONS, PERM_MANAGE_DEFAULT_PERMISSIONS,
@@ -88,6 +92,9 @@ LABELS_FA: dict[str, str] = {
     PERM_SEND_CHAT: "ارسال پیام چت",
     PERM_SEND_CHAT_IMAGE: "ارسال عکس در چت",
     PERM_CLEAR_CHAT: "پاک‌کردن چت",
+    PERM_DELETE_CHAT_OTHERS: "حذف پیام دیگران",
+    PERM_PIN_CHAT: "پین‌کردن پیام",
+    PERM_MUTE_CHAT: "میوت و آن‌میوت در چت",
     PERM_PROMOTE_USER: "ارتقا کاربران",
     PERM_DEMOTE_USER: "تنزل کاربران",
     PERM_ADD_ADMIN: "افزودن ادمین",

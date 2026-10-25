@@ -165,6 +165,9 @@ export const api = {
   addLive: (playback_url: string, title: string, name: string, key = "") =>
     postJson<UploadResult>(API_PREFIX + "/add-live", { playback_url, title, name, key }),
 
+  /** Lazy encoding: asks the server to build the HLS for an `idle` item (idempotent). */
+  ensureHls: (item_id: string) =>
+    postJson<{ ok: boolean; message: string }>(API_PREFIX + `/items/${encodeURIComponent(item_id)}/ensure-hls`, {}),
   requestQuality: (item_id: string, label: string, name: string) =>
     postJson<{ ok: true }>(API_PREFIX + "/request-quality", { item_id, label, name }),
 

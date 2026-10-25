@@ -314,6 +314,31 @@ class Config:
     LIVEKIT_ROOM = os.environ.get("STREAM_LIVEKIT_ROOM", f"{INSTANCE}-voice")
     LIVEKIT_TOKEN_TTL = int(os.environ.get("STREAM_LIVEKIT_TOKEN_TTL", "14400"))
 
+    # Room sync service (w2g-server). Tokens are signed with SYNC_SECRET; the same
+    # secret must be given to w2g-server as W2G_SECRET. Unset => /api/room/sync-token is 503.
+    SYNC_URL = os.environ.get("STREAM_SYNC_URL", "").strip()
+    SYNC_SECRET = os.environ.get("STREAM_SYNC_SECRET", "")
+    SYNC_TOKEN_TTL = int(os.environ.get("STREAM_SYNC_TOKEN_TTL", "21600"))
+    SYNC_CONFIGURED = bool(SYNC_URL and len(SYNC_SECRET) >= 32)
+    # Loopback control API of the sync server (Flask's relay + mirror surface).
+    # Deliberately not the public SYNC_URL: this one is never proxied by nginx.
+    SYNC_INTERNAL_URL = os.environ.get("STREAM_SYNC_INTERNAL_URL", "http://127.0.0.1:8766").strip()
+    # How often rooms with people in them are re-mirrored from the authority.
+    SYNC_MIRROR_INTERVAL = float(os.environ.get("STREAM_SYNC_MIRROR_INTERVAL", "2.0"))
+
+    # Original-file (no transcode) delivery for native clients: nginx `secure_link` verifies these URLs.
+    # NATIVE_MEDIA_SECRET must equal the secret in nginx's `w2g-media-secret.conf`.
+    NATIVE_MEDIA_SECRET = os.environ.get("STREAM_NATIVE_MEDIA_SECRET", "")
+    NATIVE_MEDIA_BASE = os.environ.get("STREAM_NATIVE_MEDIA_BASE", "/w2g/native/uploads")
+    NATIVE_MEDIA_CONFIGURED = len(NATIVE_MEDIA_SECRET) >= 32
+    # Let native clients play an item's http(s) source link directly (e.g. archive/URL imports).
+    # Off by default: the link becomes visible to every member of the room.
+    NATIVE_REMOTE_SOURCES = os.environ.get("STREAM_NATIVE_REMOTE_SOURCES", "0") == "1"
+
+    # Lazy encoding: adding an item only stores + probes it; the HLS ladder is built (once) when a
+    # web client opens the item or a controller asks for it. Native clients never trigger an encode.
+    LAZY_ENCODE = os.environ.get("STREAM_LAZY_ENCODE", "0") == "1"
+
     @classmethod
     def validate(cls):
         if cls.ENVIRONMENT not in {"development", "production"}:

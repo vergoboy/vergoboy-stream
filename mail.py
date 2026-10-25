@@ -11,7 +11,7 @@ from email.utils import formatdate, make_msgid
 from config import Config
 
 
-def _build_message(to: str, subject: str, html: str) -> EmailMessage:
+def _build_message(to: str, subject: str, html: str, text: str | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = Address("Watch Party", "info", "vergoboy.ir")
@@ -22,9 +22,27 @@ def _build_message(to: str, subject: str, html: str) -> EmailMessage:
     # never rely on an MTA to fix headers on the way out.
     msg["Date"] = formatdate(localtime=False, usegmt=True)
     msg["Message-ID"] = make_msgid(domain="vergoboy.ir")
-    msg.set_content("مشاهده پیام در مرورگر.")
+    msg["Reply-To"] = Address("Watch Party", "info", "vergoboy.ir")
+    # Transactional mail: tell receivers it is machine-generated, not bulk.
+    msg["Auto-Submitted"] = "auto-generated"
+    msg["X-Auto-Response-Suppress"] = "All"
+    # A real text/plain part that carries the same content (incl. the link).
+    # A near-empty text part next to a rich HTML part is a classic spam signal.
+    msg.set_content(text or _html_to_text(html))
     msg.add_alternative(html, subtype="html")
     return msg
+
+
+def _html_to_text(html: str) -> str:
+    """Minimal HTML -> text: keeps link targets so the plain part is usable."""
+    import re
+    from html import unescape
+    t = re.sub(r"(?is)<(script|style).*?</\1>", "", html)
+    t = re.sub(r'(?is)<a[^>]+href="([^"]+)"[^>]*>.*?</a>', r"\1", t)
+    t = re.sub(r"(?i)<br\s*/?>|</p>|</div>", "\n", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = unescape(t)
+    return re.sub(r"\n\s*\n+", "\n\n", t).strip() + "\n"
 
 
 def send_email(to: str, subject: str, html: str) -> bool:

@@ -17,7 +17,7 @@ import jwt
 from jwt.exceptions import PyJWTError
 from sqlalchemy import (
     JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
-    delete, func, select, text, update,
+    delete, func, select, text, true, update,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -57,6 +57,9 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(64), default="")
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # False only for accounts created through Google/GitHub that have not yet chosen their own
+    # username and password. Existing accounts are complete (column default / migration default).
+    profile_complete: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     password_hash: Mapped[str] = mapped_column(String(128))
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -102,6 +105,7 @@ class User(Base):
             "display_name": self.display_name,
             "email": self.email,
             "email_verified": self.email_verified,
+            "profile_complete": self.profile_complete is not False,
             "role": self.role,
             "can_control": self.can_control,
             "youtube_allowed": self.youtube_allowed,
@@ -600,6 +604,7 @@ def _migrate_columns():
     adds = [
         ("users", "reset_token", "VARCHAR(128)"),
         ("users", "reset_expires", "TIMESTAMPTZ"),
+        ("users", "profile_complete", "BOOLEAN NOT NULL DEFAULT TRUE"),
     ]
     missing = [(t, c, d) for (t, c, d) in adds if (t, c) not in existing]
     if not missing:

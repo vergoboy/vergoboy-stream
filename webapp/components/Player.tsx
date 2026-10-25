@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Popcorn,
   Clapperboard,
+  MonitorPlay,
 } from "lucide-react";
 /* eslint-disable react-hooks/refs */
 
@@ -28,6 +29,8 @@ import { PlayerControls, type QualityOption } from "./PlayerControls";
 import { run, ripple, popIn, spring } from "@/lib/anim";
 import { useIdle, useViewport } from "@/lib/useIdle";
 import { canNativeFloat, enterNativeMini, setNativeFullscreen, isTauri, isMobileOS } from "@/lib/tauri";
+import { nativePlayerAvailable, onNativePlayerExit, startNativePlayer, trace } from "@/lib/nativePlayer";
+import { fetchCapabilities } from "@/lib/capabilities";
 import { localPoint } from "@/lib/geometry";
 
 
@@ -95,6 +98,26 @@ export function Player({
   const { settings, setSettings } = useAppSettings();
   const sc = settings.shortcuts;
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Native mpv player (desktop app only). While it runs, the web <video> stays silent so there is one voice.
+  const [nativeAvail, setNativeAvail] = useState(false);
+  const [nativeChecked, setNativeChecked] = useState(false); // false until we know whether mpv is available
+  const [nativeActive, setNativeActive] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    let off: (() => void) | undefined;
+    nativePlayerAvailable().then(async (ok) => {
+      // mpv is only useful if the server also runs the sync service; otherwise the button could only fail.
+      // If the server cannot tell us (old server, network), assume yes and let a real error surface.
+      let usable = ok;
+      if (ok) {
+        try { usable = (await fetchCapabilities()).server.sync; } catch { /* keep the button */ }
+      }
+      trace(`native player: mpv available=${ok} usable=${usable}`);
+      if (!dead) { setNativeAvail(usable); setNativeChecked(true); }
+    });
+    onNativePlayerExit(() => setNativeActive(false)).then((f) => { if (dead) f(); else off = f; });
+    return () => { dead = true; off?.(); };
+  }, []);
   const dubAudioRef = useRef<HTMLAudioElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -358,6 +381,18 @@ export function Player({
   // Bumped by the Retry button to force the source-loading effect to tear the
   // old player down and attach a brand new one.
   const [sourceEpoch, setSourceEpoch] = useState(0);
+
+  // Lazy encoding: the server builds HLS only when someone needs it. A plain web client that opens an `idle`
+  // item asks for it (once per item). The desktop app with mpv does NOT: native playback needs no transcode.
+  const askedHls = useRef<Set<string>>(new Set());
+  const askHls = useCallback((id: string) => {
+    if (askedHls.current.has(id)) return;
+    askedHls.current.add(id);
+    api.ensureHls(id).catch(() => askedHls.current.delete(id));
+  }, []);
+  useEffect(() => {
+    if (item?.status === "idle" && nativeChecked && !nativeAvail) askHls(item.id);
+  }, [item?.id, item?.status, nativeChecked, nativeAvail, askHls]);
 
   const retryPlayback = useCallback(() => {
     setPlaybackError(null);
@@ -1077,9 +1112,9 @@ export function Player({
     const v = videoRef.current;
     if (v) {
       v.volume = volume;
-      v.muted = muted;
+      v.muted = muted || nativeActive;
     }
-  }, [volume, muted]);
+  }, [volume, muted, nativeActive]);
 
   // commands from the right-click menu (fullscreen / floating live in this component)
   const cmdRef = useRef({ toggleFullscreen, togglePip });
@@ -1094,7 +1129,7 @@ export function Player({
     return () => window.removeEventListener("player:cmd", on);
   }, []);
 
-  const processing = !item || item.status === "queued" || item.status === "encoding" || item.status === "error";
+  const processing = !item || item.status === "idle" || item.status === "queued" || item.status === "encoding" || item.status === "error";
   // The item can be marked `complete` yet have no playable src: without an
   // explicit state the player used to render a bare black rectangle.
   const noPlayableSource = Boolean(item) && !processing && !isPlayable;
@@ -1289,6 +1324,13 @@ export function Player({
   });
 
   const title = item ? prettyTitle(item.title) : "";
+  const startNative = () => {
+    trace(`native player: button clicked (mediaSrc=${Boolean(mediaSrc)} item=${Boolean(item)} active=${nativeActive})`);
+    if (!mediaSrc || !item || nativeActive) return;
+    startNativePlayer({ itemId: item.id, fallbackUrl: mediaSrc, title })
+      .then(() => setNativeActive(true))
+      .catch((e: unknown) => showToast(e instanceof Error ? e.message : String(e)));
+  };
   const controls = (
     <PlayerControls
       rotated={rotated}
@@ -1355,6 +1397,9 @@ export function Player({
       qualities={qualityOptions}
       onOpenSettings={onOpenSettings}
       floatSupported={Boolean(item)}
+      nativeSupported={nativeAvail && Boolean(mediaSrc) && item?.type !== "live"}
+      nativeActive={nativeActive}
+      onNativePlay={startNative}
       floating={mini || inPip}
       onToggleFloat={togglePip}
       fullscreen={fullscreen}
@@ -1510,6 +1555,20 @@ export function Player({
               <div className="absolute inset-0 z-[6] flex flex-col items-center justify-center gap-3 bg-[color:var(--color-bg)]/92 px-6 text-center">
                 {!item ? (
                   <EmptyScreen onGoToAdd={onGoToAdd} />
+                ) : item.status === "idle" && nativeAvail ? (
+                  <>
+                    <MonitorPlay className="h-10 w-10 text-[color:var(--color-amber)]" />
+                    <p className="display text-[20px] text-white">آماده‌ی پخش با mpv</p>
+                    <p className="max-w-[420px] truncate text-[13px] text-white/60" dir="auto">«{prettyTitle(item.title)}»</p>
+                    <div className="mt-1 flex flex-wrap items-center justify-center gap-2.5">
+                      <button type="button" onClick={startNative} className="rounded-full bg-white/10 px-4 py-2 text-[13px] text-white hover:bg-white/15">
+                        پخش با mpv
+                      </button>
+                      <button type="button" onClick={() => askHls(item.id)} className="rounded-full px-4 py-2 text-[13px] text-white/60 hover:text-white">
+                        ساخت نسخه‌ی وب
+                      </button>
+                    </div>
+                  </>
                 ) : item.status === "error" ? (
                   <>
                     <TriangleAlert className="h-11 w-11 text-[color:var(--color-coral)]" />

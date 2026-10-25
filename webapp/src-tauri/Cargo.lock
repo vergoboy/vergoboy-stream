@@ -3630,6 +3630,7 @@ dependencies = [
 name = "vergoboy-stream"
 version = "0.1.0"
 dependencies = [
+ "mpv_controller",
  "serde",
  "serde_json",
  "tauri",

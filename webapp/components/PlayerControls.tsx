@@ -10,6 +10,7 @@ import {
   Maximize,
   Minimize,
   PictureInPicture2,
+  MonitorPlay,
   Captions,
   CaptionsOff,
   Headphones,
@@ -89,6 +90,10 @@ export type ControlsProps = {
   onOpenSettings?: () => void;
 
   floatSupported: boolean;
+  /** desktop app with the mpv player installed */
+  nativeSupported?: boolean;
+  nativeActive?: boolean;
+  onNativePlay?: () => void;
   floating: boolean;
   onToggleFloat: () => void;
 
@@ -289,6 +294,12 @@ export function PlayerControls(p: ControlsProps) {
         {p.canShuffle && (
           <IconBtn label="پخش تصادفی" onClick={p.onToggleShuffle} active={p.shuffle} hideOnPhone>
             <Shuffle className="h-[18px] w-[18px]" />
+          </IconBtn>
+        )}
+
+        {p.nativeSupported && p.onNativePlay && (
+          <IconBtn label={p.nativeActive ? "پخش در mpv (فعال)" : "پخش با mpv"} onClick={p.onNativePlay} active={p.nativeActive}>
+            <MonitorPlay className="h-5 w-5" />
           </IconBtn>
         )}
 
