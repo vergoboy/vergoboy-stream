@@ -13,7 +13,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use mpv_controller::PlayerPort;
 
 /// Keep in sync with `MAX_BYTES` / `BACKUP_COUNT` in app_logging.py so one
 /// reader understands every file in the directory.
@@ -22,6 +23,9 @@ const BACKUP_COUNT: u32 = 5;
 
 /// Held across the append so two threads cannot interleave half-lines.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+// MPV player state
+static MPV_PLAYER: Mutex<Option<mpv_controller::MpvPlayer>> = Mutex::new(None);
 
 /// Where every process writes its logs.
 ///
@@ -260,6 +264,134 @@ pub fn install_crash_logging() {
     }));
 }
 
+
+// MPV Tauri commands
+#[tauri::command]
+fn mpv_start(path: Option<String>, start: Option<f64>, paused: Option<bool>, headless: Option<bool>) -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if player_guard.is_some() {
+        return Err("MPV already running".to_string());
+    }
+    let mut opts = mpv_controller::MpvOptions::new(std::env::temp_dir().join(format!("mpv-{}.sock", std::process::id())));
+    if let Some(p) = path {
+        opts.media = Some(p);
+    }
+    opts.start = start.unwrap_or(0.0);
+    opts.paused = paused.unwrap_or(true);
+    opts.headless = headless.unwrap_or(false);
+    match mpv_controller::MpvPlayer::start(opts) {
+        Ok(p) => {
+            *player_guard = Some(p);
+            Ok(())
+        }
+        Err(e) => Err(e.to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_load(url: String, start: Option<f64>, paused: Option<bool>) -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.load(&url, start.unwrap_or(0.0), paused.unwrap_or(true)).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_play() -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.set_paused(false).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_pause() -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.set_paused(true).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_seek(pos: f64) -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.seek(pos).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_set_rate(rate: f64) -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.set_rate(rate).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_set_volume(level: u32) -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.set_volume(level as u8).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_set_mute(on: bool) -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        p.set_mute(on).map_err(|e| e.to_string())
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_get_state() -> Result<String, String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        match p.get_state() {
+            Ok(_st) => Ok("{}".to_string()),
+            Err(e) => Err(e.to_string())
+        }
+    } else {
+        Err("MPV not running".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_poll_events() -> Result<String, String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(ref mut p) = *player_guard {
+        let _events = p.poll_events(Duration::from_millis(100));
+        Ok("[]".to_string())
+    } else {
+        Ok("[]".to_string())
+    }
+}
+
+#[tauri::command]
+fn mpv_stop() -> Result<(), String> {
+    let mut player_guard = MPV_PLAYER.lock().unwrap();
+    if let Some(mut p) = player_guard.take() {
+        let _ = p.shutdown();
+    }
+    Ok(())
+}
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::Manager;
@@ -281,7 +413,22 @@ pub fn run() {
         Ok(())
     });
 
-    match builder.build(tauri::generate_context!()) {
+    match builder
+        .invoke_handler(tauri::generate_handler![
+            mpv_start,
+            mpv_load,
+            mpv_play,
+            mpv_pause,
+            mpv_seek,
+            mpv_set_rate,
+            mpv_set_volume,
+            mpv_set_mute,
+            mpv_get_state,
+            mpv_poll_events,
+            mpv_stop,
+        ])
+        .build(tauri::generate_context!())
+    {
         Ok(app) => {
             log("info", "tauri app built");
             app.run(|_handle, event| {

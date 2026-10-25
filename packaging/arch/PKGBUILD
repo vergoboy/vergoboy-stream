@@ -23,7 +23,7 @@ license=('LicenseRef-proprietary')
 # The message looks like a build failure but concerns an artifact nobody consumes,
 # and it ships a misleadingly named package next to the real one.
 options=('!debug')
-depends=('webkit2gtk-4.1' 'gtk3' 'librsvg' 'openssl' 'libayatana-appindicator')
+depends=('webkit2gtk-4.1' 'gtk3' 'librsvg' 'openssl' 'libayatana-appindicator' 'mpv')
 # No 'patchelf'. build() runs `tauri build --no-bundle`, and tauri only calls
 # patchelf from its *bundling* step (AppImage/deb rpath fixups: `patchelf
 # --set-rpath ...`). Declaring it anyway made makepkg abort on a host that did
@@ -172,4 +172,8 @@ package() {
   # Sourced from the clone, so the file only exists once LICENSE is committed.
   install -Dm644 "LICENSE" \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  # Install w2g-mpv components if staged
+  for f in packaging/arch/dist/w2g packaging/arch/dist/w2g.so packaging/arch/dist/w2g-server packaging/arch/dist/w2g-token; do
+    [ -f "$f" ] && install -Dm755 "$f" "${pkgdir}/usr/bin/$(basename "$f")"
+  done
 }
