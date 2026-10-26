@@ -4349,7 +4349,14 @@ if __name__ == "__main__":
     gevent.spawn(_chat_purge_loop)
     gevent.spawn(_sync_mirror_loop)
     if archive_scraper.enabled_collectors(Config):
-        archive_scraper.get_collector().auth.start()
+        collector = archive_scraper.get_collector()
+        collector.auth.start()
+        # Cloudflare walls this site; clearing the wall costs one ~80 s solve in
+        # the sidecar's browser.  Spend it at boot, in the background, instead of
+        # inside whichever search a user happens to make first — the web client
+        # aborts at 45 s and reports a dead connection.  No-op unless a solver is
+        # configured, and unless the site is actually walled right now.
+        gevent.spawn(collector.warm_clearance)
         log_debug("COLLECTOR_ENABLED name=digimoviez kind=movies")
     else:
         log_debug("COLLECTOR_DISABLED name=digimoviez")

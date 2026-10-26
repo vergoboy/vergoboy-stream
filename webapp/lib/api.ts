@@ -3,6 +3,12 @@ import { authFetch, friendlyError, getAccessToken } from "./auth";
 import type { AdminUser, AuthRoom, AuthUser } from "./types";
 
 const FETCH_TIMEOUT_MS = 45000;
+// Archive calls reach digimoviez through the backend, and when Cloudflare has
+// invalidated the clearance the backend spends one ~80 s solve minting a new
+// one before it can answer. The default budget aborted those requests at 45 s
+// and reported «سرور پاسخ نداد؛ اتصال را بررسی کن…» for a request that was in
+// fact working (live 2026-10-26), so these get room for one solve.
+const ARCHIVE_TIMEOUT_MS = 120000;
 
 export class ArchiveApiError extends Error {
   kind?: string;
@@ -228,9 +234,9 @@ export const api = {
       return data as ArchiveAuthStatus;
     }),
   archiveAuthCheck: () =>
-    postJson<ArchiveAuthStatus>(API_PREFIX + "/archive/auth/check", {}),
+    postJson<ArchiveAuthStatus>(API_PREFIX + "/archive/auth/check", {}, ARCHIVE_TIMEOUT_MS),
   archiveSearch: (filters: import("./types").ArchiveSearchFilters) =>
-    postJson<{ results: import("./types").ArchiveResult[] }>(API_PREFIX + "/archive/search", { filters }),
+    postJson<{ results: import("./types").ArchiveResult[] }>(API_PREFIX + "/archive/search", { filters }, ARCHIVE_TIMEOUT_MS),
 
   archiveFilters: () =>
     authFetch(API_PREFIX + "/archive/filters").then(async (r) => {
@@ -240,10 +246,10 @@ export const api = {
     }),
 
   archiveTitle: (source: string, url: string) =>
-    postJson<import("./types").ArchiveTitle>(API_PREFIX + "/archive/title", { source, url }),
+    postJson<import("./types").ArchiveTitle>(API_PREFIX + "/archive/title", { source, url }, ARCHIVE_TIMEOUT_MS),
 
   archiveFiles: (url: string) =>
-    postJson<{ files: import("./types").ArchiveFile[] }>(API_PREFIX + "/archive/files", { url }),
+    postJson<{ files: import("./types").ArchiveFile[] }>(API_PREFIX + "/archive/files", { url }, ARCHIVE_TIMEOUT_MS),
 
   addMany: (items: { title: string; url: string }[], name: string) =>
     postJson<{ added: number; skipped: number; dead: string[] }>(API_PREFIX + "/add-many", { items, name }),

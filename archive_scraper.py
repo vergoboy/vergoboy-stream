@@ -714,6 +714,31 @@ class DigimoviezMovieCollector:
             time.sleep(min(delay, max(0, deadline - time.monotonic())))
         raise ArchiveRequestError(KIND_NETWORK_ERROR)
 
+    def warm_clearance(self) -> bool:
+        """Mint and adopt a clearance before a user request has to wait for one.
+
+        Blocking on purpose — the caller runs it in a background greenlet at
+        boot.  A solve costs ~80 s in the sidecar's browser, and no search
+        request may spend that: the web client aborts at 45 s and reports
+        «سرور پاسخ نداد» (live 2026-10-26).  Doing it here means the first
+        search usually meets an adopted cookie pair, and an inline adoption
+        only happens if Cloudflare revokes the clearance mid-life.
+        """
+        if not self.auth.settings.solver_url:
+            return False
+        try:
+            response = self.session.get(self.base_url + "/",
+                                        timeout=(self.connect_timeout, self.read_timeout),
+                                        headers={"Accept-Language": "fa,en;q=0.8"})
+        except requests.RequestException as exc:
+            LOG.info("CLEARANCE_WARM_FAILED error=%s", type(exc).__name__)
+            return False
+        if not is_cloudflare_challenge(response):
+            return False
+        adopted = self.auth.adopt_clearance()
+        LOG.info("CLEARANCE_WARM%s", "ED" if adopted else "_FAILED")
+        return adopted
+
     def _search_ajax(self, query: str, kind: str | None) -> list[dict[str, Any]]:
         """Free-text search through the endpoint the site's own header uses.
 

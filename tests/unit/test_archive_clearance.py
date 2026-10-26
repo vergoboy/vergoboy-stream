@@ -104,6 +104,41 @@ def test_existing_wall_tests_still_hold_with_the_gate_configured_but_failing(tmp
     assert manager.last_check_error is None
 
 
+def test_boot_warm_up_pays_for_the_solve_before_any_search(tmp_path, monkeypatch):
+    """The ~80 s solve belongs to boot, not to a user's request.
+
+    Live 2026-10-26: the first search after a restart spent the solve inside the
+    request, the web client aborted at 45 s, and the user was told the server
+    did not answer.  Warm-up adopts the pair up front so searches are immediate.
+    """
+    site = FakeDigimoviez(cloudflare_wall=True, valid_clearance="tok-1")
+    manager, _ = make(tmp_path, site, enabled=False, solver_url=SOLVER_URL)
+    calls: list[int] = []
+
+    def fake_fetch(*_args):
+        calls.append(1)
+        return {"cf_clearance": "tok-1"}, BROWSER_UA
+
+    monkeypatch.setattr(archive_auth, "fetch_clearance", fake_fetch)
+    collector = DigimoviezMovieCollector(BASE, manager, connect_timeout=1, read_timeout=1,
+                                         total_timeout=25, retries=0)
+    assert collector.warm_clearance() is True
+    assert len(calls) == 1
+    assert collector._search_ajax("dune", "movie")   # no wall, no second solve
+    assert len(calls) == 1
+
+
+def test_boot_warm_up_does_nothing_without_a_sidecar(tmp_path, monkeypatch):
+    site = FakeDigimoviez(cloudflare_wall=True)
+    manager, _ = make(tmp_path, site, enabled=False)   # solver_url unset = disabled
+    calls: list[int] = []
+    monkeypatch.setattr(archive_auth, "fetch_clearance", lambda *_a: calls.append(1))
+    collector = DigimoviezMovieCollector(BASE, manager, connect_timeout=1, read_timeout=1,
+                                         total_timeout=25, retries=0)
+    assert collector.warm_clearance() is False
+    assert calls == []
+
+
 def test_guest_mode_adopts_a_clearance_and_searches(tmp_path, monkeypatch):
     """Auth disabled (the /stream instance): the sidecar alone clears the wall.
 
