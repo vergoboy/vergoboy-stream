@@ -34,6 +34,12 @@ from archive_solver import fetch_clearance
 
 LOG = logging.getLogger("archive.auth")
 
+# How long to wait before re-checking a login that was answered by a page with
+# neither the logout link nor the login form.  The site's full-page cache can
+# serve that stale guest copy for about a second after the POST lands; the
+# retry is deliberately short and happens at most once.
+LOGIN_VERIFY_RETRY_S = 2.0
+
 
 def is_cloudflare_challenge(response: requests.Response) -> bool:
     """True when Cloudflare's edge is challenging this client, not WordPress.
@@ -551,6 +557,17 @@ class ArchiveAuthManager:
                 return self._finish_authenticated()
             if verified is None:
                 raise requests.HTTPError("could not verify the login")
+            # A marker-less page immediately after a successful POST is usually
+            # the site's LiteSpeed cache still serving the guest variant of the
+            # same URL: on a healthy login the identical page answers WITH the
+            # logout link a moment later (observed live 2026-10-26 — first
+            # post-login check marker-less, next one authenticated).  Treating
+            # that as a rejection cost a 5-minute cooldown and repeated forever
+            # on /w2g, so one delayed re-check separates a cache hiccup from a
+            # genuinely refused login.
+            self._sleep(LOGIN_VERIFY_RETRY_S)
+            if self.check() is True:
+                return self._finish_authenticated()
             return _Outcome.REJECTED
         self._log("AUTH_LOGIN_RETRY_LIMIT", posts=self._login_posts, fetches=fetch_cap)
         return _Outcome.REJECTED
