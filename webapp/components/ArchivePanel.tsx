@@ -98,7 +98,9 @@ export function ArchivePanel({ myName, initialLink }: { myName: string; initialL
   async function doSearch(e?: React.FormEvent) {
     e?.preventDefault();
     const query = q.trim();
-    if ((!query && !filters.director && !filters.actors) || busy) return;
+    // An empty term is a browse, not an error: the backend answers it with the
+    // newest titles, which is what the year/rating filters below need to work on.
+    if (busy) return;
     if (/^https?:\/\//i.test(query)) {
       void importUrl(query);
       return;
@@ -404,13 +406,16 @@ function SearchView({
   return (
     <div>
       <form onSubmit={onSearch} className="flex flex-col gap-2.5">
-        <label className="text-xs text-[color:var(--color-ink-muted)]">جستجو در آرشیو دیجی موویز</label>
+        <label className="text-xs text-[color:var(--color-ink-muted)]">
+          جستجو در آرشیو دیجی موویز
+          <span className="text-[color:var(--color-ink-dim)]"> — خالی بگذار تا جدیدترین‌ها با همین فیلترها دیده شوند</span>
+        </label>
         <div className="flex gap-2">
           <input
             className={`${inputClass} flex-1`}
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="مثلا: game of thrones یا okitsura"
+            placeholder="مثلا: dune — یا خالی برای جدیدترین‌ها"
             dir="auto"
           />
           <button
@@ -432,9 +437,29 @@ function SearchView({
         </div>
       )}
 
+      {busy && (
+        <div className="mt-4 flex items-center gap-2 text-[13px] text-[color:var(--color-ink-muted)]">
+          <Loader2 className="h-4 w-4 animate-spin text-amber-400" /> در حال جستجو در آرشیو…
+        </div>
+      )}
+
       {results !== null && !busy && (
         <div className="mt-5">
-          <p className="mb-3 text-[12.5px] text-[color:var(--color-ink-muted)]">{results.length > 0 ? `${results.length} نتیجه پیدا شد` : "چیزی پیدا نشد — عبارت یا منبع را عوض کن."}</p>
+          {results.length > 0 ? (
+            <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[12.5px] text-[color:var(--color-ink-muted)]">
+              <span>{results.length} نتیجه پیدا شد</span>
+              {results.length >= 6 && (
+                <span className="text-[11.5px] text-[color:var(--color-ink-dim)]">
+                  — منبع برای هر جستجو حدود ۶ نتیجه می‌دهد؛ برای دیدن موارد بیشتر بازه سال یا امتیاز را محدودتر کن
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="mb-3 rounded-xl border border-[color:var(--color-border)] bg-white/[0.02] px-3.5 py-3 text-[12.5px] leading-6 text-[color:var(--color-ink-muted)]">
+              با این جستجو و فیلترها نتیجه‌ای پیدا نشد. بازهٔ سال یا امتیاز را بازتر کن، یا عبارت دیگری امتحان کن —
+              منبع فقط چند نتیجه برای هر جستجو برمی‌گرداند، پس فیلترهای تنگ اغلب خالی می‌مانند.
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
             {results.map((r, i) => (
               <button
@@ -477,23 +502,44 @@ function SearchView({
 
 function FilterControls({ filters, setFilters, options }: { filters: ArchiveSearchFilters; setFilters: (s: ArchiveSearchFilters) => void; options: ArchiveFilterOptions | null }) {
   const set = <K extends keyof ArchiveSearchFilters>(key: K, value: ArchiveSearchFilters[K]) => setFilters({ ...filters, [key]: value });
-  const select = (label: string, key: "type" | "country" | "age_rating" | "quality" | "sort", values: { value: string; label: string }[]) => (
-    <label className="flex min-w-32 flex-1 flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">{label}
-      <select className={inputClass} value={(filters[key] as string | undefined) ?? ""} onChange={(e) => set(key, (e.target.value || undefined) as ArchiveSearchFilters[typeof key])}>
-        <option value="">همه</option>{values.map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
-      </select>
-    </label>
-  );
-  return <div className="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-4">
-    {select("نوع", "type", options?.types ?? [])}
-    <label className="flex flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">کارگردان<input className={inputClass} value={filters.director ?? ""} onChange={(e) => set("director", e.target.value || undefined)} /></label>
-    <label className="flex flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">بازیگران<input className={inputClass} value={filters.actors ?? ""} onChange={(e) => set("actors", e.target.value || undefined)} /></label>
-    {select("کشور", "country", (options?.countries ?? []).map((x) => ({ value: x, label: x })))}
-    {select("رده سنی", "age_rating", (options?.age_ratings ?? []).map((x) => ({ value: x, label: x })))}
-    {select("کیفیت", "quality", (options?.qualities ?? []).map((x) => ({ value: x, label: x })))}
-    {select("ترتیب", "sort", (options?.sorts ?? []).map((x) => ({ value: x, label: x })))}
-    <Range label="سال ساخت" min={options?.year_min ?? 1888} max={options?.year_max ?? new Date().getFullYear()} step={1} lower={filters.year_min} upper={filters.year_max} onLower={(v) => set("year_min", v)} onUpper={(v) => set("year_max", v)} />
-    <Range label="امتیاز" min={0} max={10} step={options?.rating_step ?? 0.1} lower={filters.rating_min} upper={filters.rating_max} onLower={(v) => set("rating_min", v)} onUpper={(v) => set("rating_max", v)} />
+  const yearFloor = options?.year_min ?? 1888;
+  const yearCeil = options?.year_max ?? new Date().getFullYear();
+  const ratingStep = options?.rating_step ?? 0.1;
+  // Only the facets the source can honour are offered. The site ignores its own
+  // advanced-search fields (live 2026-10-26: a 1990-1995 request answered the
+  // front page's 2026 cards) and the scraper filters the returned cards by year
+  // and rating, so country/age/quality/sort/director/actors would be decoration
+  // that silently does nothing.
+  const typeLabel = options?.types?.find((t) => t.value === filters.type)?.label;
+  const touched = filters.year_min > yearFloor || filters.year_max < yearCeil
+    || filters.rating_min > 0 || filters.rating_max < 10 || Boolean(filters.type);
+  return <div className="flex flex-col gap-2 pt-1">
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="flex min-w-32 flex-col gap-1 text-[11px] text-[color:var(--color-ink-muted)]">نوع
+        <select className={`${inputClass} w-full`} value={filters.type ?? ""} onChange={(e) => set("type", (e.target.value || undefined) as ArchiveSearchFilters["type"])}>
+          <option value="">همه</option>{(options?.types ?? []).map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
+        </select>
+      </label>
+      <div className="flex flex-wrap items-center gap-1.5 pt-4 text-[11px]">
+        <span className="rounded-full border border-[color:var(--color-border)] px-2 py-0.5 text-[color:var(--color-ink-muted)]">سال {filters.year_min}–{filters.year_max}</span>
+        <span className="rounded-full border border-[color:var(--color-border)] px-2 py-0.5 text-[color:var(--color-ink-muted)]">امتیاز {filters.rating_min}–{filters.rating_max}</span>
+        {filters.type && <span className="rounded-full border border-[color:var(--color-plum-soft)]/50 px-2 py-0.5 text-[color:var(--color-plum-soft)]">{typeLabel ?? filters.type}</span>}
+        {touched && (
+          <button
+            type="button"
+            onClick={() => setFilters({ year_min: yearFloor, year_max: yearCeil, rating_min: 0, rating_max: 10 })}
+            className="rounded-full border border-[color:var(--color-border)] px-2 py-0.5 text-[color:var(--color-ink-muted)] transition-colors hover:text-[color:var(--color-ink)]"
+          >
+            پاک کردن
+          </button>
+        )}
+      </div>
+    </div>
+    <Range label="سال ساخت" min={yearFloor} max={yearCeil} step={1} lower={filters.year_min} upper={filters.year_max} onLower={(v) => set("year_min", v)} onUpper={(v) => set("year_max", v)} />
+    <Range label="امتیاز" min={0} max={10} step={ratingStep} lower={filters.rating_min} upper={filters.rating_max} onLower={(v) => set("rating_min", v)} onUpper={(v) => set("rating_max", v)} />
+    <p className="text-[11px] leading-5 text-[color:var(--color-ink-dim)]">
+      سال و امتیاز روی نتیجه‌های برگشتی اعمال می‌شوند؛ منبع خودش این فیلترها را پشتیبانی نمی‌کند.
+    </p>
   </div>;
 }
 
