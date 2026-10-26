@@ -3,7 +3,7 @@
 #
 #   ./scripts/build-native.sh                build the binary, verify it, print its path
 #   ./scripts/build-native.sh --rebuild-ui   rebuild webapp/out even if it can be reused
-#   ./scripts/build-native.sh --instance N   instance the client talks to (default: w2g)
+#   ./scripts/build-native.sh --instance N   instance the client talks to (default: stream)
 #   ./scripts/build-native.sh --debug        debug profile instead of release
 #   ./scripts/build-native.sh --run          exec the binary when the build is done
 #
@@ -29,9 +29,10 @@ PKGDIR="$ROOT/packaging/arch"
 OUTDIR="$ROOT/webapp/out"
 OUT_INSTANCE="$ROOT/webapp/.out-instance"
 
-# The native client is the "w2g" one (https://vergoboy.ir/w2g). Override with
-# --instance / INSTANCE for another backend.
-INSTANCE="${INSTANCE:-w2g}"
+# Which backend the bundled client talks to. "stream" (default) is the original
+# instance at https://vergoboy.ir/stream — the same default build-arch.sh uses.
+# Override with --instance / INSTANCE, e.g. --instance w2g.
+INSTANCE="${INSTANCE:-stream}"
 
 # Same default and same reasoning as build-arch.sh: the origin is baked into the
 # static export. Tauri's CSP also lists it, but CSP is taken from the working
@@ -61,12 +62,13 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# Keep in sync with build-arch.sh: "stream" is the historical layout at the
-# domain root, every other instance is served under /<instance>.
-case "$INSTANCE" in
-  stream) API_BASE_PATH="${API_BASE_PATH-}" ;;
-  *)      API_BASE_PATH="${API_BASE_PATH:-/$INSTANCE}" ;;
-esac
+# Keep in sync with build-arch.sh. Every instance — "stream" included — is
+# served under /<instance>: nginx proxies /stream/api/ to the backend mounted
+# at /stream, and the domain root reaches nothing at all. The old "stream →
+# domain root" mapping is the "cannot connect" bug recorded in
+# docs/FOLLOWUPS.md. An API_BASE_PATH set in the environment still wins,
+# including an explicit empty value for a genuinely root-mounted backend.
+API_BASE_PATH="${API_BASE_PATH-/$INSTANCE}"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 

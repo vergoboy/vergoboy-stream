@@ -44,9 +44,8 @@ PKGDIR="$ROOT/packaging/arch"
 PKGBUILD="$PKGDIR/PKGBUILD"
 OUTDIR="$ROOT/webapp/out"
 
-# Which instance the bundled client talks to. "stream" reproduces the original
-# package exactly, including its historical use of the domain root for API
-# calls (see API_BASE_PATH below), so the default is behaviour-preserving.
+# Which instance the bundled client talks to. "stream" (the default) is the
+# original instance at https://vergoboy.ir/stream; "w2g" is the second one.
 INSTANCE="${INSTANCE:-stream}"
 
 # Keep in sync with build.beforeBuildCommand in webapp/src-tauri/tauri.conf.json.
@@ -91,12 +90,13 @@ done
 # Derived after parsing, so --instance is in effect. The path the instance's API
 # (and Socket.IO) is mounted under, as seen from the client. The desktop app has
 # no mount point of its own, so this is the only thing that distinguishes one
-# instance's package from another. "stream" has historically used the domain
-# root here; "w2g" is served under /w2g.
-case "$INSTANCE" in
-  stream) API_BASE_PATH="${API_BASE_PATH-}" ;;
-  *)      API_BASE_PATH="${API_BASE_PATH:-/$INSTANCE}" ;;
-esac
+# instance's package from another. Every instance — "stream" included — is
+# served under /<instance> (nginx: /stream/api/ → 127.0.0.1:8801/stream/api/).
+# The old "stream → domain root" mapping pointed the shipped client at a path
+# that reaches no backend: docs/FOLLOWUPS.md's "cannot connect" bug. An
+# API_BASE_PATH set in the environment still wins, including an explicit
+# empty value for a genuinely root-mounted backend.
+API_BASE_PATH="${API_BASE_PATH-/$INSTANCE}"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 
