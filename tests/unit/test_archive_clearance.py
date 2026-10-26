@@ -104,6 +104,32 @@ def test_existing_wall_tests_still_hold_with_the_gate_configured_but_failing(tmp
     assert manager.last_check_error is None
 
 
+def test_guest_mode_adopts_a_clearance_and_searches(tmp_path, monkeypatch):
+    """Auth disabled (the /stream instance): the sidecar alone clears the wall.
+
+    Nothing in the guest path runs a session check, so the scrape is the only
+    place that can notice the wall.  It must spend exactly one solve and then
+    search with the cookie pair that solve minted.
+    """
+    site = FakeDigimoviez(cloudflare_wall=True, valid_clearance="tok-1")
+    manager, _ = make(tmp_path, site, enabled=False, solver_url=SOLVER_URL)
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_fetch(solver_url: str, target_url: str, proxy: str):
+        calls.append((solver_url, target_url, proxy))
+        return {"cf_clearance": "tok-1"}, BROWSER_UA
+
+    monkeypatch.setattr(archive_auth, "fetch_clearance", fake_fetch)
+    collector = DigimoviezMovieCollector(BASE, manager, connect_timeout=1, read_timeout=1,
+                                         total_timeout=5, retries=0)
+    results = collector._search_ajax("dune", "movie")
+    assert results, "the search returned no cards behind the wall"
+    assert len(calls) == 1                                  # one solve, never a loop
+    scrapes = [seen for seen in site.requests if seen["url"].startswith(AJAX_URL)]
+    assert "cf_clearance=tok-1" in (scrapes[-1]["headers"].get("Cookie") or "")
+    assert scrapes[-1]["headers"]["User-Agent"] == BROWSER_UA
+
+
 def test_search_sends_the_user_agent_the_clearance_is_bound_to(tmp_path, monkeypatch):
     """The adopter's UA must survive into scrapes, not just into the session check.
 

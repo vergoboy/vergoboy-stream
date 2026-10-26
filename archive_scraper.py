@@ -24,7 +24,7 @@ from typing import Any
 
 import requests
 
-from archive_auth import ArchiveAuthManager, AuthSettings
+from archive_auth import ArchiveAuthManager, AuthSettings, is_cloudflare_challenge
 from archive_filters import SearchFilters, build_search_request
 from archive_network import ArchiveProxyConfigurationError
 from archive_logging import event as archive_event, redact, safe_target, timer as ArchiveTimer
@@ -650,15 +650,38 @@ class DigimoviezMovieCollector:
             if self.auth.settings.enabled and not self.auth.ensure_authenticated():
                 raise ArchiveRequestError(*_auth_failure(self.auth))
             try:
-                # No User-Agent here: it comes from the session, which carries
-                # the UA the adopted cf_clearance is bound to.  An explicit UA
-                # would override it and the edge would wall the request again.
-                response = self.session.request(request["method"], request["url"],
-                    timeout=(self.connect_timeout, self.read_timeout), headers={
-                        "Accept-Language": "fa,en;q=0.8",
-                        **({"X-Requested-With": "XMLHttpRequest",
-                            "Referer": self.base_url + "/"} if request.get("ajax") else {}),
-                    }, data=request.get("data"))
+                # At most two sends per attempt: the request itself, and — if the
+                # edge walls it and a clearance sidecar is configured — one free
+                # resend carrying the cookie pair the sidecar minted.  Using an
+                # inner loop keeps that resend out of the retry budget below,
+                # which exists for transport failures.
+                for clearance_attempt in range(2):
+                    # No User-Agent here: it comes from the session, which carries
+                    # the UA the adopted cf_clearance is bound to.  An explicit UA
+                    # would override it and the edge would wall the request again.
+                    response = self.session.request(request["method"], request["url"],
+                        timeout=(self.connect_timeout, self.read_timeout), headers={
+                            "Accept-Language": "fa,en;q=0.8",
+                            **({"X-Requested-With": "XMLHttpRequest",
+                                "Referer": self.base_url + "/"} if request.get("ajax") else {}),
+                        }, data=request.get("data"))
+                    if not is_cloudflare_challenge(response):
+                        break
+                    if clearance_attempt == 0 and self.auth.settings.solver_url \
+                            and self.auth.adopt_clearance():
+                        continue
+                    # The edge answered, WordPress never saw the request: the
+                    # same "Just a moment..." page is served for every endpoint at
+                    # once, so it says nothing about this request.  Reported as
+                    # its own kind — reading the 403 as a plain 4xx produced
+                    # «دیجی‌موویز درخواست را رد کرد» on a guest-mode instance
+                    # (live 2026-10-26), naming neither the cause nor the remedy.
+                    # Auth-enabled instances usually meet the wall in their
+                    # session check first; a scrape can hit it between checks, so
+                    # both paths adopt from here.
+                    raise ArchiveRequestError(
+                        KIND_SITE_CHALLENGE,
+                        f"archive served a Cloudflare challenge (HTTP {response.status_code})")
                 if response.status_code >= 500:
                     raise requests.HTTPError(response.status_code)
                 if response.status_code >= 400:
