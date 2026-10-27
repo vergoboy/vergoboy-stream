@@ -8,7 +8,6 @@ import {
   Keyboard,
   Mic,
   Palette,
-  PlayCircle,
   Shield,
   Sliders,
   User,
@@ -35,11 +34,10 @@ const inputClass =
  * place to hold real, persisted preferences — categories with nothing wired up
  * yet say so plainly instead of showing controls that do nothing.
  */
-type CategoryId = "profile" | "playback" | "appearance" | "voice" | "notifications" | "privacy" | "advanced";
+type CategoryId = "profile" | "appearance" | "voice" | "notifications" | "privacy" | "advanced";
 
 const CATEGORIES: { id: CategoryId; label: string; icon: React.ReactNode; accent: string }[] = [
   { id: "profile", label: "پروفایل", icon: <User className="h-4 w-4" />, accent: "text-[color:var(--color-teal)]" },
-  { id: "playback", label: "پخش", icon: <PlayCircle className="h-4 w-4" />, accent: "text-[color:var(--color-amber)]" },
   { id: "appearance", label: "ظاهر", icon: <Palette className="h-4 w-4" />, accent: "text-[color:var(--color-amber)]" },
   { id: "voice", label: "صدا و مکروفون", icon: <AudioLines className="h-4 w-4" />, accent: "text-[color:var(--color-teal)]" },
   { id: "notifications", label: "اعلان‌ها", icon: <Bell className="h-4 w-4" />, accent: "text-[color:var(--color-amber)]" },
@@ -127,8 +125,8 @@ export function SettingsModal({
   onClose: () => void;
   voice: ReturnType<typeof useVoiceRoom>;
 }) {
-  const { settings, setSettings, setTheme, setShortcut, resetShortcuts, setPushToTalk } = useAppSettings();
-  const [category, setCategory] = useState<CategoryId>("playback");
+  const { settings, setTheme, setShortcut, resetShortcuts, setPushToTalk } = useAppSettings();
+  const [category, setCategory] = useState<CategoryId>("appearance");
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
   const recordRef = useRef<HTMLInputElement>(null);
 
@@ -171,10 +169,6 @@ export function SettingsModal({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
-
-  const playback = settings.playback ?? { volume: 1, muted: false };
-  const setPlayback = (patch: Partial<typeof playback>) =>
-    setSettings((s) => ({ ...s, playback: { ...(s.playback ?? playback), ...patch } }));
 
   const active = CATEGORIES.find((c) => c.id === category)!;
 
@@ -239,43 +233,6 @@ export function SettingsModal({
                 <div className="flex flex-col gap-4">
                   {/* ── Profile ──────────────────────────────────────── */}
                   {category === "profile" && <NotImplemented label="پروفایل" />}
-
-                  {/* ── Playback ─────────────────────────────────────── */}
-                  {category === "playback" && (
-                    <>
-                      <Card title="بلندی صدا" icon={<Volume2 className="h-4 w-4 text-[color:var(--color-amber)]" />}>
-                        <label className="flex items-center gap-2">
-                          <input
-                            type="range"
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            value={playback.muted ? 0 : playback.volume}
-                            aria-label="بلندی صدای پخش"
-                            onChange={(e) => {
-                              const v = parseFloat(e.target.value);
-                              setPlayback({ volume: v, muted: v > 0 ? false : playback.muted });
-                            }}
-                            className="flex-1 accent-[color:var(--color-amber)]"
-                          />
-                          <span className="w-9 text-left font-mono text-[10.5px] text-[color:var(--color-ink-muted)]">
-                            {Math.round((playback.muted ? 0 : playback.volume) * 100)}%
-                          </span>
-                        </label>
-                        <div className="mt-1">
-                          <Toggle
-                            checked={playback.muted}
-                            onChange={(muted) => setPlayback({ muted })}
-                            label="بی‌صدا"
-                            hint="صدای ویدیو قطع می‌ماند تا خودت برگردانی"
-                          />
-                        </div>
-                        <p className="mt-2 text-[10.5px] text-[color:var(--color-ink-dim)]">
-                          این مقدار ذخیره می‌شود؛ دفعه بعد اتاق با همین بلندی باز می‌شود.
-                        </p>
-                      </Card>
-                    </>
-                  )}
 
                   {/* ── Appearance ───────────────────────────────────── */}
                   {category === "appearance" && (

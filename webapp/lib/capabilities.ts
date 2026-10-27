@@ -7,7 +7,6 @@ export type ServerCapabilities = {
   server: {
     native_original: boolean; // signed original-file URLs work
     native_remote: boolean; // item source links may be played directly
-    lazy_encode: boolean; // HLS is built on demand
     sync: boolean; // the room sync service is configured
   };
 };

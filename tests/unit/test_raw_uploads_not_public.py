@@ -28,5 +28,6 @@ def test_requesting_a_raw_upload_is_a_404(tmp_path, monkeypatch):
 
 def test_other_public_media_routes_are_untouched():
     rules = {r.rule for r in app_module.app.url_map.iter_rules()}
-    assert any(r.endswith("/media/hls/<item_id>/<path:filename>") for r in rules)
     assert any(r.endswith("/media/subs/<path:filename>") for r in rules)
+    # No encoded-output route exists at all any more: nothing is transcoded.
+    assert not any("/media/hls" in r for r in rules)

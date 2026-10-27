@@ -29,7 +29,7 @@ import requests
 import app  # still owns the ffprobe wrapper; not part of this slice
 from media_domain.adapters import filesystem
 from media_domain.adapters.http import download_to_file
-from media_domain.services import metadata, url_intake
+from media_domain.services import url_intake
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -377,109 +377,20 @@ def test_resolve_media_url_is_a_noop_for_direct_urls():
     assert client.calls == []
 
 
-# ── probe metadata accessors ─────────────────────────────────────────────────
-
-def test_get_duration_prefers_format_duration():
-    data = {"format": {"duration": "12.5"}, "streams": [{"duration": "99"}]}
-    assert metadata.get_duration_s(data) == 12.5
-
-
-def test_get_duration_falls_back_to_stream_duration():
-    assert metadata.get_duration_s({"format": {}, "streams": [{"duration": "8"}]}) == 8.0
-
-
-def test_get_duration_is_zero_when_absent_or_unparsable():
-    assert metadata.get_duration_s({}) == 0.0
-    assert metadata.get_duration_s({"format": {"duration": "abc"}}) == 0.0
-    assert metadata.get_duration_s({"format": {"duration": "0"}}) == 0.0
-    assert metadata.get_duration_s({"streams": [{"duration": None}]}) == 0.0
-
-
-def test_get_video_dimensions():
-    data = {"streams": [
-        {"codec_type": "audio"},
-        {"codec_type": "video", "width": 1920, "height": 1080},
-    ]}
-    assert metadata.get_video_width(data) == 1920
-    assert metadata.get_video_height(data) == 1080
-
-
-def test_get_video_dimensions_are_zero_without_video_stream():
-    assert metadata.get_video_width({"streams": [{"codec_type": "audio"}]}) == 0
-    assert metadata.get_video_height({}) == 0
-    assert metadata.get_video_height({"streams": [{"codec_type": "video", "height": "x"}]}) == 0
-
-
-def test_find_text_subtitle_streams_filters_and_shapes():
-    data = {"streams": [
-        {"index": 0, "codec_type": "subtitle", "codec_name": "ass",
-         "tags": {"language": "eng", "title": "Full"}},
-        {"index": 1, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle"},
-        {"index": 2, "codec_type": "video", "codec_name": "hevc"},
-    ]}
-    assert metadata.find_text_subtitle_streams(data) == [
-        {"index": 0, "lang": "eng", "title": "Full"}]
-
-
-def test_find_text_subtitle_streams_defaults_missing_tags():
-    data = {"streams": [{"index": 3, "codec_type": "subtitle", "codec_name": "subrip"}]}
-    assert metadata.find_text_subtitle_streams(data) == [{"index": 3, "lang": "", "title": ""}]
-
-
-def test_find_text_subtitle_streams_truncates_long_language():
-    data = {"streams": [{"index": 0, "codec_type": "subtitle", "codec_name": "subrip",
-                         "tags": {"language": "abcdefghijklmnop"}}]}
-    assert metadata.find_text_subtitle_streams(data)[0]["lang"] == "abcdefgh"
-
-
-def test_text_subtitle_codecs_moved_with_the_accessor():
-    """Guard against the definition being reintroduced in app.py."""
-    assert "ass" in metadata.TEXT_SUBTITLE_CODECS
-    assert "TEXT_SUBTITLE_CODECS = " not in Path(app.__file__).read_text()
-
-
-# ── ffprobe wrapper: still app.py's, not part of this slice ──────────────────
-
-def test_ffprobe_source_returns_empty_dict_on_nonzero_returncode(monkeypatch):
-    class Proc:
-        returncode = 1
-        stdout = b"{}"
-        stderr = b"boom"
-    monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: Proc())
-    assert app._ffprobe_source("http://x/a.mkv") == {}
-
-
-def test_ffprobe_source_returns_empty_dict_on_exception(monkeypatch):
-    def boom(*a, **k):
-        raise OSError("no ffprobe")
-    monkeypatch.setattr(app.subprocess, "run", boom)
-    assert app._ffprobe_source("http://x/a.mkv") == {}
-
-
-def test_ffprobe_source_parses_json_stdout(monkeypatch):
-    class Proc:
-        returncode = 0
-        stdout = b'{"format": {"duration": "5.0"}}'
-        stderr = b""
-    monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: Proc())
-    assert app._ffprobe_source("http://x/a.mkv") == {"format": {"duration": "5.0"}}
-
-
 # ── app.py rewiring ──────────────────────────────────────────────────────────
 
 def test_app_no_longer_defines_the_moved_helpers():
     """Rule 2': the move is only real once the old definitions are gone.
 
     Asserted against app.py's *source*, not hasattr(): a moved helper that is
-    still called from app.py (url_ext is, by _is_hls) stays importable as an
-    attribute, so hasattr would pass on a duplicate `def` shadowing the import —
-    which is exactly the mistake this test exists to catch.
+    still called from app.py (url_ext is) stays importable as an attribute, so
+    hasattr would pass on a duplicate `def` shadowing the import — which is
+    exactly the mistake this test exists to catch.
     """
     source = Path(app.__file__).read_text()
     for name in ("_download_to_file", "_check_link_ok", "_resolve_media_url",
                  "_resolve_media_url_remote", "_local_mirror", "_is_direct_media_url",
-                 "_get_duration_s", "_get_video_height", "_get_video_width",
-                 "_find_text_subtitle_streams", "url_ext"):
+                 "url_ext"):
         assert f"def {name}(" not in source, f"app.py still defines {name}"
     assert "TEXT_SUBTITLE_CODECS = " not in source
 
@@ -488,4 +399,3 @@ def test_app_reexports_the_moved_helpers_for_its_call_sites():
     assert app.check_link_ok is url_intake.check_link_ok
     assert app.resolve_media_url is url_intake.resolve_media_url
     assert app.url_ext is url_intake.url_ext
-    assert app.get_duration_s is metadata.get_duration_s

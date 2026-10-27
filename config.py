@@ -2,8 +2,6 @@ import os
 import ipaddress
 from urllib.parse import urlsplit
 
-from media_pipeline.runner import RunnerConfig
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -186,7 +184,6 @@ class Config:
     MEDIA_DIR = os.path.join(INSTANCE_ROOT, "media")
     UPLOAD_DIR = os.path.join(MEDIA_DIR, "uploads")   # raw/original uploads before encode
     SUBS_DIR = os.path.join(MEDIA_DIR, "subs")
-    HLS_DIR = os.path.join(MEDIA_DIR, "hls")          # per-item progressive multi-bitrate HLS output
     CHAT_IMG_DIR = os.path.join(MEDIA_DIR, "chat")    # chat-uploaded images
     AVATAR_DIR = os.path.join(MEDIA_DIR, "avatars")   # user-uploaded avatars
     DATA_DIR = os.path.join(INSTANCE_ROOT, "data")
@@ -203,63 +200,6 @@ class Config:
     ALLOWED_VIDEO_EXT = {"mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv"}
     ALLOWED_SUB_EXT = {"vtt", "srt"}
     ALLOWED_IMAGE_EXT = {"jpg", "jpeg", "png", "webp", "gif"}
-
-    # ---------------------------------------------------------------
-    # Progressive multi-bitrate HLS transcoding
-    # ---------------------------------------------------------------
-    # Rendition ladder — every added video is transcoded into up to 3
-    # renditions, picked from this table based on the SOURCE height
-    # (never upscaled past the source's own resolution).
-    HLS_LADDER = [
-        # (label, target_height, video_bitrate, audio_bitrate)
-        ("1080p", 1080, "5000k", "160k"),
-        ("720p",  720,  "2800k", "128k"),
-        ("480p",  480,  "1400k", "128k"),
-        ("360p",  360,  "800k",  "96k"),
-    ]
-    HLS_MAX_RENDITIONS = 3
-    HLS_SEGMENT_SECONDS = 4
-
-    # NOTE: the x264 speed preset is NOT configured here. It is resolved by
-    # media_pipeline.ffmpeg_cmd.resolve_preset() from STREAM_HLS_PRESET, falling
-    # back to "veryfast". It used to live here with a default of "ultrafast",
-    # which nothing read — a setting that looks real but changes nothing, and
-    # that disagrees with what the encoder actually does.
-
-    # Max number of ffmpeg transcode jobs allowed to run at the same time.
-    # Extra items go to status "queued" until a slot frees up. Protects the
-    # server's CPU from being overwhelmed by simultaneous heavy encodes.
-    MAX_CONCURRENT_ENCODES = int(os.environ.get("STREAM_MAX_CONCURRENT_ENCODES", "2"))
-
-    # Copy-only jobs ("remuxes") cost almost no CPU, so they get their own,
-    # larger pool. Sharing the transcode pool would let a queue of trivial jobs
-    # block a long transcode, while a long transcode would in turn stall every
-    # remux behind it.
-    MAX_CONCURRENT_REMUX = int(os.environ.get("STREAM_MAX_CONCURRENT_REMUX", "4"))
-
-    # Once this many seconds of every rendition are encoded, the item flips
-    # to status "ready" and playback can start, even though encoding of the
-    # rest of the file continues in the background. Kept low so first
-    # playback is available well inside the ~2 minute target.
-    HLS_READY_AFTER_SECONDS = int(os.environ.get("STREAM_HLS_READY_AFTER_SECONDS", "20"))
-
-    # ---------------------------------------------------------------
-    # Encode supervision
-    #
-    # These are re-exported from media_pipeline.runner.RunnerConfig rather
-    # than re-declared, because that class is the code that actually reads
-    # them and it already validates them. Declaring a second copy here is how
-    # a deployment ends up disagreeing with itself about how many retries a
-    # job gets.
-    # ---------------------------------------------------------------
-    ENCODE_STALL_SECONDS = RunnerConfig.STALL_SECONDS
-    ENCODE_MAX_RETRIES = RunnerConfig.MAX_RETRIES
-    ENCODE_RETRY_BASE_DELAY = RunnerConfig.RETRY_BASE_DELAY
-    ENCODE_TIMEOUT_BASE_SECONDS = RunnerConfig.TIMEOUT_BASE
-    ENCODE_TIMEOUT_PER_MEDIA_SECOND = RunnerConfig.TIMEOUT_PER_SECOND
-    ENCODE_MAX_TIMEOUT_SECONDS = RunnerConfig.MAX_TIMEOUT
-    ENCODE_HW_FAILURE_THRESHOLD = RunnerConfig.HW_FAILURES_BEFORE_DISABLE
-    ENCODE_HW_DISABLE_SECONDS = RunnerConfig.HW_DISABLE_SECONDS
 
     # ---------------------------------------------------------------
     # Chat (in-memory only, never written to state.json / disk)
@@ -332,12 +272,10 @@ class Config:
     NATIVE_MEDIA_BASE = os.environ.get("STREAM_NATIVE_MEDIA_BASE", "/w2g/native/uploads")
     NATIVE_MEDIA_CONFIGURED = len(NATIVE_MEDIA_SECRET) >= 32
     # Let native clients play an item's http(s) source link directly (e.g. archive/URL imports).
-    # Off by default: the link becomes visible to every member of the room.
-    NATIVE_REMOTE_SOURCES = os.environ.get("STREAM_NATIVE_REMOTE_SOURCES", "0") == "1"
-
-    # Lazy encoding: adding an item only stores + probes it; the HLS ladder is built (once) when a
-    # web client opens the item or a controller asks for it. Native clients never trigger an encode.
-    LAZY_ENCODE = os.environ.get("STREAM_LAZY_ENCODE", "0") == "1"
+    # On by default because nothing is transcoded any more: a URL item has no server-side copy, so
+    # without this it has no playable source at all. Turning it off hides those links from room
+    # members but also makes every link-only item unplayable.
+    NATIVE_REMOTE_SOURCES = os.environ.get("STREAM_NATIVE_REMOTE_SOURCES", "1") == "1"
 
     @classmethod
     def validate(cls):
@@ -366,7 +304,6 @@ class Config:
 
 os.makedirs(Config.UPLOAD_DIR, exist_ok=True)
 os.makedirs(Config.SUBS_DIR, exist_ok=True)
-os.makedirs(Config.HLS_DIR, exist_ok=True)
 os.makedirs(Config.CHAT_IMG_DIR, exist_ok=True)
 os.makedirs(Config.AVATAR_DIR, exist_ok=True)
 os.makedirs(Config.DATA_DIR, exist_ok=True)

@@ -4,11 +4,9 @@ monkey.patch_all()
 import gevent
 import json
 import logging
-import math
 import os
 import re as _re
 import secrets
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,7 +17,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, g, jsonify, redirect, render_template, request, send_from_directory
+from flask import Flask, g, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
 import requests
@@ -28,38 +26,14 @@ from sqlalchemy.orm import selectinload
 
 from config import Config
 from sqlalchemy.exc import IntegrityError
-from media_pipeline import (
-    Attempt,
-    EncodeError,
-    EncodeRequest,
-    EncodeRunner,
-    ErrorKind,
-    build_fallback_chain,
-    cleanup_orphaned_partials,
-    expose_partial_output,
-)
-from media_domain.adapters.filesystem import DEFAULT_LOCAL_ROOT
 from media_domain.adapters.http import download_to_file
-from media_domain.services.metadata import (
-    find_text_subtitle_streams,
-    get_duration_s,
-    get_video_height,
-    get_video_width,
-    summarize_media,
-)
-from media_domain.services.source_policy import (
-    MEDIA_PROTO_WHITELIST,
-    UnsafePathError,
-    UnsafeUrlError,
-    validate_media_source,
-)
 from media_domain.services.url_intake import (
     check_link_ok,
     resolve_media_url,
     url_ext,
 )
 import archive_scraper
-from archive_network import create_direct_media_session, direct_media_environment
+from archive_network import create_direct_media_session
 from archive_logging import configure as configure_archive_logging, event as archive_event, redact, reset_request_id, safe_target, set_request_id, timer as ArchiveTimer
 from archive_filters import FilterValidationError, SearchFilters, available_options
 import app_logging
@@ -158,13 +132,11 @@ socketio = SocketIO(
     async_mode="gevent",
 )
 
-ENCODE_SEMAPHORE = gevent.lock.BoundedSemaphore(Config.MAX_CONCURRENT_ENCODES)
 
 # One runner for the whole process. It owns the hardware circuit breaker,
 # which is deliberately global: a GPU that has stopped working is a fact
 # about the machine, not about one room, and per-call breakers would have
 # every room rediscover it on its own.
-ENCODE_RUNNER = EncodeRunner()
 
 # This client is deliberately distinct from the Digimoviez archive client.
 # ``trust_env=False`` prevents HTTP(S)_PROXY / ALL_PROXY from routing a movie
@@ -495,311 +467,6 @@ def _room_for_item(item_id: str):
     return None
 
 
-def free_space_mb(path: str) -> float:
-    return shutil.disk_usage(path).free / (1024 * 1024)
-
-
-MIN_FREE_MB_FOR_TRANSCODE = 500
-
-# ── encoded-frontier bookkeeping ─────────────────────────────────────────────
-# The client keeps its own encoded_frontier (Player.tsx) purely as a courtesy:
-# nothing stopped a hand-crafted `control` event from seeking straight past the
-# encoded timeline into a segment that does not exist yet, which shows up as a
-# black screen for everyone in the room. These make that guard enforceable.
-#
-# Keyed "<item_id>:<rendition label>", matching the client's transcodeProgress
-# key so both sides agree on which rendition a number describes.
-TRANSCODE_PROGRESS: dict = {}
-PROGRESS_LOCK = gevent.lock.Semaphore()
-
-# Kept in step with the client's MARGIN (Player.tsx). A viewer is allowed to
-# scrub right up to the last safely encoded second, minus a little slack, so
-# that a segment boundary a moment behind the reported progress still plays.
-SEEK_FRONTIER_MARGIN = 3.0
-
-# The rendition statuses _rewrite_master_playlist advertises, i.e. the rungs a
-# viewer can actually pick right now. A rung in any other state is invisible in
-# the master playlist, so it must not constrain the room's seek range: one
-# queued-but-unadvertised 1080p rung would otherwise pin everybody at 0s until
-# it came up.
-SELECTABLE_RENDITION_STATUSES = ("ready", "complete")
-
-# A rung that died. It is not selectable *and* it will never become selectable,
-# so including it in the minimum would freeze the whole room's seek range at 0s
-# for the rest of the item's life.
-DEAD_RENDITION_STATUSES = ("error", "failed", "cancelled", "canceled")
-
-# Plan modes that lay the timeline down as fast as the disk allows instead of
-# encoding it over time, so they have no live frontier to clamp against.
-COPY_LIKE_MODES = ("copy", "remux", "direct_play", "directplay")
-
-# A rung this far behind its peers caps the whole room. Logged rather than
-# silently endured, because a permanently slow rung is a transcoding problem
-# the operator has to see, and it changes who can seek where.
-LAG_WARN_THRESHOLD_S = 30.0
-LAG_WARN_INTERVAL_S = 60.0
-
-# Named logger for playback-sync problems. Separate from log_debug's stderr
-# prints because these survive into production logs and must be filterable by
-# name (`journalctl -t stream.sync`) instead of grepping a DEBUG prefix.
-# Propagation is left on so a host that configures logging owns the output and
-# test capture still sees the records; the handler below only exists so the line
-# appears even when nothing has configured the root logger at all.
-SYNC_LOGGER = logging.getLogger("stream.sync")
-if not SYNC_LOGGER.handlers:
-    _sync_handler = logging.StreamHandler(sys.stderr)
-    _sync_handler.setFormatter(logging.Formatter("[%(name)s] %(levelname)s %(message)s"))
-    SYNC_LOGGER.addHandler(_sync_handler)
-SYNC_LOGGER.setLevel(logging.WARNING)
-
-# item_id -> monotonic timestamp of the last lagging-rung warning, so a slow
-# rung produces one line a minute instead of one per seek.
-_LAG_WARNED_AT: dict = {}
-
-
-def _record_encoded_progress(item_id: str, label: str, encoded_seconds: float) -> None:
-    """Remember how far one rendition has encoded, for the seek guard."""
-    if not item_id or not label:
-        return
-    try:
-        value = float(encoded_seconds)
-    except (TypeError, ValueError):
-        return
-    with PROGRESS_LOCK:
-        TRANSCODE_PROGRESS[f"{item_id}:{label}"] = {"encoded_seconds": value}
-
-
-def _clear_encoded_progress(item_id: str) -> None:
-    """Drop every rendition's progress for an item.
-
-    Called when an item finishes or is removed. Without this a completed item
-    keeps a stale frontier forever, and a re-encode of the same id would start
-    clamped to the previous run's numbers.
-    """
-    if not item_id:
-        return
-    prefix = f"{item_id}:"
-    with PROGRESS_LOCK:
-        for key in [k for k in TRANSCODE_PROGRESS if k.startswith(prefix)]:
-            TRANSCODE_PROGRESS.pop(key, None)
-        _LAG_WARNED_AT.pop(item_id, None)
-
-
-def _rendition_mode(item: dict, rendition: dict) -> str:
-    """The plan mode for a rung: its own if recorded, else the item's."""
-    mode = rendition.get("mode") or item.get("mode") or ""
-    return str(mode).strip().lower()
-
-
-def _frontier_from_disk(item_id: str, label: str):
-    """Seconds of timeline already encoded on disk for one rung, or None.
-
-    TRANSCODE_PROGRESS lives in memory, so after a restart every unfinished
-    rung looks unmeasurable and the guard pins the whole room at 0 until the
-    encode is re-kicked — even though the segments are all still there.
-    Recovering the frontier from disk keeps seeking usable straight after a
-    restart.
-
-    The playlist is authoritative because ffmpeg writes one #EXTINF per
-    completed segment, and `-hls_flags independent_segments+temp_file` means a
-    listed segment is already fully written. Counting files instead would claim
-    `count * HLS_SEGMENT_SECONDS`, which over-reports by up to a whole segment
-    whenever the last one is partial (measured: 22.0s encoded reported as 24.0)
-    and would hand viewers a seek target inside a hole. The count fallback is
-    therefore deliberately one segment pessimistic.
-
-    None (not 0) when nothing is measurable: "unknown" and "nothing encoded"
-    are different, and only the caller can decide which is safe.
-    """
-    if not item_id or not label:
-        return None
-    rung = os.path.join(Config.HLS_DIR, str(item_id), str(label))
-
-    try:
-        with open(os.path.join(rung, "index.m3u8"), "r") as fh:
-            total = 0.0
-            seen = False
-            for line in fh:
-                if line.startswith("#EXTINF:"):
-                    try:
-                        total += float(line.split(":", 1)[1].split(",", 1)[0])
-                        seen = True
-                    except (IndexError, ValueError):
-                        continue
-        if seen:
-            return total
-    except OSError:
-        pass
-
-    try:
-        names = os.listdir(rung)
-    except OSError:
-        return None
-    segments = sum(1 for n in names
-                   if n.endswith(".ts") and not n.startswith("."))
-    if segments <= 1:
-        return None
-    return (segments - 1) * Config.HLS_SEGMENT_SECONDS
-
-
-def _incomplete_rendition_frontiers(item: dict, progress: dict) -> tuple:
-    """``(frontiers_by_label, unknown_advertised)`` for the live seek guard.
-
-    Walks only the rungs that (a) a viewer can select right now, because they are
-    in the master playlist, and (b) are not finished, because a finished rung
-    imposes no ceiling. Failed and not-yet-advertised rungs are skipped rather
-    than treated as zero: neither can be selected, so neither should be able to
-    hold the whole room at the start of the item.
-
-    ``unknown_advertised`` is True when a selectable rung has no recorded
-    progress at all. That should not happen -- progress is stored on the same
-    tick that marks a rung ready -- and it is genuinely unknowable rather than
-    "slow", so the caller treats the room as unsafe instead of guessing.
-    """
-    frontiers: dict = {}
-    unknown = False
-    item_id = item.get("id")
-    for rendition in item.get("renditions") or []:
-        status = rendition.get("status")
-        if status in DEAD_RENDITION_STATUSES:
-            continue
-        if status not in SELECTABLE_RENDITION_STATUSES:
-            continue
-        if status == "complete":
-            continue
-        info = progress.get(f"{item_id}:{rendition.get('label')}")
-        encoded = (info or {}).get("encoded_seconds")
-        if encoded is None:
-            # No live progress: the process may simply have restarted. Prefer
-            # what is provably on disk over declaring the room unsafe.
-            encoded = _frontier_from_disk(item_id, rendition.get("label"))
-        if encoded is None:
-            unknown = True
-            continue
-        frontiers[rendition.get("label")] = float(encoded)
-    return frontiers, unknown
-
-
-def seek_frontier(item: dict, progress: dict) -> float:
-    """How far it is safe to seek in this item, in seconds (``inf`` = no limit).
-
-    Pure: takes the recorded progress as an argument and touches no globals, so
-    the whole policy is unit-testable without touching the encoder or the clock.
-
-    Room-wide rather than per-viewer, because the server cannot know which rung a
-    given viewer happens to be watching. The **minimum** across the live
-    selectable rungs is the only value safe for every viewer at once; clamping
-    against a single rung would still let somebody on the slower one seek into a
-    hole. The client keeps its own per-level guard on top -- this is the safety
-    net for a hand-crafted `control` event, not a replacement.
-
-    No clamp at all applies when there is nothing being encoded right now: a live
-    stream, a finished item, a copy/remux plan that already has the whole
-    timeline, or a set of rungs that are all complete.
-    """
-    if not item or item.get("type") == "live":
-        return math.inf
-    if item.get("status") == "complete":
-        return math.inf
-    if _rendition_mode(item, {}) in COPY_LIKE_MODES:
-        # No live frontier exists at all: the plan is copy/remux/direct-play.
-        return math.inf
-
-    renditions = item.get("renditions") or []
-    if not renditions:
-        # No ladder at all. Two very different situations look identical here:
-        # a manually pasted HLS URL has no rungs because the server never
-        # transcodes it, so there is no frontier to enforce and clamping to 0
-        # would pin that room at the start forever; whereas an item that is
-        # about to be encoded has not had its ladder recorded yet, nothing is
-        # playable, and that really is the most unsafe state of all. A ready
-        # item with a src is the former — _add_url_item only leaves src set
-        # when needs_encode was False.
-        if item.get("src") and item.get("status") == "ready":
-            return math.inf
-        return 0.0
-
-    if not any(r.get("status") in SELECTABLE_RENDITION_STATUSES for r in renditions):
-        # Every rung is still queued/pending/encoding: none of them is in the
-        # master playlist, so there is nothing for a viewer to select and not a
-        # single encoded second exists yet. Excluding unadvertised rungs from the
-        # *minimum* must not turn this into "no limit" -- it means nothing is
-        # playable, which is the most unsafe state of all.
-        return 0.0
-
-    # A completed copy-like rung means the whole timeline is already on disk and
-    # the master playlist can hand it to anyone, so there is nothing to guard.
-    for rendition in renditions:
-        if rendition.get("status") == "complete" and _rendition_mode(item, rendition) in COPY_LIKE_MODES:
-            return math.inf
-
-    frontiers, unknown = _incomplete_rendition_frontiers(item, progress)
-    if unknown:
-        return 0.0
-    return min(frontiers.values()) if frontiers else math.inf
-
-
-def clamp_seek_target(target: float, frontier: float,
-                      margin: float = SEEK_FRONTIER_MARGIN) -> float:
-    """Pure: where a requested seek should actually land.
-
-    Unchanged when the target is already safe (including exactly at the limit),
-    floored at zero when it is not, and a no-op when the frontier is infinite.
-    """
-    try:
-        value = float(target)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(value):
-        return 0.0
-    if not math.isfinite(frontier):
-        return max(0.0, value)
-    limit = frontier - margin
-    if value > limit:
-        return max(0.0, limit)
-    return max(0.0, value)
-
-
-def _warn_if_lagging(item: dict, progress: dict) -> None:
-    """Log a WARNING when one selectable rung is far behind its peers.
-
-    The slowest live rung is what caps the room, so when it stalls everybody
-    feels it -- but nothing in the UI explains why seeking stopped early. One
-    line per item per minute, naming the item, the lagging rung and the gap,
-    is enough to diagnose it without flooding the log with one line per seek.
-    """
-    if not item:
-        return
-    frontiers, _unknown = _incomplete_rendition_frontiers(item, progress)
-    if len(frontiers) < 2:
-        return
-    lagging_label, lagging_value = min(frontiers.items(), key=lambda kv: kv[1])
-    lead = max(frontiers.values())
-    lag = lead - lagging_value
-    if lag < LAG_WARN_THRESHOLD_S:
-        return
-    item_id = item.get("id")
-    now = time.monotonic()
-    last = _LAG_WARNED_AT.get(item_id)
-    if last is not None and (now - last) < LAG_WARN_INTERVAL_S:
-        return
-    _LAG_WARNED_AT[item_id] = now
-    SYNC_LOGGER.warning(
-        "rendition %s lags item %s by %.1fs (frontier %.1fs vs best %.1fs); "
-        "room seeks are capped by the slowest rung",
-        lagging_label, item_id, lag, lagging_value, lead,
-    )
-
-
-def _encoded_frontier(item: dict) -> float:
-    """Snapshot the progress store and apply :func:`seek_frontier` to it."""
-    with PROGRESS_LOCK:
-        snapshot = dict(TRANSCODE_PROGRESS)
-    frontier = seek_frontier(item, snapshot)
-    _warn_if_lagging(item, snapshot)
-    return frontier
-
-
 def _current_item(rs) -> dict:
     """The item the room is playing right now, or ``{}``."""
     index = getattr(rs, "current_index", None)
@@ -818,664 +485,10 @@ LANG_LABELS = {
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ffprobe / stream inspection
-# ────────────────────────────────────────────────────────────────────────────
-
-def _media_path_roots() -> tuple:
-    """Roots a local source may live under, computed at call time so test and
-    runtime overrides of Config.HLS_DIR are honoured."""
-    return (Config.MEDIA_DIR, Config.HLS_DIR, DEFAULT_LOCAL_ROOT)
-
-
-def _ffprobe_source(source: str, timeout: int = 20) -> dict:
-    log_debug(f"Starting ffprobe on: {_safe_source_for_log(source)}")
-    start_time = time.time()
-    try:
-        source = validate_media_source(source, _media_path_roots())
-        args = [
-            "ffprobe", "-v", "error",
-            "-print_format", "json",
-            "-show_streams", "-show_format",
-            "-rw_timeout", str(timeout * 1_000_000),
-        ]
-        if source.startswith(("http://", "https://")):
-            args += ["-protocol_whitelist", MEDIA_PROTO_WHITELIST]
-            args += ["-headers",
-                     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
-        args += [source]
-        proc = subprocess.run(args, capture_output=True, timeout=timeout + 10, env=direct_media_environment())
-        log_debug(f"ffprobe done in {time.time() - start_time:.2f}s, returncode={proc.returncode}")
-        if proc.returncode != 0:
-            log_debug(f"ffprobe stderr: {proc.stderr.decode(errors='ignore')[:300]}")
-            return {}
-        return json.loads(proc.stdout or "{}")
-    except Exception as e:
-        log_debug(f"ffprobe exception: {e}")
-        return {}
-
-
-def _pick_ladder(source_height: int):
-    """Up to Config.HLS_MAX_RENDITIONS renditions from Config.HLS_LADDER that
-    don't exceed the source's own height (never upscale)."""
-    if not source_height or source_height <= 0:
-        source_height = 720
-    candidates = [t for t in Config.HLS_LADDER if t[1] <= source_height]
-    if not candidates:
-        _, _, vbr, abr = Config.HLS_LADDER[-1]
-        return [(f"{source_height}p", source_height, vbr, abr)]
-    return candidates[: Config.HLS_MAX_RENDITIONS]
-
-
-def _pick_default_rendition(ladder: list):
-    """Pick the highest available rendition as the default so playback starts
-    at max quality (the ladder is already capped at the source height by
-    _build_ladder, so this never upscales). The rest of the ladder is still
-    only encoded on-demand, the moment a viewer asks for it (see
-    _encode_rendition / the /api/request-quality endpoint)."""
-    return ladder[0] if ladder else None
-
-
-def _bandwidth_estimate(vbr: str, abr: str) -> int:
-    def to_bits(s):
-        s = (s or "0").strip().lower()
-        if s.endswith("k"):
-            return int(float(s[:-1]) * 1000)
-        if s.endswith("m"):
-            return int(float(s[:-1]) * 1_000_000)
-        return int(float(s))
-    return to_bits(vbr) + to_bits(abr)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Single-rendition progressive HLS encoding
-#
-# Each ffmpeg job encodes exactly ONE rendition (unlike an earlier design
-# that split+encoded all renditions in one ffmpeg call — that tied first-
-# playback speed to however long the *slowest* rendition took). Only the
-# default (720p, or the closest available) rendition is encoded right away;
-# every other rendition in the ladder starts out "pending" and is only
-# encoded when a viewer actually picks it from the quality menu. We
-# ourselves write master.m3u8 (ffmpeg's hls muxer isn't used for that here,
-# since it only knows about a single invocation's outputs) and rewrite it
-# every time a rendition becomes ready, so hls.js always sees the current
-# full set of ready qualities.
-#
-# scale=-2:H keeps width/height even, which is the actual fix for the old
-# black-video bug (odd/mismatched dims from a -c:v copy passthrough on
-# yuv444p sources). hls_playlist_type=event means the per-rendition .m3u8
-# keeps flushing as segments are produced, so playback can start well
-# before the whole file is encoded.
-# ────────────────────────────────────────────────────────────────────────────
-
-def _build_single_rendition_cmd(source: str, rendition_dir: str, height: int, vbr: str, abr: str) -> list:
-    cmd = ["ffmpeg", "-y", "-threads", "0"]
-    if isinstance(source, str) and source.startswith(("http://", "https://")):
-        # Some download mirrors (aparatchi-dlcenter, hollowofthealley, ...) 404
-        # or 403 plain ffmpeg/Lavf requests. Send a browser User-Agent so the
-        # direct-link encodes behave like the browser's own download does.
-        cmd += ["-protocol_whitelist", MEDIA_PROTO_WHITELIST]
-        cmd += ["-headers",
-                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n"]
-    cmd += [
-        "-i", source,
-        "-vf", f"scale=-2:{height}",
-        "-c:v", "libx264", "-b:v", vbr,
-        "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
-        "-g", "60", "-sc_threshold", "0",
-        "-force_key_frames", "expr:gte(t,n_forced*4)",
-        "-c:a", "aac", "-ac", "2", "-b:a", abr,
-        "-f", "hls",
-        "-hls_time", str(Config.HLS_SEGMENT_SECONDS),
-        "-hls_list_size", "0",
-        "-hls_playlist_type", "event",
-        "-hls_flags", "independent_segments+temp_file",
-        "-hls_segment_filename", os.path.join(rendition_dir, "seg_%03d.ts"),
-        os.path.join(rendition_dir, "index.m3u8"),
-    ]
-    return cmd
-
-
-def _rewrite_master_playlist(out_dir: str, ready_renditions: list, aspect: float):
-    """(Re)writes master.m3u8 to list every rendition that is at least
-    partially ready. Written atomically (temp file + os.replace) so a
-    concurrent reader (Nginx/Flask serving it, or hls.js polling it) never
-    sees a half-written file."""
-    lines = ["#EXTM3U", "#EXT-X-VERSION:6"]
-    for r in sorted(ready_renditions, key=lambda x: x["height"], reverse=True):
-        bw = _bandwidth_estimate(r["vbr"], r["abr"])
-        width = int(round(r["height"] * (aspect or 16 / 9) / 2) * 2)
-        lines.append(f'#EXT-X-STREAM-INF:BANDWIDTH={bw},RESOLUTION={width}x{r["height"]},CODECS="avc1.64001f,mp4a.40.2"')
-        lines.append(f'{r["label"]}/index.m3u8')
-    content = "\n".join(lines) + "\n"
-    os.makedirs(out_dir, exist_ok=True)
-    tmp_path = os.path.join(out_dir, "master.m3u8.tmp")
-    final_path = os.path.join(out_dir, "master.m3u8")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp_path, final_path)
-
-
-def _run_progressive_ffmpeg(cmd: list, item_id: str, duration_s: float, label: str,
-                            on_ready=None, timeout: int = 10800,
-                            output_paths=None):
-    """Runs one rendition's ffmpeg command, emitting real transcode_progress
-    events (real % from the real duration — never a byte-count heuristic) and
-    firing `on_ready` exactly once, the moment enough of the timeline is encoded
-    for safe early playback.
-
-    Now backed by media_pipeline's EncodeRunner, which owns the parts that were
-    previously missing here: a stall watchdog (a wedged ffmpeg used to hold its
-    semaphore until the hard timeout), a duration-scaled timeout, a process
-    group killed as a group (proc.kill() left orphans holding the output), a
-    bounded stderr buffer (the old version accumulated the whole log in memory
-    and then handed it to the client), typed failures, and output written to a
-    ``.partial`` directory that is renamed into place only on success.
-
-    The signature, the emitted event payloads and the (returncode, stderr) shape
-    are unchanged, so the swap is not a behavioural change for the frontend —
-    except that a failure is now reported as a translated message instead of
-    ffmpeg's last stderr line.
-    """
-    output_paths = tuple(output_paths or ())
-    last_pct = [-1]
-    ready_fired = [False]
-    duration_holder = [duration_s or 0.0]
-
-    def emit(elapsed_s):
-        """Same payload shape the Player already expects."""
-        dur = duration_holder[0]
-        pct = min(99, int(elapsed_s / dur * 100)) if dur > 0 else min(90, int(elapsed_s / 3))
-        socketio.emit("transcode_progress", {
-            "id": item_id, "label": label, "pct": pct,
-            "encoded_seconds": round(elapsed_s, 1),
-            "duration": round(dur, 1) if dur > 0 else None,
-            "ready": ready_fired[0],
-        })
-        # Record before/with the emit so a rendition that reports ready always
-        # has a recorded frontier behind it; the seek guard treats a missing
-        # entry as "nothing is safe".
-        _record_encoded_progress(item_id, label, elapsed_s)
-        last_pct[0] = pct
-
-    def on_progress(ev):
-        dur = ev.get("duration") or duration_holder[0]
-        if dur:
-            duration_holder[0] = dur
-        elapsed = ev.get("encoded_seconds") or 0.0
-        pct = min(99, int(elapsed / duration_holder[0] * 100)) if duration_holder[0] > 0 \
-            else min(90, int(elapsed / 3))
-        # Emit on a changed percentage, exactly as before, so the event volume
-        # on the socket does not change just because the runner reports more
-        # often than the old loop did.
-        if pct != last_pct[0] or ready_fired[0]:
-            emit(elapsed)
-
-    def on_ready_tick(elapsed_s):
-        duration_holder[0] = duration_holder[0] or duration_s or 0.0
-        ready_fired[0] = True
-        emit(elapsed_s)
-        if on_ready:
-            try:
-                on_ready(elapsed_s)
-            except Exception as e:
-                log_debug(f"on_ready callback error: {e}")
-
-    chain = build_fallback_chain(Attempt(
-        argv=cmd,
-        label=label,
-        output_paths=output_paths,
-    ))
-
-    log_debug(f"FFmpeg [{item_id}/{label}] start: {' '.join(cmd[:4])} ...")
-    started = time.time()
-    result = ENCODE_RUNNER.run(
-        EncodeRequest(
-            item_id=item_id, label=label, duration_s=duration_s or 0.0,
-            # The runner derives the partial directory from this.
-            output_dir=os.path.dirname(output_paths[-1]) if output_paths else "",
-            on_progress=on_progress,
-            on_ready=on_ready_tick,
-            ready_after_s=Config.HLS_READY_AFTER_SECONDS,
-            log_prefix=f"{item_id}/{label}",
-        ),
-        chain,
-    )
-    elapsed = time.time() - started
-    log_debug(f"FFmpeg [{item_id}/{label}] finished ok={result.ok} in {elapsed:.1f}s "
-              f"history={result.history}")
-
-    if not result.ok:
-        err = result.error or EncodeError(ErrorKind.UNKNOWN, "no attempt succeeded")
-        # The client gets the translated sentence only. `detail` and the stderr
-        # tail stay in the log — the old code put ffmpeg's own wording (and
-        # sometimes a filesystem path) straight into item["error"], which is
-        # broadcast to every viewer in the room.
-        socketio.emit("transcode_error", err.client_payload(item_id))
-        log_debug(f"FFmpeg [{item_id}/{label}] failed kind={err.kind.value} "
-                  f"detail={err.detail} history={result.history}")
-        return result.returncode or -1, (err.stderr_tail or err.detail).encode(), err
-
-    total = result.duration or duration_holder[0] or duration_s or 0.0
-    # Reproduces the old completion event field for field. It is deliberately
-    # not routed through emit(): that clamps to 99 and reports the real
-    # ready_fired flag, and on a clip shorter than HLS_READY_AFTER_SECONDS the
-    # old code still sent pct=100/ready=true here. The Player keys off this.
-    socketio.emit("transcode_progress", {
-        "id": item_id, "label": label, "pct": 100,
-        "encoded_seconds": round(total, 1) if total else None,
-        "duration": round(total, 1) if total else None,
-        "ready": True, "complete": True,
-    })
-    return 0, b"", None
-
-
-def _extract_subtitles_async(item_id: str, source: str, sub_streams: list, requester_name: str):
-    """Separate, lightweight ffmpeg pass per subtitle stream (text streams
-    are tiny/fast) so a subtitle problem can never affect video
-    playability."""
-    try:
-        source = validate_media_source(source, _media_path_roots())
-    except (UnsafeUrlError, UnsafePathError) as e:
-        log_debug(f"Subtitle extraction refused source: {e}")
-        return
-    new_subs = []
-    for i, s in enumerate(sub_streams[:4]):
-        srt_path = os.path.join(Config.SUBS_DIR, f"{item_id}_{i}_tmp.srt")
-        try:
-            cmd = ["ffmpeg", "-y"]
-            if source.startswith(("http://", "https://")):
-                cmd += ["-protocol_whitelist", MEDIA_PROTO_WHITELIST]
-            cmd += ["-i", source, "-map", f"0:{s['index']}", "-c:s", "srt", srt_path]
-            subprocess.run(
-                cmd,
-                capture_output=True, timeout=120, check=True, env=direct_media_environment(),
-            )
-            if os.path.exists(srt_path) and os.path.getsize(srt_path) > 10:
-                sub_id = new_id()
-                vtt_name = f"{sub_id}.vtt"
-                convert_srt_to_vtt(srt_path, os.path.join(Config.SUBS_DIR, vtt_name))
-                label = (s["title"] or LANG_LABELS.get(s["lang"], s["lang"])
-                         or f"زیرنویس {len(new_subs) + 1}")
-                new_subs.append({
-                    "id": sub_id, "label": label, "lang": s["lang"] or "und",
-                    "url": f"{BP}/media/subs/{vtt_name}",
-                })
-        except Exception as e:
-            log_debug(f"Auto subtitle extraction failed for stream {s['index']}: {e}")
-        finally:
-            if os.path.exists(srt_path):
-                try:
-                    os.remove(srt_path)
-                except OSError:
-                    pass
-
-    if not new_subs:
-        return
-    rs = _room_for_item(item_id)
-    if rs is None:
-        return
-    with LOCK:
-        item = rs.find_item(item_id)
-        if item:
-            item.setdefault("subtitles", []).extend(new_subs)
-            safe_save(rs)
-            title = item["title"]
-        else:
-            title = ""
-    broadcast_state(rs)
-    broadcast_notify("subtitle_auto_extracted", requester_name, room_code=rs.room_id,
-                     title=title, count=len(new_subs))
-
-
-def _encode_rendition(item_id: str, source: str, label: str, height: int, vbr: str, abr: str,
-                       requester_name: str, is_default: bool, duration_s: float = None):
-    """Encodes exactly one rendition. Used both for the default rendition
-    kicked off right after an item is added, and for any other rendition a
-    viewer later requests via /api/request-quality."""
-    out_dir = os.path.join(Config.HLS_DIR, item_id)
-    rendition_dir = os.path.join(out_dir, label)
-
-    def set_rendition_status(status, error=None):
-        with LOCK:
-            rs = _room_for_item(item_id)
-            item = rs.find_item(item_id) if rs else None
-            if not item:
-                return None
-            for r in item.get("renditions", []):
-                if r["label"] == label:
-                    r["status"] = status
-                    if error:
-                        r["error"] = error[:200]
-                    else:
-                        r.pop("error", None)
-            if rs:
-                safe_save(rs)
-            return item
-
-    def collect_ready(item):
-        return [r for r in item.get("renditions", []) if r["status"] in ("ready", "complete")]
-
-    def fail(msg: str):
-        log_debug(f"Rendition encode failed [{item_id}/{label}]: {msg}")
-        if os.path.islink(rendition_dir):
-            os.unlink(rendition_dir)  # the progressive symlink, not a directory
-        shutil.rmtree(rendition_dir, ignore_errors=True)
-        item = set_rendition_status("error", msg)
-        rs = _room_for_item(item_id)
-        if item and is_default and rs is not None:
-            with LOCK:
-                item["status"] = "error"
-                item["error"] = msg[:300]
-                safe_save(rs)
-        if rs is None:
-            return
-        broadcast_state(rs)
-        title = item["title"] if item else ""
-        if is_default:
-            broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
-        else:
-            broadcast_notify("quality_error", requester_name, room_code=rs.room_id,
-                             id=item_id, title=title, label=label)
-
-    try:
-        source = validate_media_source(source, _media_path_roots())
-    except (UnsafeUrlError, UnsafePathError) as e:
-        fail(f"منبع پخش نامعتبر است: {e}")
-        return
-
-    free_mb = free_space_mb(Config.MEDIA_DIR)
-    if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
-        fail(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد).")
-        return
-
-    set_rendition_status("queued")
-    rs = _room_for_item(item_id)
-    if is_default and rs is not None:
-        with LOCK:
-            item = rs.find_item(item_id)
-            if item:
-                item["status"] = "queued"
-                safe_save(rs)
-    if rs is None:
-        return
-    broadcast_state(rs)
-
-    acquired = ENCODE_SEMAPHORE.acquire()  # blocks this greenlet only
-    try:
-        rs = _room_for_item(item_id)
-        if rs is None:
-            log_debug(f"Item {item_id} removed while queued — aborting rendition encode.")
-            return
-
-        set_rendition_status("encoding")
-        if is_default:
-            with LOCK:
-                item = rs.find_item(item_id)
-                if item:
-                    item["status"] = "encoding"
-                    safe_save(rs)
-        broadcast_state(rs)
-
-        dur = duration_s
-        if dur is None:
-            dur = get_duration_s(_ffprobe_source(source))
-
-        # Expose the in-progress output at the final path (symlink into the
-        # .partial dir the runner writes into) so on_ready's "ready" really is
-        # playable; _promote swaps in the real directory on success.
-        expose_partial_output(rendition_dir)
-
-        def on_ready(elapsed_s):
-            item = set_rendition_status("ready")
-            if not item:
-                return
-            rrs = _room_for_item(item_id)
-            if rrs is None:
-                return
-            with LOCK:
-                aspect = item.get("_aspect") or 16 / 9
-                _rewrite_master_playlist(out_dir, collect_ready(item), aspect)
-                if is_default:
-                    item["status"] = "ready"
-                    item["src"] = f"{BP}/media/hls/{item_id}/master.m3u8"
-                    safe_save(rrs)
-                title = item["title"]
-            broadcast_state(rrs)
-            if is_default:
-                broadcast_notify("media_partial_ready", requester_name, room_code=rrs.room_id,
-                                 id=item_id, title=title)
-            else:
-                broadcast_notify("quality_partial_ready", requester_name, room_code=rrs.room_id,
-                                 id=item_id, title=title, label=label)
-
-        cmd = _build_single_rendition_cmd(source, rendition_dir, height, vbr, abr)
-        # The runner needs to know which arguments are outputs so it can build
-        # into a .partial directory and rename on success. It matches them by
-        # exact string, so it can never mistake the input for an output.
-        output_paths = (
-            os.path.join(rendition_dir, "seg_%03d.ts"),
-            os.path.join(rendition_dir, "index.m3u8"),
-        )
-        returncode, stderr_bytes, encode_error = _run_progressive_ffmpeg(
-            cmd, item_id, dur, label, on_ready=on_ready, output_paths=output_paths,
-        )
-
-        if returncode != 0:
-            # The translated message goes to viewers; ffmpeg's own wording stays
-            # in the log. Previously the last stderr line was put straight into
-            # item["error"], which is broadcast to the whole room.
-            err = encode_error or EncodeError(ErrorKind.UNKNOWN, "no attempt succeeded")
-            tail = (stderr_bytes or b"").decode(errors="ignore")[-1500:]
-            log_debug(f"Encode failure [{item_id}/{label}] kind={err.kind.value} "
-                      f"detail={err.detail} stderr_tail={tail}")
-            fail(f"تبدیل ({label}) ناموفق بود: {err.user_message}")
-            return
-
-        if dur and dur > 0:
-            actual = get_duration_s(_ffprobe_source(os.path.join(rendition_dir, "index.m3u8"), timeout=30))
-            if actual and actual < dur - 5:
-                fail(f"تبدیل ({label}) ناقص بود: فقط {int(actual)} از {int(dur)} ثانیه تولید شد (منبع ناقص/قطع شد).")
-                return
-
-        item = set_rendition_status("complete")
-        if not item:
-            return
-        rrs = _room_for_item(item_id)
-        if rrs is None:
-            return
-        with LOCK:
-            aspect = item.get("_aspect") or 16 / 9
-            _rewrite_master_playlist(out_dir, collect_ready(item), aspect)
-            if is_default:
-                item["status"] = "complete"
-                item["src"] = f"{BP}/media/hls/{item_id}/master.m3u8"
-                item.pop("error", None)
-                # The whole timeline now exists, so the seek guard has nothing
-                # left to enforce and the recorded progress is dead weight.
-                _clear_encoded_progress(item_id)
-            safe_save(rrs)
-            title = item["title"]
-        broadcast_state(rrs)
-        if is_default:
-            broadcast_notify("media_ready", requester_name, room_code=rrs.room_id,
-                             id=item_id, title=title)
-        else:
-            broadcast_notify("quality_ready", requester_name, room_code=rrs.room_id,
-                             id=item_id, title=title, label=label)
-
-    except subprocess.TimeoutExpired:
-        fail("زمان تبدیل ویدیو بیش از حد طول کشید (timeout)")
-    except Exception as e:
-        fail(str(e))
-    finally:
-        if acquired:
-            ENCODE_SEMAPHORE.release()
-
-
-def start_item_encoding(item_id: str, source: str, requester_name: str, local_raw_path: str = None):
-    """
-    Entry point used for every added video (file upload, MKV, direct link,
-    or a resolved YouTube download). Probes the source once, builds the
-    rendition ladder, records it on the item (so the quality menu can show
-    every option immediately, even the ones not encoded yet), and kicks off
-    only the default rendition's encode. `source` can be a local path or a
-    remote URL — ffmpeg reads both the same way.
-    """
-    log_debug(f"start_item_encoding: {item_id} <- {_safe_source_for_log(source)}")
-
-    def fail_all(msg: str):
-        rs = _room_for_item(item_id)
-        if rs is None:
-            return
-        with LOCK:
-            item = rs.find_item(item_id)
-            if item:
-                item["status"] = "error"
-                item["error"] = msg[:300]
-                safe_save(rs)
-                title = item["title"]
-            else:
-                title = ""
-        broadcast_state(rs)
-        broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
-
-    lazy = bool(Config.LAZY_ENCODE)   # lazy: store + probe now, build HLS only when something needs it
-    if not lazy:
-        free_mb = free_space_mb(Config.MEDIA_DIR)
-        if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
-            fail_all(f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن.")
-            return
-
-    probe = _ffprobe_source(source)
-    duration_s = get_duration_s(probe)
-    height = get_video_height(probe)
-    width = get_video_width(probe)
-    aspect = (width / height) if (width and height) else (16 / 9)
-    sub_streams = find_text_subtitle_streams(probe)
-    ladder = _pick_ladder(height)
-    default_label, default_height, default_vbr, default_abr = _pick_default_rendition(ladder)
-    log_debug(f"Item {item_id}: duration={duration_s}s height={height} ladder={[l[0] for l in ladder]} default={default_label}")
-
-    renditions = [
-        {"label": l, "height": h, "vbr": v, "abr": a,
-         "status": "queued" if (l == default_label and not lazy) else "pending",
-         "is_default": (l == default_label)}
-        for (l, h, v, a) in ladder
-    ]
-
-    rs = _room_for_item(item_id)
-    if rs is None:
-        log_debug(f"Item {item_id} vanished before encoding could start.")
-        return
-    with LOCK:
-        item = rs.find_item(item_id)
-        if not item:
-            log_debug(f"Item {item_id} vanished before encoding could start.")
-            return
-        item["renditions"] = renditions
-        item["status"] = "idle" if lazy else "queued"
-        item["_source"] = source
-        item["_aspect"] = aspect
-        item["_duration"] = duration_s
-        media = summarize_media(probe)       # tracks, bit depth, HDR of the ORIGINAL (for native clients)
-        if media:
-            item["media"] = media
-        if local_raw_path:
-            item["_raw_path"] = local_raw_path
-        safe_save(rs)
-    broadcast_state(rs)
-
-    os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
-    gevent.spawn(_extract_subtitles_async, item_id, source, sub_streams, requester_name)
-    if not lazy:
-        gevent.spawn(_encode_rendition, item_id, source, default_label, default_height,
-                     default_vbr, default_abr, requester_name, True, duration_s)
-
-
-def ensure_hls(item_id: str, requester_name: str):
-    """Lazy encoding: builds the default HLS rendition of an `idle` item, exactly once.
-
-    Called when a web client opens the item (or a controller asks for it explicitly).
-    The idle -> queued flip happens under LOCK, so any number of concurrent calls start
-    exactly one encode; every later call is a no-op. Native players never call this."""
-    rs = _room_for_item(item_id)
-    if rs is None:
-        return False, "آیتم پیدا نشد"
-    with LOCK:
-        item = rs.find_item(item_id)
-        if not item:
-            return False, "آیتم پیدا نشد"
-        if item.get("status") != "idle":
-            return True, "already started"
-        source = item.get("_source")
-        default = next((r for r in item.get("renditions", []) if r.get("is_default")), None)
-        if not source or not default:
-            return False, "این آیتم هنوز آماده نیست"
-        free_mb = free_space_mb(Config.MEDIA_DIR)
-        if free_mb < MIN_FREE_MB_FOR_TRANSCODE:
-            item["status"] = "error"
-            item["error"] = f"فضای آزاد دیسک سرور ناکافی است (فقط {free_mb:.0f}MB آزاد). لطفاً ابتدا فضا آزاد کن."
-            safe_save(rs)
-            title = item.get("title", "")
-            low_disk = True
-        else:
-            item["status"] = "queued"
-            default["status"] = "queued"
-            duration_s = item.get("_duration")
-            safe_save(rs)
-            low_disk = False
-    broadcast_state(rs)
-    if low_disk:
-        broadcast_notify("media_error", requester_name, room_code=rs.room_id, id=item_id, title=title)
-        return False, "فضای دیسک ناکافی است"
-    os.makedirs(os.path.join(Config.HLS_DIR, item_id), exist_ok=True)
-    gevent.spawn(_encode_rendition, item_id, source, default["label"], default["height"],
-                 default["vbr"], default["abr"], requester_name, True, duration_s)
-    return True, "started"
-
-
-def can_trigger_hls(current_item_id, item_id: str, may_control: bool) -> bool:
-    """Any member may start the encode for the item the room is on; other items need control rights,
-    so a watcher cannot queue an encode for every film in the playlist."""
-    return may_control or (current_item_id is not None and current_item_id == item_id)
-
-
-def request_quality(item_id: str, label: str, requester_name: str):
-    """Kicks off an on-demand rendition encode when a viewer picks a
-    not-yet-ready quality from the menu. Idempotent: a second request for a
-    rendition that's already queued/encoding/ready is a no-op."""
-    rs = _room_for_item(item_id)
-    if rs is None:
-        return False, "آیتم پیدا نشد"
-    with LOCK:
-        item = rs.find_item(item_id)
-        if not item:
-            return False, "آیتم پیدا نشد"
-        source = item.get("_source")
-        if not source:
-            return False, "این آیتم هنوز آماده نیست"
-        target = next((r for r in item.get("renditions", []) if r["label"] == label), None)
-        if not target:
-            return False, "این کیفیت برای این ویدیو وجود ندارد"
-        if target["status"] in ("queued", "encoding", "ready", "complete"):
-            return True, "already in progress"
-        target["status"] = "queued"
-        if item.get("status") == "idle":
-            item["status"] = "queued"
-        height, vbr, abr = target["height"], target["vbr"], target["abr"]
-        safe_save(rs)
-    broadcast_state(rs)
-    gevent.spawn(_encode_rendition, item_id, source, label, height, vbr, abr, requester_name, False)
-    return True, "started"
-
-
-# ────────────────────────────────────────────────────────────────────────────
 # Orphan-file cleanup helpers
 # ────────────────────────────────────────────────────────────────────────────
 
-def _scan_room_items(playlist, upload_refs, sub_refs, hls_ids, seen):
+def _scan_room_items(playlist, upload_refs, sub_refs, seen):
     """Add every file a playlist owns to the reference sets. Shared by the
     in-memory registry and the room JSONs still on disk, so both get the same
     treatment (and the same dedup)."""
@@ -1486,8 +499,6 @@ def _scan_room_items(playlist, upload_refs, sub_refs, hls_ids, seen):
         raw_path = item.get("_raw_path")
         if raw_path:
             upload_refs.add(os.path.basename(raw_path))
-        if item.get("renditions") or "/media/hls/" in (item.get("src") or ""):
-            hls_ids.add(item["id"])
         for s in item.get("subtitles") or []:
             url = s.get("url") or ""
             if "/media/subs/" in url:
@@ -1495,10 +506,10 @@ def _scan_room_items(playlist, upload_refs, sub_refs, hls_ids, seen):
 
 
 def _collect_referenced_files() -> tuple:
-    upload_refs, sub_refs, hls_ids = set(), set(), set()
+    upload_refs, sub_refs = set(), set()
     seen = set()
     for rs in list(rooms._rooms.values()) + ([room] if room is not None else []):
-        _scan_room_items(rs.playlist, upload_refs, sub_refs, hls_ids, seen)
+        _scan_room_items(rs.playlist, upload_refs, sub_refs, seen)
     # Rooms on disk that have never been opened in this process still own their
     # media. On boot the registry is empty, so counting only the registry here
     # makes cleanup delete every cold room's uploads/HLS — exactly how real
@@ -1515,14 +526,15 @@ def _collect_referenced_files() -> tuple:
                 data = json.load(fh)
         except (OSError, ValueError):
             continue
-        _scan_room_items(data.get("playlist") or [], upload_refs, sub_refs, hls_ids, seen)
-    return upload_refs, sub_refs, hls_ids
+        _scan_room_items(data.get("playlist") or [], upload_refs, sub_refs, seen)
+    return upload_refs, sub_refs
 
 
 def _cleanup_orphans() -> dict:
     with LOCK:
-        upload_refs, sub_refs, hls_ids = _collect_referenced_files()
+        upload_refs, sub_refs = _collect_referenced_files()
 
+    # "hls" stays in the payload as an always-empty list: older clients read the key.
     removed = {"uploads": [], "subs": [], "hls": []}
     skip = {".gitkeep"}
 
@@ -1551,17 +563,7 @@ def _cleanup_orphans() -> dict:
             except OSError as e:
                 log_debug(f"Failed to remove orphan sub {fname}: {e}")
 
-    if os.path.isdir(Config.HLS_DIR):
-        for dirname in os.listdir(Config.HLS_DIR):
-            if dirname not in hls_ids:
-                try:
-                    shutil.rmtree(os.path.join(Config.HLS_DIR, dirname), ignore_errors=True)
-                    removed["hls"].append(dirname)
-                except OSError as e:
-                    log_debug(f"Failed to remove orphan hls dir {dirname}: {e}")
-
-    log_debug(f"Cleanup done: {len(removed['uploads'])} uploads, {len(removed['subs'])} subs, "
-              f"{len(removed['hls'])} hls dirs removed.")
+    log_debug(f"Cleanup done: {len(removed['uploads'])} uploads, {len(removed['subs'])} subs removed.")
     return removed
 
 
@@ -1616,21 +618,11 @@ def _delete_chat_images(messages: list):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Pages
+# Health
+#
+# There is no page route any more: the web app is the static export next to the API, and the
+# Flask template that used to be served here (with its own hls.js player) is gone.
 # ────────────────────────────────────────────────────────────────────────────
-
-@app.route(f"{BP}/")
-def index():
-    return render_template("index.html", base_path=BP)
-
-
-# The mount point without its trailing slash. Nginx normally answers this with
-# a 301, but the bare-Flask fallback (dev, or nginx not in front) should work
-# on its own. Registered as a separate endpoint so an empty BASE_PATH — where
-# both rules would be "/" — cannot collide.
-if BP:
-    app.add_url_rule(BP, "index_bare", index)
-
 
 def _probe_storage() -> bool:
     for directory in (Config.MEDIA_DIR, Config.DATA_DIR):
@@ -1639,23 +631,6 @@ def _probe_storage() -> bool:
                 pass
         except OSError as exc:
             log_debug(f"[health] storage probe failed ({type(exc).__name__})")
-            return False
-    return True
-
-
-def _probe_transcoder() -> bool:
-    for name in ("ffmpeg", "ffprobe"):
-        binary = shutil.which(name)
-        if not binary:
-            return False
-        try:
-            result = subprocess.run(
-                [binary, "-version"], stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=3, check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        if result.returncode != 0:
             return False
     return True
 
@@ -1690,7 +665,6 @@ def api_health():
         log_debug(f"[health] database probe failed ({type(exc).__name__})")
         checks["database"] = False
     checks["storage"] = _probe_storage()
-    checks["transcoder"] = _probe_transcoder()
     checks["livekit"] = _probe_livekit()
     healthy = all(checks.values())
     return jsonify({"status": "healthy" if healthy else "degraded", "checks": checks}), (200 if healthy else 503)
@@ -1715,22 +689,6 @@ def api_log_diagnostics():
 @app.route(f"{BP}/media/subs/<path:filename>")
 def serve_sub(filename):
     return send_from_directory(Config.SUBS_DIR, filename, conditional=True)
-
-
-@app.route(f"{BP}/media/hls/<item_id>/<path:filename>")
-def serve_hls(item_id, filename):
-    # NOTE: in production this route is normally bypassed — Nginx should
-    # serve the HLS tree directly from disk (see deployment notes)
-    # for far better throughput on segment requests. This Flask route is a
-    # functional fallback (e.g. local/dev testing without Nginx in front).
-    d = os.path.join(Config.HLS_DIR, item_id)
-    resp = send_from_directory(d, filename, conditional=True)
-    if filename.endswith(".m3u8"):
-        resp.headers["Content-Type"] = "application/vnd.apple.mpegurl"
-        resp.headers["Cache-Control"] = "no-cache"
-    elif filename.endswith(".ts"):
-        resp.headers["Content-Type"] = "video/mp2t"
-    return resp
 
 
 @app.route(f"{BP}/media/chat/<path:filename>")
@@ -1783,8 +741,8 @@ def api_upload():
     item = {
         "id": item_id, "type": "file", "title": title or f.filename, "src": None,
         "subtitles": [], "audio_tracks": [], "added_by": name,
-        "added_at": time.time(), "status": "queued", "_room_id": cur.room_id,
-        "added_by_user_id": user.id,
+        "added_at": time.time(), "status": "ready", "_room_id": cur.room_id,
+        "added_by_user_id": user.id, "_raw_path": raw_path,
     }
     with LOCK:
         cur.add_item(item)
@@ -1796,8 +754,7 @@ def api_upload():
     finally:
         session.close()
     broadcast_state(cur)
-    broadcast_notify("playlist_add_processing", name, room_code=cur.room_id, title=item["title"])
-    gevent.spawn(start_item_encoding, item_id, raw_path, name, raw_path)
+    broadcast_notify("playlist_add", name, room_code=cur.room_id, title=item["title"])
     return jsonify(item)
 
 
@@ -1986,18 +943,18 @@ def _add_url_item(url: str, title: str, name: str, room_code: str = None,
     """Shared logic for the single add-url endpoint and the bulk archive add."""
     url = resolve_media_url(MEDIA_CLIENT, url)
     item_id = new_id()
-    is_hls = _is_hls(url)
-    needs_encode = not is_hls
     rs = rooms.get(room_code) if room_code else room
     if rs is None:
         return None
     item = {
         "id": item_id, "type": "url",
         "title": title or url.rsplit("/", 1)[-1].split("?")[0] or "ویدیو",
-        "src": None if needs_encode else url,
+        "src": url,
+        # The player reads this link itself: there is no download/transcode step.
+        "_source": url,
         "subtitles": [], "audio_tracks": [], "added_by": name,
         "added_at": time.time(),
-        "status": "queued" if needs_encode else "ready",
+        "status": "ready",
         "_room_id": rs.room_id,
         "added_by_user_id": added_by_user_id,
     }
@@ -2005,11 +962,7 @@ def _add_url_item(url: str, title: str, name: str, room_code: str = None,
         rs.add_item(item)
         safe_save(rs)
     broadcast_state(rs)
-    if needs_encode:
-        broadcast_notify("playlist_add_processing", name, room_code=rs.room_id, title=item["title"])
-        gevent.spawn(start_item_encoding, item_id, url, name)
-    else:
-        broadcast_notify("playlist_add", name, room_code=rs.room_id, title=item["title"])
+    broadcast_notify("playlist_add", name, room_code=rs.room_id, title=item["title"])
     return item
 
 
@@ -2297,13 +1250,13 @@ def api_youtube_formats():
     })
 
 
-def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requester_name: str,
-                              sub_lang: str = ""):
-    """Downloads the chosen source quality locally first (rather than
-    handing ffmpeg the ephemeral googlevideo URL directly), which avoids
-    URL-expiry / missing-header failures, then feeds it into the normal
-    per-item encoding pipeline. When `sub_lang` is set, the matching
-    subtitle track is downloaded alongside and attached to the item."""
+def _fetch_youtube_item(item_id: str, yt_url: str, fmt_selector: str, requester_name: str,
+                        sub_lang: str = ""):
+    """Downloads the chosen source quality locally and marks the item playable.
+
+    The file itself is what the native player reads (no transcode), and downloading it here rather
+    than handing the player an ephemeral googlevideo URL avoids URL-expiry / missing-header
+    failures. When `sub_lang` is set, the matching subtitle track is downloaded alongside."""
     raw_path = os.path.join(Config.UPLOAD_DIR, f"{item_id}_src.mp4")
     cmd = [
         "yt-dlp", "--force-ipv4", "-f", fmt_selector,
@@ -2351,7 +1304,21 @@ def _fetch_and_encode_youtube(item_id: str, yt_url: str, fmt_selector: str, requ
     if sub_lang:
         _attach_yt_subtitle(item_id, raw_path, sub_lang, requester_name)
 
-    start_item_encoding(item_id, raw_path, requester_name, raw_path)
+    # Downloaded in full: the item is playable as-is. No transcode step.
+    rs = _room_for_item(item_id)
+    if rs is None:
+        return
+    with LOCK:
+        item = rs.find_item(item_id)
+        if not item:
+            return
+        item["status"] = "ready"
+        item["_raw_path"] = raw_path
+        item.pop("error", None)
+        safe_save(rs)
+        title = item.get("title", "")
+    broadcast_state(rs)
+    broadcast_notify("media_ready", requester_name, room_code=rs.room_id, id=item_id, title=title)
 
 
 def _attach_yt_subtitle(item_id: str, raw_path: str, sub_lang: str, requester_name: str):
@@ -2395,7 +1362,7 @@ def _attach_yt_subtitle(item_id: str, raw_path: str, sub_lang: str, requester_na
 
 def _queue_youtube_item(cur, user, yt_url, title, name, fmt_selector, count=1, sub_lang=""):
     """Adds a single YouTube item to the room playlist and spawns the
-    background download+encode. Returns the item dict (or None)."""
+    background download. Returns the item dict (or None)."""
     item_id = new_id()
     item = {
         "id": item_id, "type": "youtube", "title": title, "src": None,
@@ -2413,8 +1380,8 @@ def _queue_youtube_item(cur, user, yt_url, title, name, fmt_selector, count=1, s
     finally:
         session.close()
     broadcast_state(cur)
-    broadcast_notify("playlist_add_processing", name, room_code=cur.room_id, title=title)
-    gevent.spawn(_fetch_and_encode_youtube, item_id, yt_url, fmt_selector, name, sub_lang)
+    broadcast_notify("playlist_add_downloading", name, room_code=cur.room_id, title=title)
+    gevent.spawn(_fetch_youtube_item, item_id, yt_url, fmt_selector, name, sub_lang)
     return item
 
 
@@ -2528,10 +1495,6 @@ def api_add_youtube_playlist():
 VIDEO_EXTS = {"mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi", "ts"}
 
 
-def _is_hls(url: str) -> bool:
-    return url_ext(url) == "m3u8" or "m3u8" in url.split("?")[0].lower()
-
-
 @app.route(f"{BP}/api/add-url", methods=["POST"])
 def api_add_url():
     user = _require_user()
@@ -2563,23 +1526,6 @@ def api_add_url():
     return jsonify(item)
 
 
-@app.route(f"{BP}/api/request-quality", methods=["POST"])
-def api_request_quality():
-    user = _require_user()
-    if not _may_control(user):
-        return jsonify({"error": "فقط کنترل‌کننده یا ادمین می‌تواند کیفیت را تغییر دهد"}), 403
-    data = request.get_json(force=True, silent=True) or {}
-    item_id = data.get("item_id")
-    label = (data.get("label") or "").strip()
-    name = (data.get("name") or "ناشناس").strip()
-    if not item_id or not label:
-        return jsonify({"error": "ورودی ناقص است"}), 400
-    ok, msg = request_quality(item_id, label, name)
-    if not ok:
-        return jsonify({"error": msg}), 400
-    return jsonify({"ok": True})
-
-
 @app.route(f"{BP}/api/live/new-key", methods=["POST"])
 def api_new_key():
     key = uuid.uuid4().hex[:10]
@@ -2603,37 +1549,22 @@ def api_new_key():
 # LiveKit voice room
 # ────────────────────────────────────────────────────────────────────────────
 
-@app.route(f"{BP}/api/items/<item_id>/ensure-hls", methods=["POST"])
-def api_item_ensure_hls(item_id):
-    """Start the (lazy) HLS build for an item. Idempotent; see ensure_hls()."""
-    user = _require_user()
-    rs = _room_for_item(item_id)
-    if rs is None or rs.room_id != _current_room_code():
-        return jsonify({"error": "این آیتم در اتاق فعلی تو نیست"}), 404
-    idx = rs.current_index
-    current_id = rs.playlist[idx].get("id") if isinstance(idx, int) and 0 <= idx < len(rs.playlist) else None
-    if not can_trigger_hls(current_id, item_id, _may_control(user)):
-        return jsonify({"error": "فقط کنترل‌کننده می‌تواند پردازش آیتم دیگر را شروع کند"}), 403
-    ok, msg = ensure_hls(item_id, user.username or "ناشناس")
-    return jsonify({"ok": ok, "message": msg}), (200 if ok else 409)
-
-
 @app.route(f"{BP}/api/capabilities", methods=["GET"])
 def api_capabilities():
     """Which optional features this server has switched on (clients hide what would only fail)."""
     _require_user()
     return jsonify(nativemedia.server_capabilities(
         native_original=Config.NATIVE_MEDIA_CONFIGURED, native_remote=Config.NATIVE_REMOTE_SOURCES,
-        lazy_encode=Config.LAZY_ENCODE, sync=Config.SYNC_CONFIGURED))
+        sync=Config.SYNC_CONFIGURED))
 
 
 @app.route(f"{BP}/api/items/<item_id>/native-source", methods=["GET"])
 def api_item_native_source(item_id):
     """Where a native client (mpv) should read this item from.
 
-    `original`: the uploaded file itself (no transcode, no quality loss, any container/codec),
-    behind a short-lived nginx-verified token bound to (user, file). `remote`: the item's own
-    http(s) source link (opt-in). `hls`: the transcoded fallback."""
+    `original`: the uploaded/downloaded file itself (any container/codec), behind a
+    short-lived nginx-verified token bound to (user, file). `remote`: the item's own
+    http(s) source link (opt-in). Nothing is transcoded."""
     user = _require_user()
     rs = _room_for_item(item_id)
     if rs is None or rs.room_id != _current_room_code():
@@ -2764,10 +1695,8 @@ def api_remove_item(item_id):
         raw_path = item.get("_raw_path") if item else None
         cur.remove_item(item_id)
         safe_save(cur)
-    _clear_encoded_progress(item_id)
     broadcast_state(cur)
     broadcast_notify("playlist_remove", name, room_code=cur.room_id, title=title)
-    shutil.rmtree(os.path.join(Config.HLS_DIR, item_id), ignore_errors=True)
     if raw_path and os.path.exists(raw_path):
         try:
             os.remove(raw_path)
@@ -4174,7 +3103,6 @@ def on_control(data):
         return
     rs = rooms.get(code)
     name = user.username or "ناشناس"
-    clamped_to = None
 
     if action == "shuffle":
         # Playback ORDER is Flask's playlist domain; it has no timing meaning.
@@ -4204,11 +3132,7 @@ def on_control(data):
     else:
         if action == "seek":
             target = float(data.get("to", 0) or 0)
-            frontier = _encoded_frontier(_current_item(rs))
-            safe_target = clamp_seek_target(target, frontier)
-            if safe_target != target:
-                clamped_to = safe_target
-            cmd = {"c": "seek", "target": safe_target}
+            cmd = {"c": "seek", "target": target}
         elif action == "rate":
             try:
                 rate = float(data.get("rate", 1.0))
@@ -4225,7 +3149,7 @@ def on_control(data):
             if not sync_relay.configured():
                 with LOCK:
                     if action == "seek":
-                        rs.seek(safe_target if 'safe_target' in locals() else float(data.get("to", 0) or 0))
+                        rs.seek(float(data.get("to", 0) or 0))
                     elif action == "play":
                         rs.set_play(rs.current_position())
                     elif action == "pause":
@@ -4248,13 +3172,6 @@ def on_control(data):
                 sync_relay.mirror_room(rs, state)
                 payload = rs.to_public_dict()
 
-    if clamped_to is not None:
-        # Tell the room why the seek landed short, so the client can say so
-        # instead of the position silently disagreeing with the request.
-        socketio.emit("notify", {
-            "type": "seek_clamped", "name": name, "ts": time.time(),
-            "extra": {"requested": float(data.get("to", 0)), "position": clamped_to},
-        }, to=_room_channel(code))
     socketio.emit("state_sync", payload, to=_room_channel(code), include_self=False)
     broadcast_notify(f"ctrl_{action}", name, room_code=code, extra=data)
 
@@ -4298,54 +3215,10 @@ def on_chat_send(data):
     socketio.emit("chat_message", msg, to=_room_channel(code))
 
 
-def _resume_interrupted_encodes():
-    """Re-kicks encodes that were left in status "queued" when the process
-    stopped (a crash, deploy, or restart mid-encode). Rooms materialize
-    lazily, so scan the per-room JSON on disk and hand each item back to
-    start_item_encoding — which re-probes, rebuilds the rendition ladder and
-    spawns the default rendition's encode. Purely best-effort: anything not
-    in "queued" (completed, error, pending…) is left alone."""
-    for fname in sorted(os.listdir(os.path.join(Config.DATA_DIR, "rooms"))):
-        if not fname.endswith(".json"):
-            continue
-        code = fname[:-5]
-        try:
-            with open(os.path.join(Config.DATA_DIR, "rooms", fname), encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception as e:
-            log_debug(f"resume: skip {fname} ({e})")
-            continue
-        count = 0
-        for it in data.get("playlist", []) or []:
-            if it.get("status") != "queued":
-                continue
-            source = it.get("_source")
-            if not source:
-                continue
-            rs = rooms.get(code)
-            item = rs.find_item(it.get("id"))
-            if item is None:
-                continue
-            gevent.spawn(start_item_encoding, it["id"], source, it.get("added_by") or "ناشناس")
-            count += 1
-        if count:
-            log_debug(f"resume: {count} interrupted encode(s) re-queued in room {code}")
-
-
 if __name__ == "__main__":
     Config.validate()
     dbmod.init_db()
     log_debug("Database tables ready.")
-    # A crash or `kill -9` mid-encode leaves a .partial directory behind and
-    # nothing will ever finish it. Clear them before anything else looks at the
-    # HLS tree, so a stale partial can never be served or counted as output.
-    try:
-        orphans = cleanup_orphaned_partials(Config.HLS_DIR)
-        if orphans:
-            log_debug(f"Boot cleanup removed {len(orphans)} orphaned partial encode(s).")
-    except Exception as e:
-        log_debug(f"Boot cleanup of partial encodes failed: {e}")
-    gevent.spawn(_resume_interrupted_encodes)
     gevent.spawn(_chat_purge_loop)
     gevent.spawn(_sync_mirror_loop)
     if archive_scraper.enabled_collectors(Config):

@@ -83,18 +83,18 @@ def test_long_film_gets_a_longer_token():
 
 def test_only_files_that_exist_in_the_uploads_dir_are_signed():
     seen = []
-    pick({"_raw_path": "/somewhere/else/it1_src.mkv", "src": "/h"}, isfile=lambda p: seen.append(p) or False)
+    pick({"_raw_path": "/somewhere/else/it1_src.mkv"}, isfile=lambda p: seen.append(p) or False)
     assert seen == [f"{UP}/it1_src.mkv"]          # looks only inside the uploads dir (by basename)
-    assert pick({"_raw_path": "/x/it1_src.mkv", "src": "/h"}, isfile=lambda p: False)["kind"] == "hls"
+    assert pick({"_raw_path": "/x/it1_src.mkv"}, isfile=lambda p: False) is None
 
 
-def test_without_a_secret_there_is_no_original_but_hls_still_works():
-    assert pick({"_raw_path": f"{UP}/a.mkv", "src": "/h"}, secret="")["kind"] == "hls"
+def test_without_a_secret_there_is_no_original_source():
+    assert pick({"_raw_path": f"{UP}/a.mkv"}, secret="") is None
 
 
 def test_url_imports_play_directly_only_when_the_owner_opted_in():
-    item = {"_source": "https://cdn.example.org/film.mkv", "src": "/w2g/media/hls/x/master.m3u8"}
-    assert pick(item)["kind"] == "hls"                                   # default: not exposed
+    item = {"_source": "https://cdn.example.org/film.mkv"}
+    assert pick(item) is None                                            # default: not exposed
     got = pick(item, remote_ok=True)
     assert got == {"kind": "remote", "url": "https://cdn.example.org/film.mkv", "expires_at": None}
 
@@ -106,7 +106,7 @@ def test_url_imports_play_directly_only_when_the_owner_opted_in():
 ])
 def test_internal_or_non_http_sources_are_never_handed_out(url):
     assert nm.is_public_http_url(url) is False
-    assert pick({"_source": url, "src": "/h"}, remote_ok=True)["kind"] == "hls"
+    assert pick({"_source": url}, remote_ok=True) is None
 
 
 @pytest.mark.parametrize("url", ["https://example.org/a.mkv", "http://dl.example.ir:8080/x.mp4?t=1", "https://8.8.8.8/a"])
@@ -114,12 +114,18 @@ def test_public_urls_are_accepted(url):
     assert nm.is_public_http_url(url) is True
 
 
+def test_a_live_item_hands_over_its_own_playback_url():
+    """Live is broadcast, not a transcode: its HLS URL is the source the player should use."""
+    got = pick({"type": "live", "src": "https://example.org/hls/live/k/index.m3u8", "status": "ready"})
+    assert got == {"kind": "live", "url": "https://example.org/hls/live/k/index.m3u8", "expires_at": None}
+
+
 def test_nothing_playable_returns_none():
     assert pick({"title": "x"}) is None
 
 
 def test_server_capabilities_shape_and_no_secrets():
-    caps = nm.server_capabilities(native_original=True, native_remote=False, lazy_encode=True, sync=0)
+    caps = nm.server_capabilities(native_original=True, native_remote=False, sync=0)
     assert caps == {"version": 1, "server": {"native_original": True, "native_remote": False,
-                                             "lazy_encode": True, "sync": False}}
+                                             "sync": False}}
     assert "secret" not in str(caps).lower()

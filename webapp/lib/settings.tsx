@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo } from "react";
 import { useLocalStorage } from "./useLocalStorage";
 import type { VoiceSettings } from "./types";
 import { DEFAULT_VOICE_SETTINGS } from "./types";
@@ -15,72 +15,19 @@ export const THEMES: { id: ThemeId; label: string; swatch: string[] }[] = [
   { id: "light", label: "روشن", swatch: ["#f4f0e9", "#c07f3c", "#a24f86"] },
 ];
 
-export type ShortcutAction =
-  | "playPause"
-  | "seekBack"
-  | "seekForward"
-  | "volumeUp"
-  | "volumeDown"
-  | "mute"
-  | "fullscreen"
-  | "prev"
-  | "next"
-  | "pip"
-  | "shortcuts"
-  | "settings"
-  | "pushToTalk"
-  | "toggleMic"
-  | "toggleDeafen";
+// Only the voice-room keys are handled by this UI. Video playback keys belong to the
+// native player window, so there is nothing here to rebind for it.
+export type ShortcutAction = "pushToTalk" | "toggleMic" | "toggleDeafen";
 
-export const SHORTCUT_ACTIONS: ShortcutAction[] = [
-  "playPause",
-  "seekBack",
-  "seekForward",
-  "volumeUp",
-  "volumeDown",
-  "mute",
-  "fullscreen",
-  "prev",
-  "next",
-  "pip",
-  "shortcuts",
-  "settings",
-  "toggleMic",
-  "toggleDeafen",
-  "pushToTalk",
-];
+export const SHORTCUT_ACTIONS: ShortcutAction[] = ["pushToTalk", "toggleMic", "toggleDeafen"];
 
 export const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
-  playPause: "پخش / مکث",
-  seekBack: "10 ثانیه عقب",
-  seekForward: "10 ثانیه جلو",
-  volumeUp: "صدا بیشتر",
-  volumeDown: "صدا کمتر",
-  mute: "بی‌صدا / باصدا",
-  fullscreen: "تمام‌صفحه",
-  prev: "آیتم قبلی",
-  next: "آیتم بعدی",
-  pip: "تصویر در تصویر",
-  shortcuts: "نمایش راهنمای میانبرها",
-  settings: "باز کردن تنظیمات",
   pushToTalk: "فشار دهید تا صحبت کنید",
   toggleMic: "قطع / وصل میکروفون",
   toggleDeafen: "قطع کامل صدا",
 };
 
 export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string> = {
-  playPause: " ",
-  seekBack: "ArrowLeft",
-  seekForward: "ArrowRight",
-  volumeUp: "ArrowUp",
-  volumeDown: "ArrowDown",
-  mute: "m",
-  fullscreen: "f",
-  prev: "p",
-  next: "n",
-  pip: "i",
-  shortcuts: "?",
-  settings: "s",
   pushToTalk: "v",
   toggleMic: "x",
   toggleDeafen: "z",
@@ -93,15 +40,8 @@ export const QUALITY_OPTIONS: { id: VoiceSettings["quality"]; label: string }[] 
   { id: "low", label: "کم — مونو 16kHz (پهنای باند کم)" },
 ];
 
-export interface PlaybackSettings {
-  /** Player volume, 0..1 — persisted so the room starts at the listener's level. */
-  volume: number;
-  muted: boolean;
-}
-
 export interface AppSettings {
   theme: ThemeId;
-  playback: PlaybackSettings;
   shortcuts: Record<ShortcutAction, string>;
   voice: VoiceSettings;
   pushToTalk: boolean;
@@ -109,7 +49,6 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "violet",
-  playback: { volume: 1, muted: false },
   shortcuts: DEFAULT_SHORTCUTS,
   voice: DEFAULT_VOICE_SETTINGS,
   pushToTalk: false,
@@ -157,14 +96,6 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated]);
-
-  // `useLocalStorage` replaces the stored object wholesale instead of merging,
-  // so settings saved before `playback` existed have no `playback` key at all.
-  // Fill it in once; without this the player would read `undefined.volume`.
-  useEffect(() => {
-    if (!hydrated || settings.playback) return;
-    setSettings((s) => ({ ...s, playback: s.playback ?? DEFAULT_SETTINGS.playback }));
-  }, [hydrated, settings.playback, setSettings]);
 
   const setTheme = useCallback((theme: ThemeId) => setSettings((s) => ({ ...s, theme })), [setSettings]);
   const setShortcut = useCallback(

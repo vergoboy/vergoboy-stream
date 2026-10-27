@@ -42,7 +42,8 @@ is grown slice by slice — as each slice lands, not written up front.
 done, and finalized in phase 4. Do not create it now, and do not write rules
 for modules that do not exist yet.
 
-Current state for reference: `app.py` is ~4156 lines; `media_pipeline/`
-already holds `errors.py`, `ffmpeg_cmd.py`, `planner.py`, `probe.py`,
-`runner.py`. No import-boundary test exists yet — rule 5' expects it to
-appear alongside the next slice, not ahead of it.
+Current state for reference: `app.py` is ~3200 lines; `media_domain/` holds
+`services/` (URL intake) and `adapters/` (filesystem, HTTP), and
+`tests/unit/test_import_boundaries.py` enforces the layering for that package.
+There is no transcode pipeline: items play their original file, and the
+desktop app's native player follows the room's clock.

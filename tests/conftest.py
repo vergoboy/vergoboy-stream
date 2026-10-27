@@ -80,19 +80,6 @@ def require_encoders():
 
 
 @pytest.fixture
-def isolated_hls_root(tmp_path, monkeypatch):
-    """A throwaway Config.HLS_DIR for tests that would otherwise touch media/.
-
-    Pointed at tmp_path so a cleanup bug cannot reach the developer's real HLS
-    output. Restored automatically by monkeypatch.
-    """
-    root = tmp_path / "hls"
-    root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("STREAM_HLS_DIR", str(root))
-    return root
-
-
-@pytest.fixture
 def clean_env(monkeypatch):
     """Neutralise the developer's real credentials for the duration of a test.
 
@@ -279,14 +266,13 @@ def live_server(request):
     # directory before a socket test can touch it. Without this the socket
     # suite writes room JSONs into the developer's real data/rooms, reads its
     # media, and — worse — a cleanup triggered during a test can delete real
-    # uploads/HLS (the exact wipe that empty media stores come from). Values
+    # uploads (the exact wipe that empty media stores come from). Values
     # are restored at session teardown.
     media_tmp = tmpdir / "media"
     _media_dirs = {
         "MEDIA_DIR": media_tmp,
         "UPLOAD_DIR": media_tmp / "uploads",
         "SUBS_DIR": media_tmp / "subs",
-        "HLS_DIR": media_tmp / "hls",
         "CHAT_IMG_DIR": media_tmp / "chat",
         "AVATAR_DIR": media_tmp / "avatars",
     }

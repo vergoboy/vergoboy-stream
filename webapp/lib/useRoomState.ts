@@ -8,7 +8,6 @@ import type {
   NotifyEvent,
   PresenceUser,
   RoomStateSync,
-  TranscodeProgress,
 } from "./types";
 
 const EMPTY_ROOM: RoomStateSync = {
@@ -47,7 +46,6 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [notifications, setNotifications] = useState<NotifyEvent[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [transcodeProgress, setTranscodeProgress] = useState<Record<string, TranscodeProgress>>({});
 
   const socketRef = useRef<Socket | null>(null);
   const recvLocalRef = useRef<number>(0);
@@ -107,10 +105,6 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
       socket.on("notify", (n: NotifyEvent) => {
         setNotifications((prev) => [n, ...prev].slice(0, 40));
         onNotifyRef.current?.(n);
-      });
-
-      socket.on("transcode_progress", (data: TranscodeProgress) => {
-        setTranscodeProgress((prev) => ({ ...prev, [`${data.id}:${data.label}`]: data }));
       });
 
       socket.on("chat_history", (data: { messages: ChatMessage[] }) => {
@@ -221,7 +215,6 @@ export function useRoomState({ token, roomCode, myName, canControl, myId, onNoti
     presenceUsers,
     notifications,
     chatMessages,
-    transcodeProgress,
     expectedPosition,
     requestControl,
     sendChat,

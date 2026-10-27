@@ -11,21 +11,7 @@ export function ShortcutsModal({ open, onClose }: { open: boolean; onClose: () =
   const sc = settings.shortcuts;
 
   const ROWS: { keys: string[]; desc: string }[] = [
-    { keys: [formatKey(sc.playPause)], desc: SHORTCUT_LABELS.playPause },
-    { keys: [formatKey(sc.seekBack), "J"], desc: SHORTCUT_LABELS.seekBack },
-    { keys: [formatKey(sc.seekForward), "L"], desc: SHORTCUT_LABELS.seekForward },
-    { keys: [formatKey(sc.volumeUp)], desc: SHORTCUT_LABELS.volumeUp },
-    { keys: [formatKey(sc.volumeDown)], desc: SHORTCUT_LABELS.volumeDown },
-    { keys: [formatKey(sc.mute)], desc: SHORTCUT_LABELS.mute },
-    { keys: [formatKey(sc.fullscreen)], desc: SHORTCUT_LABELS.fullscreen },
-    { keys: [formatKey(sc.prev)], desc: SHORTCUT_LABELS.prev },
-    { keys: [formatKey(sc.next)], desc: SHORTCUT_LABELS.next },
-    { keys: [formatKey(sc.pip)], desc: SHORTCUT_LABELS.pip },
-    { keys: [formatKey(sc.shortcuts)], desc: SHORTCUT_LABELS.shortcuts },
-    { keys: [formatKey(sc.settings)], desc: SHORTCUT_LABELS.settings },
-    { keys: ["1", "…", "9"], desc: "رفتن به 10٪–90٪ فیلم" },
-    { keys: ["0"], desc: "رفتن به ابتدای فیلم" },
-    { keys: ["Esc"], desc: "بستن این پنجره / خروج از تمام‌صفحه" },
+    { keys: ["Esc"], desc: "بستن پنجره‌ها / خروج از تمام‌صفحه" },
   ];
 
   const VOICE_ROWS: { keys: string[]; desc: string }[] = [
@@ -82,8 +68,8 @@ export function ShortcutsModal({ open, onClose }: { open: boolean; onClose: () =
               ))}
             </div>
             <p className="mt-3.5 text-xs leading-relaxed text-[color:var(--color-ink-dim)]">
-              کلیدها فقط وقتی فوکوس روی ویدیو یا صفحه‌ی اصلیه (نه روی فیلدهای متنی) کار می‌کنن؛ میانبرهای چت صوتی در
-              هر جای صفحه کار می‌کنن مگر روی فیلد متنی. همه‌ی این کلیدها در «تنظیمات» قابل تغییرن.
+              پخش ویدیو در پنجره‌ی پخش‌کننده‌ی دسکتاپ انجام می‌شود و کلیدهای آن هم همان‌جا کار می‌کنند؛ این صفحه فقط
+              میانبرهای همین رابط و چت صوتی را نشان می‌دهد. میانبرهای صدا در «تنظیمات» قابل تغییرن.
             </p>
           </motion.div>
         </motion.div>

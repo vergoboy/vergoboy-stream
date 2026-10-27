@@ -80,8 +80,15 @@ def pick_source(item: dict, *, user_id: str, upload_dir: str, base_path: str, se
     1. `original`: the uploaded/downloaded file still in `upload_dir`, behind a signed nginx URL.
     2. `remote`  : the item's http(s) source link itself (opt-in; the player fetches it directly,
                    which also keeps the bytes off our server). Never carries our credentials.
-    3. `hls`     : the transcoded stream the web player uses.
+
+    Nothing is transcoded: there is no lower-quality fallback. If neither applies the item simply
+    has no playable source, and the caller reports that instead of handing out a URL that would fail.
+
+    Live items are the exception: they ARE an HLS URL (the broadcast the operator set up), so
+    ``live`` hands that URL over unchanged. That is the live feature, not a transcode of a library file.
     """
+    if item.get("type") == "live" and item.get("src"):
+        return {"kind": "live", "url": item["src"], "expires_at": None}
     raw = item.get("_raw_path")
     if secret and raw:
         name = os.path.basename(raw)
@@ -96,19 +103,16 @@ def pick_source(item: dict, *, user_id: str, upload_dir: str, base_path: str, se
     src = item.get("_source")
     if remote_ok and is_public_http_url(src):
         return {"kind": "remote", "url": src, "expires_at": None}
-    if item.get("src"):
-        return {"kind": "hls", "url": item["src"], "expires_at": None}
     return None
 
 
-def server_capabilities(*, native_original: bool, native_remote: bool, lazy_encode: bool, sync: bool) -> dict:
+def server_capabilities(*, native_original: bool, native_remote: bool, sync: bool) -> dict:
     """What this server offers, so a client can hide features that would only fail (no secrets in here)."""
     return {
         "version": 1,
         "server": {
             "native_original": bool(native_original),   # signed original-file URLs work
             "native_remote": bool(native_remote),       # item source links may be played directly
-            "lazy_encode": bool(lazy_encode),           # HLS is built on demand, not at add time
             "sync": bool(sync),                         # the room sync service is configured
         },
     }

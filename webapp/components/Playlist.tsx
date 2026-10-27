@@ -1,30 +1,24 @@
 "use client";
 
 import { useState } from "react";
-import { Play, Trash2, Clock, CheckCircle2, AlertTriangle, Loader2, Radio, Video, Link, FileVideo } from "lucide-react";
+import { Play, Trash2, AlertTriangle, Radio, Video, Link, FileVideo } from "lucide-react";
 
 
 import { AnimatePresence, motion } from "./anim";
 import { api } from "@/lib/api";
 import { prettyTitle } from "@/lib/format";
-import type { PlaylistItem, TranscodeProgress } from "@/lib/types";
+import type { PlaylistItem } from "@/lib/types";
 
 const ICONS: Record<string, React.ReactNode> = { live: <Radio className="w-3.5 h-3.5 text-rose-500 animate-pulse inline" />, youtube: <Video className="w-3.5 h-3.5 text-red-500 inline" />, url: <Link className="w-3.5 h-3.5 text-blue-400 inline" />, file: <FileVideo className="w-3.5 h-3.5 text-amber-400 inline" /> };
-
-function defaultRendition(item: PlaylistItem) {
-  return item.renditions?.find((r) => r.is_default) ?? item.renditions?.[0];
-}
 
 export function Playlist({
   playlist,
   currentIndex,
-  transcodeProgress,
   myName,
   onSelect,
 }: {
   playlist: PlaylistItem[];
   currentIndex: number | null;
-  transcodeProgress: Record<string, TranscodeProgress>;
   myName: string;
   onSelect: (index: number) => void;
 }) {
@@ -44,12 +38,8 @@ export function Playlist({
       <ul className="flex flex-col gap-2">
         <AnimatePresence initial={false}>
           {playlist.map((item, idx) => {
-            const def = defaultRendition(item);
-            const prog = def ? transcodeProgress[`${item.id}:${def.label}`] : undefined;
-            const pct = prog?.pct ?? 0;
-            const processing = item.status === "queued" || item.status === "encoding";
             const isNow = idx === currentIndex;
-            const icon = isNow ? <span className="flex h-4 items-end gap-[2px]"><i className="eq-bar" /><i className="eq-bar" /><i className="eq-bar" /></span> : processing ? <Loader2 className="w-4 h-4 animate-spin text-amber-400" /> : item.status === "error" ? <AlertTriangle className="w-4 h-4 text-rose-400" /> : item.status === "ready" ? <Play className="w-3.5 h-3.5 fill-current text-emerald-400" /> : (ICONS[item.type] ?? <FileVideo className="w-3.5 h-3.5 text-amber-400" />);
+            const icon = isNow ? <span className="flex h-4 items-end gap-[2px]"><i className="eq-bar" /><i className="eq-bar" /><i className="eq-bar" /></span> : item.status === "error" ? <AlertTriangle className="w-4 h-4 text-rose-400" /> : item.status === "ready" ? <Play className="w-3.5 h-3.5 fill-current text-emerald-400" /> : (ICONS[item.type] ?? <FileVideo className="w-3.5 h-3.5 text-amber-400" />);
 
             return (
               <motion.li
@@ -70,30 +60,18 @@ export function Playlist({
                   <div className="truncate text-[13px] text-[color:var(--color-ink)] sm:text-[13.5px]" title={item.title}>{prettyTitle(item.title)}</div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11.5px] text-[color:var(--color-ink-dim)]">
                     افزوده‌شده توسط {item.added_by || "ناشناس"}
-                    {processing && (
-                      <span className="rounded-full bg-[color:var(--color-amber)]/15 px-2 py-0.5 text-[10.5px] text-[color:var(--color-amber)]">
-                        {pct}% {item.status === "queued" ? "در صف انکد" : "در حال آماده‌سازی"}
-                      </span>
+                    {item.status === "queued" && (
+                      <span className="rounded-full bg-[color:var(--color-amber)]/15 px-2 py-0.5 text-[10.5px] text-[color:var(--color-amber)]">در حال دانلود…</span>
                     )}
                     {item.status === "ready" && (
-                      <span className="rounded-full bg-[color:var(--color-teal)]/15 px-2 py-0.5 text-[10.5px] text-[color:var(--color-teal)]">پخش‌پذیر</span>
+                      <span className="rounded-full bg-[color:var(--color-teal)]/15 px-2 py-0.5 text-[10.5px] text-[color:var(--color-teal)]">آماده‌ی پخش</span>
                     )}
                     {item.status === "error" && (
                       <span title={item.error} className="cursor-help rounded-full bg-[color:var(--color-coral)]/15 px-2 py-0.5 text-[10.5px] text-[color:var(--color-coral)]">
-                        خطا در تبدیل
+                        فایل در دسترس نیست
                       </span>
                     )}
                   </div>
-                  {processing && (
-                    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10">
-                      <motion.div
-                        className="h-full rounded-full"
-                        style={{ background: "linear-gradient(90deg, var(--color-amber), var(--color-plum-soft))" }}
-                        animate={{ width: `${pct}%` }}
-                        transition={{ duration: 0.4 }}
-                      />
-                    </div>
-                  )}
                 </div>
                 <button
                   onClick={(e) => {

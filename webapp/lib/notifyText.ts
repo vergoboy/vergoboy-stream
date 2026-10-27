@@ -17,20 +17,12 @@ export function notifyText(n: NotifyEvent, playlist: PlaylistItem[]): string {
       return `<b>${name}</b> از اتاق خارج شد`;
     case "playlist_add":
       return `<b>${name}</b> «${title}» را اضافه کرد`;
-    case "playlist_add_processing":
-      return `<b>${name}</b> «${title}» را اضافه کرد (در حال آماده‌سازی روی سرور…)`;
-    case "media_partial_ready":
-      return `«${title}» قابل پخش شد (کیفیت پیش‌فرض — بقیه‌ی کیفیت‌ها on-demand هستن)`;
+    case "playlist_add_downloading":
+      return `<b>${name}</b> «${title}» را اضافه کرد (در حال دانلود…)`;
     case "media_ready":
-      return `ویدیوی «${title}» کامل آماده‌ی پخش شد`;
+      return `ویدیوی «${title}» آماده‌ی پخش شد`;
     case "media_error":
-      return `تبدیل «${title}» با خطا مواجه شد`;
-    case "quality_partial_ready":
-      return `کیفیت ${label} برای «${title}» قابل پخش شد`;
-    case "quality_ready":
-      return `کیفیت ${label} برای «${title}» کامل آماده شد`;
-    case "quality_error":
-      return `آماده‌سازی کیفیت ${label} برای «${title}» با خطا مواجه شد`;
+      return `پخش «${title}» با خطا مواجه شد`;
     case "subtitle_auto_extracted":
       return `${n.count ?? ""} زیرنویس از داخل «${title}» به‌صورت خودکار استخراج شد`;
     case "playlist_add_live":

@@ -6,18 +6,16 @@ import { useLocalStorage } from "@/lib/useLocalStorage";
 import { useRoomState } from "@/lib/useRoomState";
 import { api } from "@/lib/api";
 import { API_BASE_PATH, BASE_PATH } from "@/lib/config";
-import { DEFAULT_SUB_STYLE, type SubStyle } from "@/lib/types";
 import type { NotifyEvent } from "@/lib/types";
 import { useAuth, logout, updateUser, isAdmin, mayAdd, mayControl, mayManage, finishOAuthLogin } from "@/lib/auth";
 import { useViewport, useIdle } from "@/lib/useIdle";
 import { guardNativeClose, isTauri } from "@/lib/tauri";
 
 import { Audience } from "@/components/Sofa";
-import { Player } from "@/components/Player";
+import { Stage } from "@/components/Stage";
 import { Playlist } from "@/components/Playlist";
 import { AddHub } from "@/components/AddHub";
 import { SubAudioPanel } from "@/components/SubAudioPanel";
-import { SubStylePanel } from "@/components/SubStylePanel";
 import { ChatPanel } from "@/components/ChatPanel";
 import { VoicePanel } from "@/components/VoicePanel";
 import { Sidebar } from "@/components/Sidebar";
@@ -38,8 +36,8 @@ import { SettingsProvider } from "@/lib/settings";
 import { useVoiceRoom } from "@/lib/useVoiceRoom";
 import { notifyText } from "@/lib/notifyText";
 import {
-  ListVideo, Plus, MessageCircle, Users, Captions, CircleUserRound, Play, Pause, Undo2, Redo2, SkipBack, SkipForward, Shuffle, Gauge, Maximize,
-  PictureInPicture2, Settings, Keyboard, Copy, VolumeX, LayoutDashboard, LogOut, Ticket,
+  ListVideo, Plus, MessageCircle, Users, Captions, CircleUserRound, Play, Pause, Undo2, Redo2, SkipBack, SkipForward, Shuffle, Gauge,
+  Settings, Keyboard, Copy, VolumeX, LayoutDashboard, LogOut, Ticket,
 } from "lucide-react";
 
 let toastSeq = 0;
@@ -69,13 +67,11 @@ export default function Page() {
 function PageInner() {
   const { user, access, hydrated } = useAuth();
   const [myAvatarUrl, setMyAvatarUrl] = useLocalStorage<string | null>("stream_user_avatar", null);
-  const [subStyle, setSubStyle] = useLocalStorage<SubStyle>("stream_sub_style", DEFAULT_SUB_STYLE);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [panel, setPanel] = useState<PanelId | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [latestNotify, setLatestNotify] = useState<NotifyEvent | null>(null);
   const [unreadChat, setUnreadChat] = useState(0);
   const [voiceProfiles, setVoiceProfiles] = useState<{ name: string; avatarUrl: string | null; speaking: boolean }[]>([]);
   const [joinCode, setJoinCode] = useState<string | null>(null);
@@ -175,7 +171,6 @@ function PageInner() {
   const voice = useVoiceRoom(myName, myAvatarUrl);
 
   const handleNotify = (n: NotifyEvent) => {
-    setLatestNotify(n);
     const id = `t${toastSeq++}`;
     setToasts((prev) => [...prev, { id, text: notifyText(n, room.playlist) }]);
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
@@ -196,7 +191,7 @@ function PageInner() {
       .catch(() => {});
   }, []);
 
-  const { connected, room, presenceUsers, notifications, chatMessages, transcodeProgress, expectedPosition, requestControl, sendChat, setVoiceActive, reportWatching } =
+  const { connected, room, presenceUsers, notifications, chatMessages, expectedPosition, requestControl, sendChat, setVoiceActive } =
     useRoomState({ token: access, roomCode: roomCode ?? "", myName, canControl, myId: user?.id, onNotify: handleNotify, onKicked: handleKicked });
 
   // The two lounge couches. These are NOT mutually exclusive: the server sends
@@ -307,10 +302,6 @@ function PageInner() {
       case "shuffle":
         if (canManage) requestControl("shuffle", { on: !room.shuffle });
         break;
-      case "fullscreen":
-      case "pip":
-        window.dispatchEvent(new CustomEvent("player:cmd", { detail: action }));
-        break;
       case "queue":
       case "people":
       case "subs":
@@ -375,8 +366,6 @@ function PageInner() {
                 { type: "sep" },
               ] as MenuEntry[])
             : []),
-          { type: "item", id: "fullscreen", label: "تمام‌صفحه", icon: Maximize, hint: "F" },
-          { type: "item", id: "pip", label: "پخش شناور", icon: PictureInPicture2 },
           { type: "item", id: "subs", label: "زیرنویس و صدا", icon: Captions },
           { type: "sep" },
           { type: "item", id: "shortcuts", label: "میانبرها", icon: Keyboard, hint: "?" },
@@ -533,30 +522,22 @@ function PageInner() {
         )}
 
         <div className={phonePortrait ? "w-full px-2" : "relative z-10"} style={phonePortrait ? undefined : { width: screenWidth }}>
-          <Player
+          <Stage
             item={currentItem}
             playing={room.playing}
-            rate={room.rate}
-            expectedPosition={expectedPosition}
-            requestControl={requestControl}
-            transcodeProgress={transcodeProgress}
-            latestNotify={latestNotify}
-            myName={myName}
-            subStyle={subStyle}
-            canSpeed={canManage}
+            position={expectedPosition()}
             canControl={canManage}
-            onPlaybackState={reportWatching}
             canPrev={canManage && room.current_index !== null && (room.shuffle ? room.playlist.length > 1 : room.current_index > 0)}
             canNext={canManage && room.current_index !== null && (room.shuffle ? room.playlist.length > 1 : room.current_index < room.playlist.length - 1)}
+            onTogglePlay={() => {
+              if (canManage) requestControl(room.playing ? "pause" : "play", { at: expectedPosition() });
+            }}
+            onSeek={(to) => {
+              if (canManage) requestControl("seek", { to: Math.max(0, to) });
+            }}
             onPrev={() => canManage && room.current_index !== null && requestControl("select", { index: shuffleStep(room, -1) })}
             onNext={() => canManage && room.current_index !== null && requestControl("select", { index: shuffleStep(room, 1) })}
-            shuffle={room.shuffle}
-            canShuffle={canManage && room.playlist.length > 1}
-            onToggleShuffle={() => requestControl("shuffle", { on: !room.shuffle })}
             onGoToAdd={canAdd ? () => openPanel("add") : undefined}
-            onGoToSubStyle={() => openPanel("subs")}
-            onOpenShortcuts={() => setShortcutsOpen(true)}
-            onOpenSettings={() => setSettingsOpen(true)}
           />
         </div>
 
@@ -608,7 +589,6 @@ function PageInner() {
           <Playlist
             playlist={room.playlist}
             currentIndex={room.current_index}
-            transcodeProgress={transcodeProgress}
             myName={myName}
             onSelect={(index) => {
               if (canManage) {
@@ -637,15 +617,7 @@ function PageInner() {
             <MembersPanel myName={myName} canManage={canManage} onToast={pushToast} />
           </div>
         )}
-        {panel === "subs" && (
-          <div className="flex flex-col gap-8">
-            <SubAudioPanel playlist={room.playlist} myName={myName} canUpload={canManage} />
-            <div>
-              <h3 className="display mb-3 text-[18px] text-white">ظاهر زیرنویس</h3>
-              <SubStylePanel value={subStyle} onChange={setSubStyle} />
-            </div>
-          </div>
-        )}
+        {panel === "subs" && <SubAudioPanel playlist={room.playlist} myName={myName} canUpload={canManage} />}
         {panel === "me" && (
           <div className="flex flex-col gap-4">
             <Sidebar

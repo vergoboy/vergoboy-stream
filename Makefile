@@ -36,36 +36,21 @@ check-venv:
 test: check-venv ## Run the whole suite (unit + integration + socket)
 	$(PYTHON) -m pytest $(PYTEST)
 
-test-unit: check-venv ## Run only the fast unit suites (no ffmpeg, no database)
+test-unit: check-venv ## Run only the fast unit suites (no database)
 	$(PYTHON) -m pytest tests/unit $(PYTEST)
 
 test-socket: check-venv ## Run the live-socket suite (boots an embedded postgres + real server)
 	$(PYTHON) -m pytest tests/socket $(PYTEST)
 
-test-integration: check-venv ## Run the real-ffmpeg integration suites
+test-integration: check-venv ## Run tests marked "integration" (none today: nothing transcodes)
 	$(PYTHON) -m pytest tests/integration $(PYTEST)
 
-test-fast: check-venv ## Unit + socket suites, no real ffmpeg encodes
+test-fast: check-venv ## Unit + socket suites
 	$(PYTHON) -m pytest -m "not integration" $(PYTEST)
 
 coverage: check-venv ## Coverage report (the socket suite included)
 	$(PYTHON) -m coverage run -m pytest $(PYTEST)
 	$(PYTHON) -m coverage report -m
-
-## ── fixtures ─────────────────────────────────────────────────────────────────
-#
-# Goldens are regenerated from real code, never hand-edited. `--check` is the
-# gate: it re-derives every golden in a temp directory and diffs, so an
-# unintended argv change fails instead of being silently re-blessed.
-
-fixtures-argv: ## Re-capture the ffmpeg argv goldens into tests/fixtures/argv/
-	$(PYTHON) scripts/capture_argv_fixtures.py
-
-verify-argv: ## Fail if any ffmpeg argv golden is stale (does not rewrite them)
-	$(PYTHON) scripts/capture_argv_fixtures.py --check
-
-fixtures-probe: ## Re-capture the ffprobe JSON fixtures into tests/fixtures/probe/
-	$(PYTHON) scripts/capture_probe_fixtures.py
 
 ## ── packaging ────────────────────────────────────────────────────────────────
 #

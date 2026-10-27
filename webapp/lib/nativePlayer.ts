@@ -4,7 +4,7 @@
  * Everything here is a no-op outside the Tauri build, so callers can use it freely.
  */
 import { API_PREFIX, mediaUrl } from "./config";
-import { authFetch, getAccessToken } from "./auth";
+import { authFetch } from "./auth";
 import { isTauri } from "./tauri";
 
 type SyncInfo = { url: string; token: string; room: string; role: "controller" | "watcher" };
@@ -32,9 +32,9 @@ export async function fetchSyncInfo(): Promise<SyncInfo> {
   return data as SyncInfo;
 }
 
-export type NativeSource = { kind: "original" | "remote" | "hls"; url: string; expires_at: number | null };
+export type NativeSource = { kind: "original" | "remote" | "live"; url: string; expires_at: number | null };
 
-/** Original file (signed URL), the item's own source link (opt-in), or the HLS fallback. */
+/** The original file (signed URL) or the item's own source link (opt-in). Nothing is transcoded. */
 export async function fetchNativeSource(itemId: string): Promise<NativeSource> {
   const res = await authFetch(`${API_PREFIX}/items/${encodeURIComponent(itemId)}/native-source`);
   const data = await res.json().catch(() => ({}));
@@ -48,35 +48,30 @@ export function trace(message: string, level: "debug" | "info" | "warn" | "error
   call<void>("client_log", { level, message }).catch(() => {});
 }
 
-export async function startNativePlayer(opts: { itemId: string; fallbackUrl: string; title: string }): Promise<void> {
+export async function startNativePlayer(opts: { itemId: string; title: string }): Promise<void> {
   trace(`native player: requested item=${opts.itemId}`);
   const sync = await fetchSyncInfo().catch((e: unknown) => {
     trace(`native player: sync token failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
     throw e;
   });
   trace(`native player: sync token ok role=${sync.role}`);
-  // Prefer the original file. Any failure (feature not configured on the server yet, file already
-  // cleaned up, ...) falls back to the HLS the web player uses, so the button keeps working.
-  let url = opts.fallbackUrl;
-  let bearer: string | null = getAccessToken();
-  try {
-    const src = await fetchNativeSource(opts.itemId);
-    url = mediaUrl(src.url);
-    trace(`native player: source kind=${src.kind}`);
-    // original: the signed URL is the credential; remote: a third-party host. Never send our JWT to either.
-    if (src.kind !== "hls") bearer = null;
-  } catch {
-    /* keep the HLS fallback */
-  }
+  // The original file is the only source. There is no transcoded fallback: an item with no
+  // playable source reports that instead of handing mpv a URL that cannot work.
+  const src = await fetchNativeSource(opts.itemId).catch((e: unknown) => {
+    trace(`native player: no source: ${e instanceof Error ? e.message : String(e)}`, "warn");
+    throw e;
+  });
+  trace(`native player: source kind=${src.kind}`);
   await call<void>("native_player_start", {
     args: {
       syncUrl: sync.url,
       syncToken: sync.token,
       room: sync.room,
       role: sync.role,
-      mediaUrl: url,
+      mediaUrl: mediaUrl(src.url),
       title: opts.title,
-      accessToken: bearer ?? undefined,
+      // The signed URL is the credential; a remote source is a third-party host.
+      // Never send our JWT to either.
     },
   });
 }

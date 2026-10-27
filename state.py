@@ -12,7 +12,6 @@ import json
 import os
 import threading
 import time
-from urllib.parse import urlsplit
 
 from config import Config
 
@@ -238,69 +237,8 @@ class RoomState:
                 self.rate = d.get("rate", 1.0)
                 self.shuffle = bool(d.get("shuffle", False))
                 self.shuffle_order = d.get("shuffle_order", []) or []
-                self._migrate_playlist()
-                self._revalidate_missing_media()
         except Exception as e:
             print("[state] load error:", e)
-
-    def _migrate_playlist(self):
-        """Backfills fields that older app.py versions didn't write yet, so
-        state.json saved by a previous deploy doesn't confuse the current
-        code (or the frontend) into thinking already-finished renditions
-        are still being encoded. Safe to run every startup — a no-op once
-        everything has already been migrated once."""
-        changed = False
-        for item in self.playlist:
-            renditions = item.get("renditions")
-            if not renditions:
-                continue
-            item_done = item.get("status") in ("complete", "ready")
-            has_default = any(r.get("is_default") for r in renditions)
-            for i, r in enumerate(renditions):
-                if "status" not in r:
-                    r["status"] = "complete" if item_done else "pending"
-                    changed = True
-                if "vbr" not in r:
-                    r["vbr"] = r.get("vbr", "")
-                    changed = True
-                if "abr" not in r:
-                    r["abr"] = r.get("abr", "")
-                    changed = True
-                if "is_default" not in r:
-                    r["is_default"] = (not has_default and i == 0)
-                    changed = True
-        if changed:
-            self.save()
-
-    def _revalidate_missing_media(self):
-        """A 'complete' item whose encoded HLS output (and its source) have
-        vanished from disk can never play again — flag it as an error so the
-        frontend shows a friendly card instead of an endless spinner. An item
-        stays 'complete' when it could still be re-encoded (local source file
-        present, or a re-fetchable remote URL). Persists once, so the state
-        survives restarts."""
-        changed = False
-        for item in self.playlist:
-            if item.get("status") not in ("complete", "ready"):
-                continue
-            src = item.get("src") or ""
-            if not src.startswith(f"{Config.BASE_PATH}/media/hls/"):
-                continue
-            master = os.path.join(Config.HLS_DIR, str(item.get("id", "")), "master.m3u8")
-            if os.path.exists(master):
-                continue
-            source = item.get("_source") or ""
-            if os.path.isabs(source):
-                reencodable = os.path.exists(source)
-            else:
-                reencodable = urlsplit(source).scheme in ("http", "https")
-            if reencodable:
-                continue
-            item["status"] = "error"
-            item["error"] = "فایل این ویدیو حذف شده — دوباره اضافه‌ش کن."
-            changed = True
-        if changed:
-            self.save()
 
 
 class ChatState:

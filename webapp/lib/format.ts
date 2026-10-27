@@ -7,11 +7,6 @@ export function formatTime(sec: number | null | undefined): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
 }
 
-export function isHlsUrl(url: string | null | undefined): boolean {
-  if (!url) return false;
-  return /\.m3u8(\?.*)?$/i.test(url);
-}
-
 export function nameInitial(name: string | null | undefined): string {
   const s = (name || "?").trim();
   return s ? s[0].toUpperCase() : "?";
@@ -47,12 +42,6 @@ export function escapeHtml(s: string | null | undefined): string {
     '"': "&quot;",
     "'": "&#39;",
   }[c] as string));
-}
-
-export function levelLabelFromUrl(url: string | string[] | null | undefined): string | null {
-  const u = Array.isArray(url) ? url[0] : url;
-  const m = /\/([^/]+)\/index\.m3u8/.exec(u || "");
-  return m ? m[1] : null;
 }
 
 // Turns raw media filenames into short, readable display titles. Strips URL

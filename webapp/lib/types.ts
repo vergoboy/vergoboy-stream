@@ -40,18 +40,8 @@ export interface AdminUser extends AuthUser {
   own_room_id?: string | null;
 }
 
-export type ItemStatus = "idle" | "queued" | "encoding" | "ready" | "complete" | "error";
-export type RenditionStatus = "pending" | "queued" | "encoding" | "ready" | "complete" | "error";
-
-export interface Rendition {
-  label: string;
-  height: number;
-  vbr: string;
-  abr: string;
-  status: RenditionStatus | undefined;
-  is_default?: boolean;
-  error?: string;
-}
+/** Items are playable as soon as they exist: nothing is transcoded. "queued" = still downloading. */
+export type ItemStatus = "ready" | "error" | "queued";
 
 export interface Subtitle {
   id: string;
@@ -79,9 +69,6 @@ export interface PlaylistItem {
   added_at: number;
   status: ItemStatus;
   error?: string;
-  renditions?: Rendition[];
-  /** Facts about the ORIGINAL file (tracks, bit depth, HDR); set when the server probed it. */
-  media?: MediaSummary;
   yt_url?: string;
   key?: string;
 }
@@ -161,16 +148,6 @@ export interface NotifyEvent {
   [key: string]: unknown;
 }
 
-export interface TranscodeProgress {
-  id: string;
-  label: string;
-  pct: number;
-  encoded_seconds: number | null;
-  duration: number | null;
-  ready: boolean;
-  complete?: boolean;
-}
-
 export interface ChatMessage {
   id: string;
   name: string;
@@ -179,28 +156,6 @@ export interface ChatMessage {
   avatar_url: string | null;
   ts: number;
 }
-
-export interface SubStyle {
-  font: "Vazirmatn" | "JetBrainsMono" | "Tahoma" | "system-ui";
-  size: number;
-  color: string;
-  bg: string;
-  bgOpacity: number;
-  outline: boolean;
-  bold: boolean;
-  offset: number;
-}
-
-export const DEFAULT_SUB_STYLE: SubStyle = {
-  font: "Vazirmatn",
-  size: 28,
-  color: "#ffffff",
-  bg: "#000000",
-  bgOpacity: 60,
-  outline: true,
-  bold: false,
-  offset: 40,
-};
 
 export type VoiceQuality = "auto" | "high" | "medium" | "low";
 
@@ -296,20 +251,3 @@ export interface ArchiveFile {
   url: string;
 }
 
-export type MediaVideoTrack = {
-  index: number | null; codec: string; default: boolean; profile: string | null;
-  width: number | null; height: number | null; fps: number | null; pix_fmt: string | null;
-  bit_depth: number | null; hdr: "hdr10" | "hlg" | "dolby_vision" | null;
-};
-export type MediaAudioTrack = {
-  index: number | null; codec: string; default: boolean; lang: string; title: string;
-  channels: number | null; layout: string | null;
-};
-export type MediaSubtitleTrack = {
-  index: number | null; codec: string; default: boolean; lang: string; title: string; forced: boolean;
-  text: boolean; // false = bitmap (PGS/DVD), needs a player that renders images
-};
-export type MediaSummary = {
-  duration: number; container: string; size: number | null; bit_rate: number | null;
-  video: MediaVideoTrack[]; audio: MediaAudioTrack[]; subtitles: MediaSubtitleTrack[];
-};

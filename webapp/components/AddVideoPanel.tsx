@@ -65,7 +65,7 @@ function LinkForm({ myName, onArchiveLink }: { myName: string; onArchiveLink?: (
       onArchiveLink(u);
       return;
     }
-    if (/\.(mp4|webm|ogv|mov|m4v|mkv|m3u8)(\?|#|$)/i.test(u)) {
+    if (/\.(mp4|webm|ogv|mov|m4v|mkv)(\?|#|$)/i.test(u)) {
       setBusy(true);
       try {
         await api.addUrl(u, "", myName);
@@ -94,7 +94,7 @@ function LinkForm({ myName, onArchiveLink }: { myName: string; onArchiveLink?: (
 
   return (
     <form onSubmit={go} className="flex flex-col gap-2.5">
-      <label className={labelClass}>لینک یوتیوب، ویدیو یا m3u8 مستقیم، یا صفحهٔ دیجی‌موویز</label>
+      <label className={labelClass}>لینک یوتیوب، فایل ویدیو یا صفحهٔ دیجی‌موویز</label>
       <input className={inputClass} dir="ltr" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://" inputMode="url" />
       <button type="submit" disabled={busy || !url.trim()} className={primaryBtn} style={{ background: "linear-gradient(135deg, var(--color-amber-soft), var(--color-amber))", boxShadow: "var(--shadow-lamp)" }}>
         {busy ? <Loader2 className="mx-auto h-4 w-4 animate-spin" /> : "بریم جلو"}
@@ -204,7 +204,7 @@ function FileForm({ myName }: { myName: string }) {
         آپلود و افزودن به پلی‌لیست
       </button>
       <p className="text-[12.5px] leading-relaxed text-[color:var(--color-ink-dim)]">
-        فرمت‌های پشتیبانی‌شده: mp4، webm، ogg، mov، mkv — به‌صورت خودکار با کیفیت پیش‌فرض آماده پخش می‌شه؛ کیفیت‌های بیشتر on-demandان.
+        فرمت‌های پشتیبانی‌شده: mp4، webm، ogg، mov، mkv — همان فایل اصلی بدون تبدیل در پخش‌کننده‌ی دسکتاپ پخش می‌شود.
       </p>
     </form>
   );

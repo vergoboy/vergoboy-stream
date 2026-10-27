@@ -37,10 +37,10 @@ def _free_port() -> int:
 def site():
     d = tempfile.mkdtemp(prefix="w2g-nginx-")
     os.chmod(d, 0o755)  # mkdtemp is 0700; nginx workers run as another user and must traverse it
-    for sub in ("media/uploads", "media/hls/it1", "logs", "tmp"):
+    for sub in ("media/uploads", "media/subs", "logs", "tmp"):
         os.makedirs(f"{d}/{sub}")
     open(f"{d}/media/uploads/it1_src.mkv", "wb").write(BLOB)
-    open(f"{d}/media/hls/it1/master.m3u8", "w").write("#EXTM3U\n")
+    open(f"{d}/media/subs/x.vtt", "w").write("WEBVTT\n")
     for root, dirs, files in os.walk(d):
         for x in dirs: os.chmod(os.path.join(root, x), 0o755)
         for x in files: os.chmod(os.path.join(root, x), 0o644)
@@ -116,7 +116,7 @@ def test_wrong_secret_other_user_other_file_and_tampering_are_403(site):
 
 
 def test_path_traversal_does_not_escape(site):
-    for evil in ("/..%2fhls/it1/master.m3u8", "/%2e%2e/hls/it1/master.m3u8"):
+    for evil in ("/..%2fsubs/x.vtt", "/%2e%2e/subs/x.vtt"):
         assert get(site + BASE + evil + "?exp=4102444800&u=u-1&md5=abc")[0] in (400, 403, 404)
 
 
@@ -124,6 +124,6 @@ def test_the_public_raw_upload_hole_is_closed(site):
     assert get(site + "/w2g/media/uploads/it1_src.mkv")[0] == 404
 
 
-def test_hls_and_other_media_are_unchanged(site):
-    status, body, _ = get(site + "/w2g/media/hls/it1/master.m3u8")
-    assert (status, body) == (200, b"#EXTM3U\n")
+def test_other_media_is_unchanged(site):
+    status, body, _ = get(site + "/w2g/media/subs/x.vtt")
+    assert (status, body) == (200, b"WEBVTT\n")
