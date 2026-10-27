@@ -34,8 +34,14 @@ from archive_solver import fetch_clearance
 
 LOG = logging.getLogger("archive.auth")
 
+# How long to wait before re-checking a login that was answered by a page with
+# neither the logout link nor the login form.  The site's full-page cache can
+# serve that stale guest copy for about a second after the POST lands; the
+# retry is deliberately short and happens at most once.
+LOGIN_VERIFY_RETRY_S = 2.0
 
-def _is_cloudflare_challenge(response: requests.Response) -> bool:
+
+def is_cloudflare_challenge(response: requests.Response) -> bool:
     """True when Cloudflare's edge is challenging this client, not WordPress.
 
     Live capture (2026-10-16): the edge serves a "Just a moment..." page with
@@ -48,6 +54,12 @@ def _is_cloudflare_challenge(response: requests.Response) -> bool:
     if "challenge" in (response.headers.get("cf-mitigated") or "").lower():
         return True
     return "challenges.cloudflare.com" in response.text[:8192]
+
+
+# The scraper classifies its own responses with this same test, and the
+# 2026-10-16 tests import the original private name; keep it as an alias rather
+# than teach two spellings of one predicate.
+_is_cloudflare_challenge = is_cloudflare_challenge
 
 
 class AuthState(str, Enum):
@@ -303,8 +315,8 @@ class ArchiveAuthManager:
                       redirect_to=safe_target(response.url), elapsed_ms=started.ms)
             return False
         login_path = self.settings.login_url.rstrip("/")
-        if _is_cloudflare_challenge(response):
-            if self.settings.solver_url and not _after_clearance and self._adopt_clearance():
+        if is_cloudflare_challenge(response):
+            if self.settings.solver_url and not _after_clearance and self.adopt_clearance():
                 # The sidecar minted a clearance into this session: retry the
                 # check exactly once.  A second wall (still walled edge, or a
                 # provisional token the edge refuses) falls through to the
@@ -351,8 +363,12 @@ class ArchiveAuthManager:
         self._log("AUTH_CHECK_HTTP_ERROR", status=response.status_code)
         return None
 
-    def _adopt_clearance(self) -> bool:
+    def adopt_clearance(self) -> bool:
         """Ask the local solver sidecar for a clearance and load it into the session.
+
+        Public because the session check is not the only place the wall appears:
+        a scrape can meet it between checks, and a guest-mode instance (auth
+        disabled) never runs the check at all — both adopt it from here.
 
         The cleared browser hands over its ``cf_clearance`` cookies together
         with the User-Agent they are bound to; both are adopted atomically so
@@ -541,6 +557,17 @@ class ArchiveAuthManager:
                 return self._finish_authenticated()
             if verified is None:
                 raise requests.HTTPError("could not verify the login")
+            # A marker-less page immediately after a successful POST is usually
+            # the site's LiteSpeed cache still serving the guest variant of the
+            # same URL: on a healthy login the identical page answers WITH the
+            # logout link a moment later (observed live 2026-10-26 — first
+            # post-login check marker-less, next one authenticated).  Treating
+            # that as a rejection cost a 5-minute cooldown and repeated forever
+            # on /w2g, so one delayed re-check separates a cache hiccup from a
+            # genuinely refused login.
+            self._sleep(LOGIN_VERIFY_RETRY_S)
+            if self.check() is True:
+                return self._finish_authenticated()
             return _Outcome.REJECTED
         self._log("AUTH_LOGIN_RETRY_LIMIT", posts=self._login_posts, fetches=fetch_cap)
         return _Outcome.REJECTED

@@ -8,6 +8,11 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/opt/stream
+# app_logging.py resolves $STREAM_LOG_DIR first; without it it falls back to
+# $XDG_STATE_HOME/vergoboy-stream/logs and then $HOME/.local/state/... — for
+# www-data that is /var/www/.local, which does not exist and must not be
+# created (ReadWritePaths scopes writes to /opt/stream anyway).
+Environment="STREAM_LOG_DIR=/opt/stream/data/logs"
 Environment="STREAM_ENV=production"
 Environment="STREAM_HOST=127.0.0.1"
 Environment="STREAM_PORT=8801"

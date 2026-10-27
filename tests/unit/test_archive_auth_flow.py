@@ -48,6 +48,41 @@ def test_successful_login_verifies_account_and_persists(tmp_path):
     assert list(saved) == ["wordpress_logged_in"]
 
 
+def test_one_markerless_page_after_the_post_is_rechecked_not_rejected(tmp_path):
+    """A cached guest page right after a good login is not a rejection.
+
+    Live 2026-10-26: /w2g re-logged in every five minutes for three days because
+    the first check after the POST got the site's cached page without the logout
+    link, which was read as `login_rejected` (cooldown, then repeat). The same
+    session answered authenticated on the next request.
+    """
+    manager, site = make(tmp_path)
+    answers = [False, False, True]      # pre-login, post-login (stale), re-check
+    calls: list[int] = []
+
+    def fake_check(**_kwargs):
+        calls.append(1)
+        answer = answers.pop(0) if answers else True
+        if answer:                                  # what a real check() leaves behind
+            manager._transition(AuthState.AUTHENTICATED, "marker")
+        return answer
+
+    manager.check = fake_check
+    assert manager.ensure_authenticated() is True
+    assert manager.state is AuthState.AUTHENTICATED
+    assert manager.last_check_error is None        # never "login_rejected"
+    assert site.posts == 1                         # one login, no relogin loop
+
+
+def test_a_genuinely_rejected_login_still_reports_rejected(tmp_path):
+    manager, site = make(tmp_path)
+    answers = [False, False, False]
+    manager.check = lambda **_kwargs: answers.pop(0)
+    assert manager.ensure_authenticated() is False
+    assert manager.state is AuthState.AUTH_FAILED
+    assert site.posts == 1
+
+
 def test_post_carries_form_fields_current_key_and_referer(tmp_path):
     manager, site = make(tmp_path)
     assert manager.ensure_authenticated()

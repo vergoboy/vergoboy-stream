@@ -32,6 +32,31 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
+# This host sees intermittent rustc SIGSEGVs (two different toolchains, random
+# crates, no compiler diagnostic — see the toolchain notes in
+# packaging/arch/PKGBUILD's build()). A crash aborts the whole build step with
+# nothing wrong in the source, so each Rust build step gets exactly one retry.
+# Bounded on purpose: a real compile error costs one wasted attempt and then
+# fails loudly with the diagnosis spelled out.
+retry_once() {  # retry_once <step description> <command...>
+  local what="$1"
+  shift
+  if "$@"; then
+    return 0
+  fi
+  warn "$what failed — retrying once (this machine's rustc crashes intermittently; a real compile error will fail again right now)."
+  warn "  if it fails again, check the machine rather than the code: dmesg | grep -iE 'segfault|general protection', and memtest86+"
+  if ! "$@"; then
+    die "$what failed twice — stopping."
+  fi
+}
+
+# Offline first (makepkg/--offline hosts), plain build as fallback — the same
+# expression build-final.sh used inline before retry_once() wrapped it.
+w2g_cargo() {  # w2g_cargo <dir>
+  (cd "$1" && cargo build --release --offline 2>/dev/null || cargo build --release)
+}
+
 usage() {
   cat <<'USAGE'
 vergoboy — build the FINAL desktop client and package
@@ -75,28 +100,50 @@ fi
 
 say "final build: instance='$INSTANCE', API=$API_ORIGIN, HEAD $head_short$dirty"
 
-# Build w2g-mpv artifacts if present
+# Stage the w2g-mpv artifacts the PKGBUILD installs as /usr/bin/{w2g,w2g.so,
+# w2g-server,w2g-token}. dist/ is gitignored, so the package reads these from
+# this checkout (${startdir}/dist), never from makepkg's clone of HEAD — and
+# because the directory survives between runs, it is rebuilt from scratch here:
+# a stale binary from an older w2g-mpv build would otherwise be shipped as if it
+# were current.
+DIST="$ROOT/packaging/arch/dist"
 if [ -d "$W2G_MPV_ROOT" ]; then
   say "building w2g-mpv components"
   if [ -x "$W2G_MPV_ROOT/scripts/build-w2g.sh" ]; then
     (cd "$W2G_MPV_ROOT" && bash scripts/build-w2g.sh)
   fi
-  (cd "$W2G_MPV_ROOT/w2g/app" && cargo build --release --offline 2>/dev/null || cargo build --release)
-  (cd "$W2G_MPV_ROOT/w2g/server" && cargo build --release --offline 2>/dev/null || cargo build --release)
-  mkdir -p "$ROOT/packaging/arch/dist"
-  cp -f "$W2G_MPV_ROOT/build/w2g/w2g.so" "$ROOT/packaging/arch/dist/" 2>/dev/null || true
-  cp -f "$W2G_MPV_ROOT/w2g/app/target/release/w2g" "$ROOT/packaging/arch/dist/" 2>/dev/null || true
-  cp -f "$W2G_MPV_ROOT/w2g/server/target/release/w2g-server" "$ROOT/packaging/arch/dist/" 2>/dev/null || true
-  cp -f "$W2G_MPV_ROOT/w2g/server/target/release/w2g-token" "$ROOT/packaging/arch/dist/" 2>/dev/null || true
-  chmod +x "$ROOT/packaging/arch/dist/w2g" "$ROOT/packaging/arch/dist/w2g-server" "$ROOT/packaging/arch/dist/w2g-token" 2>/dev/null || true
+  retry_once "w2g-mpv app build"     w2g_cargo "$W2G_MPV_ROOT/w2g/app"
+  retry_once "w2g-mpv server build"  w2g_cargo "$W2G_MPV_ROOT/w2g/server"
+
+  rm -rf "$DIST"
+  mkdir -p "$DIST"
+  missing=""
+  stage() {  # stage <built-path> <installed-name>
+    if [ -f "$1" ]; then
+      install -Dm755 "$1" "$DIST/$2"
+    else
+      missing="$missing $2"
+    fi
+  }
+  stage "$W2G_MPV_ROOT/build/w2g/w2g.so"                     w2g.so
+  stage "$W2G_MPV_ROOT/w2g/app/target/release/w2g"           w2g
+  stage "$W2G_MPV_ROOT/w2g/server/target/release/w2g-server" w2g-server
+  stage "$W2G_MPV_ROOT/w2g/server/target/release/w2g-token"  w2g-token
+  # Previously every copy was `|| true` and the "staged" line printed anyway, so
+  # a w2g-mpv build that produced nothing still yielded a package silently
+  # missing all four binaries. Fail before the long Tauri build instead.
+  [ -z "$missing" ] || die "w2g-mpv did not produce:$missing (under $W2G_MPV_ROOT) — fix that build, or remove $W2G_MPV_ROOT to package without these components"
   say "staged w2g-mpv artifacts to packaging/arch/dist/"
+elif [ "$BUILD_PACKAGE" -eq 1 ]; then
+  warn "no $W2G_MPV_ROOT — the package will not contain w2g/w2g.so/w2g-server/w2g-token"
 fi
 
 # Build binary
 if [ "$BUILD_BINARY" -eq 1 ]; then
   native_args=(--instance "$INSTANCE")
   [ "$REBUILD_UI" -eq 1 ] && native_args+=(--rebuild-ui)
-  "$ROOT/scripts/build-native.sh" "${native_args[@]}"
+  retry_once "Tauri desktop binary (scripts/build-native.sh)" \
+    "$ROOT/scripts/build-native.sh" "${native_args[@]}"
 fi
 
 BIN="$ROOT/webapp/src-tauri/target/release/vergoboy-stream"
@@ -107,7 +154,8 @@ if [ "$BUILD_PACKAGE" -eq 1 ]; then
   [ "$REBUILD_UI" -eq 1 ] && arch_args+=(--rebuild-ui)
   [ "$CLEAN_FIRST" -eq 1 ] && arch_args+=(--clean-first)
   [ "$INSTALL" -eq 1 ] && arch_args+=(--install)
-  "$ROOT/build-arch.sh" "${arch_args[@]}"
+  retry_once "Arch package (build-arch.sh → makepkg)" \
+    "$ROOT/build-arch.sh" "${arch_args[@]}"
 fi
 
 PKG="$(ls -t "$PKGDIR/vergoboy-$INSTANCE-"*.pkg.tar.zst 2>/dev/null | grep -v -- '-debug-' | head -1 || true)"
@@ -125,8 +173,13 @@ if [ -n "$PKG" ]; then
   printf '               size %s  sha256 %s…\n' "$(size_of "$PKG")" "$(hash_of "$PKG")"
 fi
 
-for f in "$ROOT/packaging/arch/dist"/*; do
-  [ -e "$f" ] && printf '    staged   %s (size %s)\n' "$f" "$(size_of "$f")"
+# `if`, not `[ -e … ] && printf`: with an empty (or absent) dist/ the glob
+# stays literal, and as the last command of the script that failed test would
+# be build-final.sh's exit status — a green build reporting failure.
+for f in "$DIST"/*; do
+  if [ -e "$f" ]; then
+    printf '    staged   %s (size %s)\n' "$f" "$(size_of "$f")"
+  fi
 done
 
 if [ -n "$COPY_OUT" ]; then
@@ -141,6 +194,6 @@ if [ -n "$COPY_OUT" ]; then
     cp -f "$PKG" "$COPY_OUT/"
     (cd "$COPY_OUT" && sha256sum "$(basename "$PKG")" >> "$sums")
   fi
-  cp -f "$ROOT/packaging/arch/dist"/* "$COPY_OUT/" 2>/dev/null || true
+  cp -f "$DIST"/* "$COPY_OUT/" 2>/dev/null || true
   say "copied artifacts to $COPY_OUT"
 fi

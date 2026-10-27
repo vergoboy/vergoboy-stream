@@ -3,7 +3,7 @@
 #
 #   ./scripts/build-native.sh                build the binary, verify it, print its path
 #   ./scripts/build-native.sh --rebuild-ui   rebuild webapp/out even if it can be reused
-#   ./scripts/build-native.sh --instance N   instance the client talks to (default: w2g)
+#   ./scripts/build-native.sh --instance N   instance the client talks to (default: stream)
 #   ./scripts/build-native.sh --debug        debug profile instead of release
 #   ./scripts/build-native.sh --run          exec the binary when the build is done
 #
@@ -29,9 +29,10 @@ PKGDIR="$ROOT/packaging/arch"
 OUTDIR="$ROOT/webapp/out"
 OUT_INSTANCE="$ROOT/webapp/.out-instance"
 
-# The native client is the "w2g" one (https://vergoboy.ir/w2g). Override with
-# --instance / INSTANCE for another backend.
-INSTANCE="${INSTANCE:-w2g}"
+# Which backend the bundled client talks to. "stream" (default) is the original
+# instance at https://vergoboy.ir/stream — the same default build-arch.sh uses.
+# Override with --instance / INSTANCE, e.g. --instance w2g.
+INSTANCE="${INSTANCE:-stream}"
 
 # Same default and same reasoning as build-arch.sh: the origin is baked into the
 # static export. Tauri's CSP also lists it, but CSP is taken from the working
@@ -61,12 +62,13 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# Keep in sync with build-arch.sh: "stream" is the historical layout at the
-# domain root, every other instance is served under /<instance>.
-case "$INSTANCE" in
-  stream) API_BASE_PATH="${API_BASE_PATH-}" ;;
-  *)      API_BASE_PATH="${API_BASE_PATH:-/$INSTANCE}" ;;
-esac
+# Keep in sync with build-arch.sh. Every instance — "stream" included — is
+# served under /<instance>: nginx proxies /stream/api/ to the backend mounted
+# at /stream, and the domain root reaches nothing at all. The old "stream →
+# domain root" mapping is the "cannot connect" bug recorded in
+# docs/FOLLOWUPS.md. An API_BASE_PATH set in the environment still wins,
+# including an explicit empty value for a genuinely root-mounted backend.
+API_BASE_PATH="${API_BASE_PATH-/$INSTANCE}"
 
 # ── preflight ────────────────────────────────────────────────────────────────
 
@@ -101,6 +103,31 @@ command -v cargo >/dev/null 2>&1 || die "cargo not found on PATH"
 command -v node  >/dev/null 2>&1 || die "node not found — the export and the Tauri CLI need Node.js"
 command -v npm   >/dev/null 2>&1 || die "npm not found"
 [ -d "$ROOT/webapp/node_modules" ] || die "webapp/node_modules missing — run: cd webapp && npm ci"
+
+# Pin the toolchain the PKGBUILD pins, before anything reports a version.
+# Since the rustc 1.99.0 update (Oct 2026) an opt-level-3 release build of
+# vergoboy_stream_lib intermittently SIGSEGVs *inside rustc/LLVM itself* —
+# reproduced 2026-10-25 in llvm::Module::dropAllReferences / LLVMContextDispose
+# while compiling this very crate — and 1.97.1 (the toolchain that built every
+# package before Oct 4) does not. RUST_MIN_STACK and CARGO_BUILD_JOBS below do
+# not address it: the fault is far below the crashing thread's stack pointer, so
+# rustc's own "increase RUST_MIN_STACK" hint is generic noise, and the PKGBUILD
+# says the same. The pin is skipped (with a warning) when that toolchain is not
+# installed, so a machine without it still builds — just less reliably.
+PIN_TOOLCHAIN="${PIN_TOOLCHAIN:-1.97.1}"
+if command -v rustup >/dev/null 2>&1; then
+  _toolchains="$(rustup toolchain list 2>/dev/null || true)"
+  case "$_toolchains" in
+    *"${PIN_TOOLCHAIN}-x86_64"*)
+      export RUSTUP_TOOLCHAIN="$PIN_TOOLCHAIN"
+      ;;
+    *)
+      warn "rustup toolchain $PIN_TOOLCHAIN is not installed — building with the default"
+      warn "($(rustc --version 2>/dev/null || echo '?')), which intermittently SIGSEGVs in rustc."
+      warn "Install it with: rustup toolchain install $PIN_TOOLCHAIN"
+      ;;
+  esac
+fi
 
 say "toolchain: $(rustc --version) / $(cargo --version)"
 
@@ -186,6 +213,8 @@ fi
 # a 16-way parallel opt-level-3 release build intermittently SIGSEGVs inside
 # rustc (SEGV_MAPERR while decoding optimized_mir) because the codegen workers
 # oversubscribe RAM; the same graph compiles cleanly capped. Both are cheap.
+# The toolchain pin above is the other half: this crash (LLVM teardown) is not
+# the oversubscription one, and neither mitigation alone covers both.
 export CARGO_BUILD_JOBS=4
 export RUST_MIN_STACK=33554432
 ulimit -s 65536 2>/dev/null || true

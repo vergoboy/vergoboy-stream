@@ -47,6 +47,22 @@ def test_search_reports_the_challenge_kind_not_session_expired(tmp_path):
     assert exc.value.kind == archive_scraper.KIND_SITE_CHALLENGE
 
 
+def test_guest_mode_reports_the_challenge_kind_not_http_error(tmp_path):
+    """AUTH_ENABLED=false must say "wall", not «درخواست را رد کرد».
+
+    Live 2026-10-26 on the /stream instance: no session check runs when auth is
+    disabled, so the wall reached the scrape unclassified and every search
+    reported the message that belongs to a genuine 4xx from WordPress.
+    """
+    site = FakeDigimoviez(cloudflare_wall=True)
+    manager, _ = make(tmp_path, site, enabled=False)
+    collector = DigimoviezMovieCollector(BASE, manager, connect_timeout=1, read_timeout=1,
+                                         total_timeout=5, retries=0)
+    with pytest.raises(archive_scraper.ArchiveRequestError) as exc:
+        collector._search_ajax("dune", "movie")
+    assert exc.value.kind == archive_scraper.KIND_SITE_CHALLENGE
+
+
 def test_api_message_is_503_retry_later_and_offers_no_manual_import():
     """Importing a browser session cannot help: the edge blocks before WordPress."""
     status, _message = app._ARCHIVE_ERRORS[archive_scraper.KIND_SITE_CHALLENGE]

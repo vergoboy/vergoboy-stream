@@ -172,8 +172,29 @@ package() {
   # Sourced from the clone, so the file only exists once LICENSE is committed.
   install -Dm644 "LICENSE" \
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-  # Install w2g-mpv components if staged
-  for f in packaging/arch/dist/w2g packaging/arch/dist/w2g.so packaging/arch/dist/w2g-server packaging/arch/dist/w2g-token; do
-    [ -f "$f" ] && install -Dm755 "$f" "${pkgdir}/usr/bin/$(basename "$f")"
-  done
+  # w2g-mpv components staged by ../build-final.sh into packaging/arch/dist/.
+  # Only the w2g package may ship them: pacman refuses two packages owning one
+  # path, and /usr/bin/w2g{,.so,-server,-token} is already owned by the installed
+  # vergoboy-w2g — a vergoboy-stream carrying them too dies at `pacman -U` with
+  # "exists in filesystem (owned by vergoboy-w2g)". Every other instance skips
+  # them; its desktop client resolves W2G_PLUGIN as a sibling of its own binary
+  # (native_player.rs), so its native player reports unavailable unless
+  # W2G_PLUGIN points elsewhere.
+  # dist/ is gitignored, so read from ${startdir} (this checkout), exactly like
+  # webapp/out above. A missing file is skipped rather than fatal: build-arch.sh
+  # alone stages nothing, and a bare makepkg must still build. The loop must
+  # never end on a failed test either — package()'s exit status is what makepkg
+  # reports as "A failure occurred in package().", with no reason attached.
+  if [ "$_instance" = "w2g" ]; then
+    local _staged
+    for _staged in w2g w2g.so w2g-server w2g-token; do
+      if [ -f "${startdir}/dist/${_staged}" ]; then
+        install -Dm755 "${startdir}/dist/${_staged}" "${pkgdir}/usr/bin/${_staged}"
+      else
+        echo "  -> not staged, skipping usr/bin/${_staged} (packaging/arch/dist/${_staged} absent)"
+      fi
+    done
+  else
+    echo "  -> instance '$_instance': w2g-mpv binaries ship in vergoboy-w2g only, skipped"
+  fi
 }

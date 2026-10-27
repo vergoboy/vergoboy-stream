@@ -24,8 +24,8 @@ from typing import Any
 
 import requests
 
-from archive_auth import ArchiveAuthManager, AuthSettings
-from archive_filters import SearchFilters, build_search_request
+from archive_auth import ArchiveAuthManager, AuthSettings, is_cloudflare_challenge
+from archive_filters import SearchFilters
 from archive_network import ArchiveProxyConfigurationError
 from archive_logging import event as archive_event, redact, safe_target, timer as ArchiveTimer
 
@@ -84,7 +84,11 @@ CARD_CLASSES = ("item_small_loop", "item_dubbled", CARD_CLASS, "text_adv_se")
 # WP 7.1.2 update retired ``ajaxsearch`` for guests — it answers 400 with body
 # "0" from any network — while its own header now posts ``ajaxsearchheader``,
 # which honours the same free-text term (extra payload fields are ignored).
+# Two actions answer a free-text term.  ``ajaxsearch`` needs a session (guests
+# get 400 "0") and returns the fuller set; ``ajaxsearchheader`` is what the
+# site's own header posts and works for guests, so it is the fallback.
 SEARCH_AJAX_ACTION = "ajaxsearchheader"
+SEARCH_AJAX_ACTION_FULL = "ajaxsearch"
 PAGINATION_CLASS = "alphapageNavi"
 MAX_SEARCH_PAGES = 3
 _TITLE_PREFIX = re.compile(r"^دانلود\s+(?:فیلم|سریال)\s+")
@@ -612,6 +616,36 @@ def _auth_failure(auth: ArchiveAuthManager) -> tuple[str, str]:
     return KIND_AUTH_UNAVAILABLE, "archive authentication is unavailable"
 
 
+def _cards_matching(results: list[dict[str, Any]], filters: SearchFilters) -> list[dict[str, Any]]:
+    """Keep only the cards the filters describe.
+
+    The site's own advanced search cannot do this for us: every
+    ``?advanced_search=on&min_release=…`` combination answers the same
+    front-page cards (verified 2026-10-26 — a 1990-1995 request returned
+    Spider-Man 2026 and co.), and its AJAX actions ignore the advanced fields
+    entirely.  A year filter that returns 2026 titles is worse than none, so
+    the facets a card actually carries are applied here.  A card without a
+    usable value is kept: hiding real matches because a label is missing would
+    be the same lie in the other direction.
+    """
+    def as_number(value: Any) -> float | None:
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    kept: list[dict[str, Any]] = []
+    for card in results:
+        year = as_number(card.get("year"))
+        rating = as_number(card.get("rating"))
+        if year is not None and not filters.year_min <= int(year) <= filters.year_max:
+            continue
+        if rating is not None and not filters.rating_min <= rating <= filters.rating_max:
+            continue
+        kept.append(card)
+    return kept
+
+
 def _cards_from(page: str, base_url: str, seen: set[str], results: list[dict[str, Any]]) -> None:
     for block in _card_blocks(page):
         card = _parse_search_card(block, base_url)
@@ -650,15 +684,38 @@ class DigimoviezMovieCollector:
             if self.auth.settings.enabled and not self.auth.ensure_authenticated():
                 raise ArchiveRequestError(*_auth_failure(self.auth))
             try:
-                # No User-Agent here: it comes from the session, which carries
-                # the UA the adopted cf_clearance is bound to.  An explicit UA
-                # would override it and the edge would wall the request again.
-                response = self.session.request(request["method"], request["url"],
-                    timeout=(self.connect_timeout, self.read_timeout), headers={
-                        "Accept-Language": "fa,en;q=0.8",
-                        **({"X-Requested-With": "XMLHttpRequest",
-                            "Referer": self.base_url + "/"} if request.get("ajax") else {}),
-                    }, data=request.get("data"))
+                # At most two sends per attempt: the request itself, and — if the
+                # edge walls it and a clearance sidecar is configured — one free
+                # resend carrying the cookie pair the sidecar minted.  Using an
+                # inner loop keeps that resend out of the retry budget below,
+                # which exists for transport failures.
+                for clearance_attempt in range(2):
+                    # No User-Agent here: it comes from the session, which carries
+                    # the UA the adopted cf_clearance is bound to.  An explicit UA
+                    # would override it and the edge would wall the request again.
+                    response = self.session.request(request["method"], request["url"],
+                        timeout=(self.connect_timeout, self.read_timeout), headers={
+                            "Accept-Language": "fa,en;q=0.8",
+                            **({"X-Requested-With": "XMLHttpRequest",
+                                "Referer": self.base_url + "/"} if request.get("ajax") else {}),
+                        }, data=request.get("data"))
+                    if not is_cloudflare_challenge(response):
+                        break
+                    if clearance_attempt == 0 and self.auth.settings.solver_url \
+                            and self.auth.adopt_clearance():
+                        continue
+                    # The edge answered, WordPress never saw the request: the
+                    # same "Just a moment..." page is served for every endpoint at
+                    # once, so it says nothing about this request.  Reported as
+                    # its own kind — reading the 403 as a plain 4xx produced
+                    # «دیجی‌موویز درخواست را رد کرد» on a guest-mode instance
+                    # (live 2026-10-26), naming neither the cause nor the remedy.
+                    # Auth-enabled instances usually meet the wall in their
+                    # session check first; a scrape can hit it between checks, so
+                    # both paths adopt from here.
+                    raise ArchiveRequestError(
+                        KIND_SITE_CHALLENGE,
+                        f"archive served a Cloudflare challenge (HTTP {response.status_code})")
                 if response.status_code >= 500:
                     raise requests.HTTPError(response.status_code)
                 if response.status_code >= 400:
@@ -691,43 +748,72 @@ class DigimoviezMovieCollector:
             time.sleep(min(delay, max(0, deadline - time.monotonic())))
         raise ArchiveRequestError(KIND_NETWORK_ERROR)
 
-    def _search_ajax(self, query: str, kind: str | None) -> list[dict[str, Any]]:
-        """Free-text search through the endpoint the site's own header uses.
+    def warm_clearance(self) -> bool:
+        """Mint and adopt a clearance before a user request has to wait for one.
 
-        The ``?s=`` page is not an alternative: it renders the same "dubbed"
-        listing whatever the query is, so filtering has to go through AJAX.
+        Blocking on purpose — the caller runs it in a background greenlet at
+        boot.  A solve costs ~80 s in the sidecar's browser, and no search
+        request may spend that: the web client aborts at 45 s and reports
+        «سرور پاسخ نداد» (live 2026-10-26).  Doing it here means the first
+        search usually meets an adopted cookie pair, and an inline adoption
+        only happens if Cloudflare revokes the clearance mid-life.
         """
-        payload = self._request({"method": "POST", "url": f"{self.base_url}/wp-admin/admin-ajax.php",
-                                 "ajax": True,
-                                 "data": {"action": SEARCH_AJAX_ACTION,
-                                          "type": kind or "movie", "s": query}})
-        results: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        _cards_from(_unwrap_ajax_payload(payload), self.base_url, seen, results)
-        return results
+        if not self.auth.settings.solver_url:
+            return False
+        try:
+            response = self.session.get(self.base_url + "/",
+                                        timeout=(self.connect_timeout, self.read_timeout),
+                                        headers={"Accept-Language": "fa,en;q=0.8"})
+        except requests.RequestException as exc:
+            LOG.info("CLEARANCE_WARM_FAILED error=%s", type(exc).__name__)
+            return False
+        if not is_cloudflare_challenge(response):
+            return False
+        adopted = self.auth.adopt_clearance()
+        LOG.info("CLEARANCE_WARM%s", "ED" if adopted else "_FAILED")
+        return adopted
+
+    def _search_ajax(self, query: str, kind: str | None) -> list[dict[str, Any]]:
+        """Free-text search through the site's AJAX actions, one fallback deep.
+
+        Neither the ``?s=`` page nor the advanced-search GET is an alternative:
+        both render a fixed listing whatever is asked.  ``ajaxsearch`` is tried
+        first (fuller, needs a session), then the header action the site posts
+        for guests.
+        """
+        last_error: ArchiveRequestError | None = None
+        for action in (SEARCH_AJAX_ACTION_FULL, SEARCH_AJAX_ACTION):
+            try:
+                payload = self._request({"method": "POST", "url": f"{self.base_url}/wp-admin/admin-ajax.php",
+                                         "ajax": True,
+                                         "data": {"action": action,
+                                                  "type": kind or "movie", "s": query}})
+            except ArchiveRequestError as exc:
+                last_error = exc
+                continue
+            results: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            _cards_from(_unwrap_ajax_payload(payload), self.base_url, seen, results)
+            return results
+        raise last_error or ArchiveRequestError(KIND_PARSE_ERROR, "archive search failed")
 
     def search(self, filters: SearchFilters, max_pages: int = MAX_SEARCH_PAGES) -> list[dict[str, Any]]:
-        request = build_search_request(filters, self.base_url)
-        archive_event("filters", "search_request", filters=request["params"], **safe_target(request["url"]))
-        results: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        pages = 0
-        if filters.query:
-            # A text query is answered by AJAX; the page path below would only
-            # add the unfiltered listing.
-            results = self._search_ajax(filters.query, filters.type)
-            seen.update(card["url"] for card in results)
-            pages = 1
-        url = request["url"] if not filters.query else None
-        while url and pages < max(1, max_pages):
-            page = self._request({"method": "GET", "url": url})
-            pages += 1
-            _cards_from(page, self.base_url, seen, results)
-            url = _next_page_url(page, self.base_url)
-        archive_event("collector", "search_parsed", result_count=len(results), pages_fetched=pages,
-                      titles=[result["title"][:80] for result in results[:3]],
-                      pagination="bounded" if pages > 1 else "single_page")
-        return results
+        """Search, or browse the newest titles when the term is empty.
+
+        Everything goes through AJAX: the advanced-search GET returns the
+        front page's featured cards for every parameter combination, so it can
+        neither search nor filter (verified 2026-10-26).  An empty term is not
+        a dead end either — the same action answers the latest titles, which is
+        what browsing with filters alone needs.
+        """
+        archive_event("filters", "search_request", filters=filters.query_params(),
+                      mode="query" if filters.query else "browse")
+        results = self._search_ajax(filters.query or "", filters.type)
+        matches = _cards_matching(results, filters)
+        archive_event("collector", "search_parsed", result_count=len(results), returned=len(matches),
+                      filters=filters.query_params(),
+                      titles=[result["title"][:80] for result in matches[:3]])
+        return matches
 
     def title(self, url: str) -> dict[str, Any]:
         if not url.startswith(self.base_url + "/"):
