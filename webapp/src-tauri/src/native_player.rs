@@ -2,7 +2,8 @@
 //!
 //! The web UI already owns login, room and media state, so it hands over everything the player
 //! needs (sync URL/token, media URL). This module only spawns and watches the process; mpv and the
-//! plugin are explicit paths (`W2G_MPV` / `W2G_PLUGIN`, else next to this executable) — never a PATH lookup.
+//! plugin are explicit paths (`W2G_MPV` / `W2G_PLUGIN`, else the package's own directory
+//! `/usr/lib/<executable name>/`, else next to this executable) — never a PATH lookup.
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -31,10 +32,55 @@ fn sibling(name: &str) -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name))).unwrap_or_else(|| name.into())
 }
 
-fn resolve(var: &str, unix: &str, windows: &str) -> PathBuf {
-    std::env::var(var).map(PathBuf::from).unwrap_or_else(|_| sibling(if cfg!(windows) { windows } else { unix }))
+/// Where the player is looked for, in order, for an executable at `exe`.
+///
+/// The package's own directory comes first: the client installs as
+/// `/usr/bin/vergoboy-<instance>` and its mpv + `w2g.so` as
+/// `/usr/lib/vergoboy-<instance>/`, so one pacman package provides the whole
+/// player and two instances (or the distro's own `/usr/bin/mpv`) never fight
+/// over a path. The executable's own directory stays as the fallback, which is
+/// how a working-tree build (`target/release/`) and a system mpv are found.
+fn player_dirs(exe: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let (Some(bin), Some(stem)) = (exe.parent(), exe.file_name()) {
+        if let Some(prefix) = bin.parent() {
+            dirs.push(prefix.join("lib").join(stem));
+        }
+        dirs.push(bin.to_path_buf());
+    }
+    dirs
 }
 
+/// Pure: what `resolve` decides for an executable at `exe`. Split out so the
+/// lookup order can be tested without moving the test binary around.
+fn resolve_at(exe: &Path, name: &str) -> PathBuf {
+    let dirs = player_dirs(exe);
+    for dir in &dirs {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    // Nothing there yet: name the path a packaged install would use, so the
+    // failure message points at the file that is actually missing.
+    dirs.last().map(|d| d.join(name)).unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// `W2G_MPV` / `W2G_PLUGIN` win when set and non-blank (a blank override is a
+/// mistake, not a path); otherwise the first of [`player_dirs`] that exists.
+fn resolve(var: &str, unix: &str, windows: &str) -> PathBuf {
+    let name = if cfg!(windows) { windows } else { unix };
+    match std::env::var(var) {
+        Ok(explicit) if !explicit.trim().is_empty() => PathBuf::from(explicit),
+        _ => {
+            let exe = std::env::current_exe().unwrap_or_else(|_| sibling(name));
+            resolve_at(&exe, name)
+        }
+    }
+}
+
+/// The player this app may spawn: the mpv fork and the sync plugin that talks to
+/// the room's sync server (both inside this app's package).
 pub fn paths() -> (PathBuf, PathBuf) {
     (resolve("W2G_MPV", "mpv", "mpv.exe"), resolve("W2G_PLUGIN", "w2g.so", "w2g.dll"))
 }
@@ -184,6 +230,32 @@ mod tests {
     fn client_log_accepts_any_input_without_panicking() {
         client_log("info".into(), "a\nb\x1b[31m".repeat(1000));
         client_log("nonsense".into(), String::new());
+    }
+
+    #[test]
+    fn the_package_directory_is_searched_before_the_executable_directory() {
+        let dirs = player_dirs(Path::new("/usr/bin/vergoboy-stream"));
+        assert_eq!(dirs, vec![PathBuf::from("/usr/lib/vergoboy-stream"), PathBuf::from("/usr/bin")]);
+        // An executable with no directory in it: the bare name is all that is left.
+        assert_eq!(resolve_at(Path::new("vergoboy-stream"), "mpv"), PathBuf::from("mpv"));
+    }
+
+    #[test]
+    fn the_packaged_player_wins_over_a_sibling_one() {
+        let root = std::env::temp_dir().join(format!("w2g-paths-{}", std::process::id()));
+        let exe = root.join("bin/vergoboy-stream");
+        let packaged = root.join("lib/vergoboy-stream/w2g.so");
+        let sibling = root.join("bin/w2g.so");
+        for p in [&packaged, &sibling] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+        }
+        assert_eq!(resolve_at(&exe, "w2g.so"), packaged);
+        std::fs::remove_file(&packaged).unwrap();
+        assert_eq!(resolve_at(&exe, "w2g.so"), sibling, "the sibling is the fallback");
+        std::fs::remove_file(&sibling).unwrap();
+        assert_eq!(resolve_at(&exe, "w2g.so"), sibling, "a missing player is reported by path");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

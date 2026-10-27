@@ -397,14 +397,18 @@ pub fn run() {
     use tauri::Manager;
 
     log("info", "entering tauri builder");
+    // ONE invoke_handler call, and every command inside it. Tauri keeps a single
+    // handler and a second call *replaces* the first — the docs are explicit:
+    // "you cannot call invoke_handler multiple times. Only the last call will be
+    // used". This file used to register the native_player_* commands in the
+    // builder chain and the mpv_* ones here, so only the mpv_* group existed: the
+    // webview's `native_player_available` invoke rejected, nativePlayer.ts turns
+    // any failure into `false`, and the room showed "the player was not found on
+    // this installation" on every machine — including ones with mpv and the
+    // plugin installed. `client_log` was dropped the same way, which is why no
+    // [web] line ever reached app.log.
     let builder = tauri::Builder::default()
         .manage(native_player::NativePlayer::default())
-        .invoke_handler(tauri::generate_handler![
-            native_player::client_log,
-            native_player::native_player_available,
-            native_player::native_player_start,
-            native_player::native_player_stop
-        ])
         .setup(|app| {
         log(
             "info",
@@ -415,6 +419,10 @@ pub fn run() {
 
     match builder
         .invoke_handler(tauri::generate_handler![
+            native_player::client_log,
+            native_player::native_player_available,
+            native_player::native_player_start,
+            native_player::native_player_stop,
             mpv_start,
             mpv_load,
             mpv_play,

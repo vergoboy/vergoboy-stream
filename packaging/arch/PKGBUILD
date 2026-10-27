@@ -23,14 +23,45 @@ license=('LicenseRef-proprietary')
 # The message looks like a build failure but concerns an artifact nobody consumes,
 # and it ships a misleadingly named package next to the real one.
 options=('!debug')
+# ── the player this package owns ─────────────────────────────────────────────
+#
+# The client does not use whatever mpv the distribution happens to ship. The
+# room's sync plugin is an mpv C plugin (`mpv_open_cplugin`, loaded with
+# `--script=w2g.so`), and only an mpv built with -Dcplugins=enabled can load it,
+# so the player is built inside this same package from the very mpv fork the
+# plugin is written against, and installed next to the client. That is the whole
+# point of this section: one `pacman -U vergoboy-<instance>-…zst` yields a client
+# that can play, with no second package to install and no PATH lookup at runtime.
+#
+# The source is the w2g-mpv fork — an mpv tree with w2g/ (the plugin, its sync
+# crate, the room server, a CLI) added — referenced in place, as a git source
+# like the app itself: AGENTS.md forbids vendoring or forking a sibling
+# repository's source into this tree, so nothing of it is copied here. The path
+# is written by ../build-arch.sh next to .instance/.api-origin; the default below
+# is the sibling checkout's conventional location.
+_w2g_mpv_root="${startdir}/../../../w2g-mpv"
+[ -r "${startdir}/.w2g-mpv-root" ] && _w2g_mpv_root="$(<"${startdir}/.w2g-mpv-root")"
+
+# 'mpv' is here for the *libraries*, not for the binary: this package ships its
+# own mpv (built in build() above), and that binary links exactly the set
+# the mpv package already guarantees — ffmpeg, libplacebo, libass, GL, the audio
+# backends, … Declaring the single distribution package that owns all of them is
+# what keeps this list honest and maintainable: namcap resolves each bundled
+# library through it and reports them as "implicitly satisfied" (verified),
+# instead of demanding ~200 direct entries. It also leaves /usr/bin/mpv on the
+# system as the fallback the client uses if the packaged player is ever missing.
 depends=('webkit2gtk-4.1' 'gtk3' 'librsvg' 'openssl' 'libayatana-appindicator' 'mpv')
 # No 'patchelf'. build() runs `tauri build --no-bundle`, and tauri only calls
 # patchelf from its *bundling* step (AppImage/deb rpath fixups: `patchelf
 # --set-rpath ...`). Declaring it anyway made makepkg abort on a host that did
 # not have it installed, for a tool the build never runs.
-makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file')
-source=("${pkgname}::git+file://${startdir}/../..")
-sha256sums=('SKIP')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'base-devel' 'curl' 'wget' 'file'
+             # Building the player out of the mpv fork below: meson+ninja for mpv
+             # itself, cargo for the sync crate, cc for the C plugin.
+             'meson' 'ninja')
+source=("${pkgname}::git+file://${startdir}/../.."
+        "w2g-mpv::git+file://${_w2g_mpv_root}")
+sha256sums=('SKIP' 'SKIP')
 
 # Backend origin baked into the static export, written by ../build-arch.sh.
 # Defaults to production when absent (e.g. a bare `makepkg` run).
@@ -39,12 +70,10 @@ _api_origin='https://vergoboy.ir'
 [ -r "${_api_origin_file}" ] && _api_origin="$(<"${_api_origin_file}")"
 
 # The static export in webapp/out carries NEXT_PUBLIC_API_ORIGIN, but Tauri takes
-# its CSP from the *cloned* source tree. hls.js attaches its MediaSource to
-# <video> through a blob: URL, and without blob: in media-src the WebView raises
-# MediaError 4 (MEDIA_ERR_SRC_NOT_SUPPORTED) on every stream -- which the UI then
-# misreports as "your browser does not support this format". A local backend also
-# has to be allowlisted. So patch the clone here rather than committing a
-# developer machine's IP into the repository.
+# its CSP from the *cloned* source tree. A local backend has to be allowlisted, so
+# patch the clone here rather than committing a developer machine's IP into the
+# repository. (Nothing plays media inside the WebView any more: the native player
+# reads the file itself, so there is no blob:/MediaSource allowance to add.)
 _inject_csp() {
   local conf="$1"
   API_ORIGIN_INJECT="$_api_origin" python3 - "${conf}" <<'EOF' || return 1
@@ -74,9 +103,6 @@ def allow(directive, *sources):
     for source in sources:
         if source not in directives[directive]:
             directives[directive].append(source)
-
-allow("media-src", "blob:")
-allow("worker-src", "blob:", "'self'")
 
 if origin != "https://vergoboy.ir":
     ws = "ws" + origin[4:] if origin.startswith("http://") else None
@@ -152,6 +178,58 @@ build() {
   export RUST_MIN_STACK=33554432
   env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
     npm run tauri -- build --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
+
+  # ── the player: mpv fork + sync plugin ────────────────────────────────────
+  #
+  # Options mirror w2g-mpv/scripts/build-linux.sh's "full" profile (a real
+  # desktop player: GL, EGL, X11/Wayland, ALSA/Pulse/PipeWire, Vulkan) plus the
+  # two this package needs:
+  #   -Dcplugins=enabled   mpv can load the sync plugin at all. The build fails
+  #                        outright when the compiler/OS cannot support it, which
+  #                        is the outcome we want: shipping a player that silently
+  #                        refuses --script=w2g.so is the failure mode this
+  #                        package exists to prevent.
+  #   -Dlibmpv=false       only the cplayer binary is shipped: libmpv is a second
+  #                        copy of the same code that nothing here links.
+  #   -Dcaca=disabled      libcaca is a terminal video output no desktop client
+  #                        uses. -Dauto_features=auto picks it up wherever it is
+  #                        installed, and linking it adds a runtime dependency
+  #                        namcap rightly demands and nothing needs.
+  # -Dgpl=true and -Dauto_features=auto follow the fork's own build script, so
+  # the player built here is the one its tests and the plugin are written for.
+  ( cd "${srcdir}/w2g-mpv" &&
+    meson setup build/pkg . -Dbuildtype=release -Dgpl=true -Dcplayer=true -Dlibmpv=false \
+      -Dcplugins=enabled -Dcaca=disabled -Dauto_features=auto -Dbuild-date=false -Dtests=false &&
+    meson compile -C build/pkg )
+
+  # makepkg exports the distro's CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS and Rustflags for
+  # the build systems it expects, and Arch's defaults carry -flto=auto and
+  # -C debuginfo=2. Those leak into this plugin's build — cargo hands CFLAGS to the
+  # cc-rs build scripts (ring compiles its C and asm through them) and RUSTFLAGS to
+  # rustc — and the result is broken in a way that only shows up at runtime: ring's
+  # objects come out as LTO bitcode, the `cc` link below runs no LTO, and the shared
+  # object keeps 47 undefined own symbols, which mpv refuses to load:
+  #   [w2g] C plugin error: undefined symbol: ring_core_0_17_14__p384_elem_mul_mont
+  #   [w2g] Could not load cplugin script …/w2g.so
+  # A/B'd in a scratch PKGBUILD: with these flags 47 undefined symbols, without
+  # them 0, and the plugin then loads and follows a real room. So the player is
+  # built with what the fork's own scripts/build-w2g.sh implies — the flags its
+  # tests run against — rather than with the distribution's optimisation set.
+  unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS RUSTFLAGS RUSTDOCFLAGS LTOFLAGS
+
+  # The plugin: the sync crate (feature `net` = the WebSocket transport it uses to
+  # reach w2g-server) linked into a shared object together with the C plugin, and
+  # compiled against this same tree's headers — byte for byte the recipe in
+  # w2g-mpv/scripts/build-w2g.sh. --offline first for a build host with no network,
+  # plain build as the fallback (the crate's dependencies are in ~/.cargo).
+  ( cd "${srcdir}/w2g-mpv/w2g/sync" &&
+    (cargo build --release --features net --offline 2>/dev/null || cargo build --release --features net) )
+  mkdir -p "${srcdir}/w2g-mpv/build"
+  cc -O2 -Wall -Wextra -shared -fPIC \
+    -I"${srcdir}/w2g-mpv/include" -I"${srcdir}/w2g-mpv/w2g/sync/include" \
+    "${srcdir}/w2g-mpv/w2g/plugin/w2g_plugin.c" \
+    "${srcdir}/w2g-mpv/w2g/sync/target/release/libw2g_sync.a" \
+    -o "${srcdir}/w2g-mpv/build/w2g.so" -lpthread -ldl -lm
 }
 
 package() {
@@ -166,6 +244,16 @@ package() {
     "${pkgdir}/usr/share/icons/hicolor/128x128/apps/${_pkgbin}.png"
   install -Dm644 "webapp/src-tauri/icons/128x128@2x.png" \
     "${pkgdir}/usr/share/icons/hicolor/256x256/apps/${_pkgbin}.png"
+  # The player, in this package's own directory. The client looks for it at
+  # <its own directory>/../lib/<its own name>/ first (src/native_player.rs), so
+  # /usr/bin/vergoboy-<instance> finds /usr/lib/vergoboy-<instance>/{mpv,w2g.so}
+  # without an environment variable — and the second instance's package, the
+  # distro's /usr/bin/mpv and vergoboy-w2g's /usr/bin/w2g.so all stay untouched.
+  # Nothing is installed into /usr/bin: pacman refuses two packages owning one
+  # path, which is exactly how this package used to depend on a sibling package
+  # for its plugin.
+  install -Dm755 "${srcdir}/w2g-mpv/build/pkg/mpv" "${pkgdir}/usr/lib/${pkgname}/mpv"
+  install -Dm755 "${srcdir}/w2g-mpv/build/w2g.so" "${pkgdir}/usr/lib/${pkgname}/w2g.so"
   # namcap refuses LicenseRef-* identifiers without a license file under
   #   /usr/share/licenses/<pkgname>/
   # ("E: Uncommon license identifiers ... Found 0/1 required license files").

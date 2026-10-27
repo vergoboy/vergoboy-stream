@@ -32,6 +32,11 @@
 #     unset), `makepkg -C` deletes it at the start of each build, and
 #     webapp/out is shared too — so a second run wipes the first one's
 #     checkout mid-compile. This script takes a lock rather than corrupt.
+#   * the package builds its own player (the mpv fork + the w2g sync plugin)
+#     from the sibling w2g-mpv checkout, so that one pacman -U yields a client
+#     that can play. That checkout is a git source like this repo: it must be
+#     committed too, and meson + ninja must be installed (both are declared
+#     makedepends). Expect several extra minutes per build: a fresh mpv compile.
 #
 # Nothing here needs root except --install.
 
@@ -56,6 +61,13 @@ INSTANCE="${INSTANCE:-stream}"
 # static export, and -- because Tauri reads its CSP from the makepkg clone of
 # HEAD, not from this working tree -- the CSP allowlist the PKGBUILD injects.
 API_ORIGIN="${API_ORIGIN:-https://vergoboy.ir}"
+
+# The mpv fork the player is built from and the sync plugin is written in:
+# a cross-compilation sibling of this repository ("w2g-mpv"), *not* one of
+# AGENTS.md's mpv/mpv-android trees. Per that rule it is referenced in place —
+# the PKGBUILD takes it as a git source — so nothing of it is ever copied into
+# this tree. Override the location with W2G_MPV_ROOT if it lives elsewhere.
+W2G_MPV_ROOT="${W2G_MPV_ROOT:-$ROOT/../w2g-mpv}"
 
 CLEAN_FIRST=0
 REBUILD_UI=0
@@ -103,6 +115,16 @@ API_BASE_PATH="${API_BASE_PATH-/$INSTANCE}"
 [ "$(id -u)" -eq 0 ] && die "do not run makepkg as root — run this as your normal user"
 [ -f "$PKGBUILD" ] || die "missing $PKGBUILD"
 command -v makepkg >/dev/null 2>&1 || die "makepkg not found — install the 'pacman' package (pacman -S pacman)"
+
+# The player half of the build needs the fork's source and meson/ninja, and its
+# failures are otherwise buried inside makepkg's build() output. Say it here.
+[ -f "$W2G_MPV_ROOT/w2g/plugin/w2g_plugin.c" ] || die \
+  "no mpv fork at $W2G_MPV_ROOT (no w2g/plugin/w2g_plugin.c there) — this package builds its own player (mpv + the w2g sync plugin) from that checkout. Set W2G_MPV_ROOT=<path to the w2g-mpv clone>."
+for tool in meson ninja; do
+  command -v "$tool" >/dev/null 2>&1 || die \
+    "$tool not found — the package now builds the player (mpv + sync plugin) itself: pacman -S meson ninja"
+done
+say "player source: $W2G_MPV_ROOT ($(git -C "$W2G_MPV_ROOT" rev-parse --short HEAD 2>/dev/null || echo 'no git'))"
 
 # ── one build at a time ──────────────────────────────────────────────────────
 #
@@ -179,6 +201,13 @@ if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
   warn "so these will NOT be in the package (binary assets like src-tauri/icons are"
   warn "the usual casualty). Commit them, or expect the previous revision."
   git -C "$ROOT" status --short >&2 || true
+fi
+
+# The same trap twice over: the player is compiled from a clone of the mpv
+# fork's HEAD, so a dirty fork checkout ships a stale plugin and a stale mpv.
+if [ -d "$W2G_MPV_ROOT/.git" ] && [ -n "$(git -C "$W2G_MPV_ROOT" status --porcelain 2>/dev/null)" ]; then
+  warn "the mpv fork at $W2G_MPV_ROOT has uncommitted changes — the player is built"
+  warn "from a clone of its HEAD, so they will NOT be in the package either."
 fi
 
 # ── static export the PKGBUILD expects to copy ───────────────────────────────
@@ -285,35 +314,40 @@ done
 
 # makepkg executes the PKGBUILD from this working tree but clones the *source*
 # from git HEAD, so these two have to be handed over explicitly: the PKGBUILD
-# needs the origin to patch the clone's CSP (blob: for hls.js + the local
-# origin), and needs the instance to name the package and its files.
-printf '%s\n' "$API_ORIGIN" > "$PKGDIR/.api-origin"
-printf '%s\n' "$INSTANCE"   > "$PKGDIR/.instance"
+# needs the origin to patch the clone's CSP (to allow a local backend), and
+# needs the instance to name the package and its files.
+printf '%s\n' "$API_ORIGIN"   > "$PKGDIR/.api-origin"
+printf '%s\n' "$INSTANCE"     > "$PKGDIR/.instance"
+printf '%s\n' "$W2G_MPV_ROOT" > "$PKGDIR/.w2g-mpv-root"
 
-# makepkg keeps a *bare* git mirror of the source under $SRCDEST (which defaults
-# to the PKGBUILD directory, named after the package, so $PKGDIR/vergoboy-<instance>)
-# and checks it out into src/. Both are keyed to the repo's absolute path, so a
-# tree that was copied or moved to another machine leaves a mirror whose origin
-# no longer exists and makepkg aborts before building with
+# makepkg keeps a *bare* git mirror of each source under $SRCDEST (which defaults
+# to the PKGBUILD directory, named after the source, so $PKGDIR/vergoboy-<instance>
+# for the app and $PKGDIR/w2g-mpv for the fork) and checks them out into src/.
+# Each is keyed to its repository's absolute path, so a tree that was copied or
+# moved to another machine leaves a mirror whose origin no longer exists and
+# makepkg aborts before building with
 #   ERROR: <dir> is not a clone of file:///…/packaging/arch/../..
-# `makepkg -C` cleans only the checkout, never the mirror, so --clean-first did
-# not clear this either. Drop a mirror that points outside this repo and let
+# `makepkg -C` cleans only the checkout, never the mirrors, so --clean-first did
+# not clear this either. Drop a mirror that points outside its repository and let
 # makepkg re-clone; leave a matching one alone so repeat builds stay fast.
-SRC_MIRROR="$PKGDIR/vergoboy-$INSTANCE"
-if [ -d "$SRC_MIRROR" ]; then
-  mirror_origin="$(git -C "$SRC_MIRROR" config --get remote.origin.url 2>/dev/null || true)"
+SRC_MIRRORS=("$PKGDIR/vergoboy-$INSTANCE:$ROOT" "$PKGDIR/w2g-mpv:$W2G_MPV_ROOT")
+for mirror in "${SRC_MIRRORS[@]}"; do
+  dir="${mirror%%:*}"
+  want="${mirror#*:}"
+  [ -d "$dir" ] || continue
+  mirror_origin="$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)"
   case "$mirror_origin" in
-    *"$ROOT"*) : ;;
+    *"$want"*) : ;;
     *)
-      warn "dropping stale source mirror ($SRC_MIRROR -> ${mirror_origin:-unknown origin})"
-      rm -rf "$SRC_MIRROR" "$PKGDIR/src"
+      warn "dropping stale source mirror ($dir -> ${mirror_origin:-unknown origin})"
+      rm -rf "$dir" "$PKGDIR/src"
       ;;
   esac
-fi
+done
 
 if [ "$CLEAN_FIRST" -eq 1 ]; then
   say "removing previous build trees and artifacts for instance '$INSTANCE'"
-  rm -rf "$PKGDIR/src" "$PKGDIR/pkg" "$SRC_MIRROR"
+  rm -rf "$PKGDIR/src" "$PKGDIR/pkg" "$PKGDIR/vergoboy-$INSTANCE" "$PKGDIR/w2g-mpv"
   rm -f "$PKGDIR/vergoboy-$INSTANCE-"*.pkg.tar.zst
 fi
 

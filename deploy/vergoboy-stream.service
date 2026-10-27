@@ -19,6 +19,13 @@ Environment="STREAM_PORT=8801"
 Environment="PATH=/opt/stream/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="STREAM_SITE_URL=https://vergoboy.ir/stream"
 Environment="STREAM_LIVEKIT_URL=wss://vergoboy.ir/livekit"
+# Room sync: the public WebSocket URL the desktop client's mpv plugin dials for
+# the room clock, served by the /stream/sync location in nginx-stream.conf (which
+# proxies the w2g-server's W2G_BIND, 127.0.0.1:8765). Its matching secret —
+# STREAM_SYNC_SECRET, 32+ characters, identical to that server's W2G_SECRET —
+# belongs in the EnvironmentFile below, never in this unit. Both are what make
+# POST /stream/api/room/sync-token answer 200 instead of 503.
+Environment="STREAM_SYNC_URL=wss://vergoboy.ir/stream/sync"
 EnvironmentFile=/opt/stream/.stream_db.env
 
 # If your RTMP/HLS layout differs from config.py's defaults, override the

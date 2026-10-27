@@ -52,11 +52,13 @@ webapp-out/
 .config/
 .stream_db.env
 
-# makepkg work directories and the local bare source repository (one per
-# instance: vergoboy-stream, vergoboy-w2g, ...)
+# makepkg work directories and the local bare source repositories: one per
+# instance (vergoboy-stream, vergoboy-w2g, ...) plus the mpv fork's w2g-mpv,
+# which the player (mpv + the sync plugin) is built from.
 packaging/arch/pkg/
 packaging/arch/src/
 packaging/arch/vergoboy-*/
+packaging/arch/w2g-mpv/
 
 # Server runtime — never commit
 cookies.txt
@@ -79,5 +81,6 @@ app.py.save
 packaging/arch/*.pkg.tar.zst
 packaging/arch/.api-origin
 packaging/arch/.instance
+packaging/arch/.w2g-mpv-root
 packaging/arch/.build.lock
 webapp/.out-instance

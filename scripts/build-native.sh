@@ -237,6 +237,50 @@ say "tauri build --no-bundle ($bin_profile) — this compiles Rust, expect sever
 BIN="$ROOT/webapp/src-tauri/target/$bin_profile/vergoboy-stream"
 [ -x "$BIN" ] || die "tauri reported success but $BIN is missing or not executable"
 
+# ── the player, staged next to the build ────────────────────────────────────
+#
+# The app looks for mpv and the sync plugin in <its directory>/../lib/<its own
+# name>/ before its own directory (src/native_player.rs), which for a
+# working-tree binary is webapp/src-tauri/target/lib/<name>/. Staging them there
+# means a dev build plays with no W2G_MPV/W2G_PLUGIN to remember — and it makes a
+# missing player obvious here, instead of showing up in the room as "the player
+# was not found on this installation", which reads like a server problem.
+#
+# The mpv fork (the sibling checkout the PKGBUILD builds, too) is where the
+# plugin comes from; its own build-linux.sh prints how to compile mpv when that
+# has not been done yet, in which case the system mpv is used instead — it can
+# load the plugin as well. The system mpv is *not* a fallback goal here: the
+# packaged client always ships the fork's own build.
+PLAYER_SRC="${W2G_MPV_ROOT:-$(cd "$ROOT/.." && pwd)/w2g-mpv}"
+PLAYER_DEST="$ROOT/webapp/src-tauri/target/lib/$(basename "$BIN")"
+stage_player() {
+  [ -f "$PLAYER_SRC/w2g/plugin/w2g_plugin.c" ] || {
+    warn "no mpv fork at $PLAYER_SRC — not staging a player for $BIN"
+    warn "(set W2G_MPV_ROOT, or install the fork; until then the binary needs both"
+    warn " mpv and w2g.so next to it / in W2G_MPV and W2G_PLUGIN to play anything)"
+    return 0
+  }
+  say "staging the player (mpv + sync plugin) into $(basename "$(dirname "$PLAYER_DEST")")/$(basename "$PLAYER_DEST")/"
+  mkdir -p "$PLAYER_DEST"
+  ( cd "$PLAYER_SRC/w2g/sync" && \
+      (cargo build --release --features net --offline 2>/dev/null || cargo build --release --features net) ) \
+    || return 1
+  cc -O2 -Wall -Wextra -shared -fPIC \
+    -I"$PLAYER_SRC/include" -I"$PLAYER_SRC/w2g/sync/include" \
+    "$PLAYER_SRC/w2g/plugin/w2g_plugin.c" \
+    "$PLAYER_SRC/w2g/sync/target/release/libw2g_sync.a" \
+    -o "$PLAYER_DEST/w2g.so" -lpthread -ldl -lm || return 1
+  if [ -x "$PLAYER_SRC/build/full/mpv" ]; then
+    ln -sfn "$PLAYER_SRC/build/full/mpv" "$PLAYER_DEST/mpv"
+  else
+    warn "the fork has no build/full/mpv — using the system mpv for this build"
+    warn "(build the fork with: cd $PLAYER_SRC && scripts/build-linux.sh full)"
+    ln -sfn "$(command -v mpv || echo mpv)" "$PLAYER_DEST/mpv"
+  fi
+  ls -l "$PLAYER_DEST" | sed 's/^/    /'
+}
+stage_player || die "staging the player failed — see above"
+
 # ── verify what we produced ──────────────────────────────────────────────────
 #
 # The dev-shell trap again, this time on the artifact itself: a production
@@ -262,6 +306,12 @@ if [ "$RUN" -eq 1 ]; then
   fi
   say "running $BIN"
   exec "$BIN"
+fi
+
+if [ -L "$PLAYER_DEST/mpv" ] && [ -f "$PLAYER_DEST/w2g.so" ]; then
+  say "player staged: $(readlink -f "$PLAYER_DEST/mpv") + $PLAYER_DEST/w2g.so"
+else
+  warn "no player staged — the app will report that it cannot find mpv/the plugin"
 fi
 
 say "run it with: $BIN"

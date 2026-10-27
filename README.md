@@ -16,10 +16,9 @@ Get from a fresh clone to a running dev server in about five minutes.
 | Node.js | 20.9+ | Next.js 16 build |
 | PostgreSQL | 13+ for production | accounts, rooms, admin panel; the dev runner provisions a persistent local instance |
 | `uv` (optional) | current stable | preferred Python lockfile installer; `run.sh` falls back to pip |
-| `ffmpeg` + `ffprobe` | installed on `PATH` | HLS transcoding, subtitle extraction |
 
 ```bash
-sudo apt install -y ffmpeg python3-venv
+sudo apt install -y python3-venv
 ```
 
 ### 1. Clone and install
@@ -54,7 +53,7 @@ a random local keypair outside the repository. Production must use a separate
 LiveKit config and a reachable WSS URL.
 
 Everything else has a local default in `config.py` — bind host/port, upload
-cap, HLS preset, and RTMP/HLS URL templates. The yt-dlp proxy and cookies are
+cap, and the live RTMP/HLS URL templates. The yt-dlp proxy and cookies are
 optional and unset unless configured. See
 [Configuration](#configuration) for the full list.
 
@@ -146,14 +145,14 @@ is just `sudo systemctl restart vergoboy-frontend-build`.
 - **Room membership** — join codes, member lists, promote/demote, ban/unban.
 - **LiveKit voice room** — audio-only push-to-talk voice channel alongside the video.
 - **Real-time notifications** — streamed to all clients via Socket.IO (play/pause/seek events, users joining/leaving, new subtitles or audio tracks becoming available).
-- **Shared playlist** — add videos via file upload or direct URL (HTTP/HTTPS/HLS), or import from YouTube / the series scraper. Items are persisted across server restarts.
-- **Progressive multi-bitrate HLS transcoding** — uploaded/imported videos are transcoded into a ladder of HLS renditions (360p, 480p, 720p, 1080p where the source supports it). The default rendition starts encoding immediately; viewers can request additional qualities on demand. Playback starts as soon as the first ~20 seconds are encoded, while the rest continues in the background.
-- **Dubbed audio tracks** — each audio track is a separate file synced with the video client-side. Selection is per-user and independent of the shared playback position.
-- **Subtitles** — embedded text subtitle streams in the source file are automatically extracted and served as WebVTT. Subtitle style customization (font, size, color, background opacity, outline, bold, bottom offset) is local to each user.
-- **Controls** — play/pause, 10s skip forward/back, previous/next item, shuffle (follows the room's shuffled order, wrapping around), volume, playback speed (0.5x-2x), fullscreen (portal-based for reliable fixed-position coverage), Picture-in-Picture.
+- **Shared playlist** — add videos via file upload or direct URL (HTTP/HTTPS), or import from YouTube / the series scraper. Items are persisted across server restarts.
+- **Direct playback, no transcoding** — every item is played as the ORIGINAL file by the desktop app's native player (mpv). Any container/codec the player supports works, nothing is re-encoded, and there is no quality ladder to wait for. The browser shows the room's screen and where to watch; it does not decode video.
+- **Dubbed audio tracks** — each audio track is a separate file the native player can take as an extra track. Selection is per-user and independent of the shared playback position.
+- **Subtitles** — upload a WebVTT/SRT file (or paste a link) per item; embedded tracks are also available because the player reads the original container.
+- **Room transport** — play/pause, 10s skip forward/back, previous/next item, shuffle (follows the room's shuffled order, wrapping around), playback speed — all synchronized; the native player follows the room's clock.
 - **Live streaming panel** — generate an RTMP stream key and get the push URL (for OBS/mobile apps) and HLS playback URL, using the existing RTMP/HLS server on the host. Manual HLS URLs can also be added as playlist items.
 - **Browser screen-share streaming («استریم مستقیم با مرورگر»)** — Google-Meet-style presenting straight from the browser: pick a desktop/window/tab in the «استریم خارجی» tab and it is captured with `getDisplayMedia` and pushed over WebRTC (WHIP → MediaMTX → HLS), then auto-added to the playlist for everyone. Audio policy: only the picked surface's audio is streamed — tab shares carry that tab's sound; desktop/window shares are video-only (`systemAudio` is excluded) so other tabs/windows never leak into the stream, and if a vergoboy/stream page itself is captured its audio is dropped via the CaptureHandle API to prevent echo.
-- **Keyboard shortcuts** — Space/k (play/pause), f (fullscreen), left/right arrow (seek 10s), up/down arrow (volume), 0-9 (seek to 10%-90%), ? (shortcuts help).
+- **Keyboard shortcuts** — the voice-room keys (push-to-talk, mic, deafen) work anywhere in the UI; playback keys belong to the player window.
 - **Visual identity** — matches vergoboy.ir design (colors, fonts, header/footer).
 
 ---
@@ -175,7 +174,7 @@ is just `sudo systemctl restart vergoboy-frontend-build`.
 ├── requirements.txt
 ├── webapp/                          # Next.js frontend (static export)
 │   ├── app/                         #   Page components (Next.js App Router)
-│   ├── components/                  #   React components (Player, Chat, Sofa, etc.)
+│   ├── components/                  #   React components (Stage, Chat, Sofa, etc.)
 │   ├── lib/                         #   Client library (API client, state hooks, types)
 │   ├── public/                      #   Static assets
 │   ├── src-tauri/                   #   Desktop/Android shell
@@ -183,11 +182,9 @@ is just `sudo systemctl restart vergoboy-frontend-build`.
 │   ├── package.json
 │   └── tsconfig.json
 ├── webapp-out/                      #   Built static export (served by Nginx)
-├── static/  templates/              # Legacy Flask-served page (dev fallback)
 ├── media/
-│   ├── uploads/                     #   Raw uploaded video files
-│   ├── hls/{item_id}/              #   Per-item HLS renditions + master playlists
-│   ├── subs/                        #   Extracted WebVTT subtitles
+│   ├── uploads/                     #   Uploaded/downloaded original video files
+│   ├── subs/                        #   Uploaded WebVTT/SRT subtitles
 │   ├── chat/                        #   Chat-uploaded images
 │   └── avatars/                     #   User-uploaded avatars
 ├── data/
@@ -212,9 +209,8 @@ The backend is a single-process Flask application using **gevent** for async I/O
 - **Room state** is held in in-memory `RoomState` objects (one per invite code, created lazily and cached in `state.rooms`), each protected by a `threading.Lock`. The playlist and current playback position are persisted to `data/rooms/<code>.json` so they survive server restarts.
 - **Accounts, rooms and membership** live in PostgreSQL via SQLAlchemy (`db.py`) — users, credentials, roles, room records and bans. Passwords are bcrypt-hashed; sessions are JWT access + refresh tokens. Playback state is deliberately *not* in the database.
 - **Socket.IO events** — every connected client receives `state_sync` broadcasts with the full room state. Control actions (play/pause/seek/rate/select/shuffle) are sent via the `control` event, permission-checked, and immediately broadcast to that room's channel.
-- **HLS transcoding** is progressive: ffmpeg encodes one rendition at a time to an EVENT-type HLS playlist, emitting `transcode_progress` events as segments are written. The item becomes playable (status: "ready") after `HLS_READY_AFTER_SECONDS` (default: 20s) of timeline are encoded.
-- **Subtitle extraction** runs as a concurrent greenlet: embedded text subtitle streams are extracted with ffmpeg, converted to WebVTT, and added to the item's `subtitles` array.
-- **Concurrency limit** — at most `MAX_CONCURRENT_ENCODES` (default: 2) ffmpeg processes run at once. Excess items wait in "queued" status, and interrupted queued encodes are re-kicked on boot.
+- **Playback is direct**: an item is stored (upload/download) and immediately `ready`. `/api/items/<id>/native-source` hands the desktop player either a signed URL for the original file (`nginx secure_link`) or, when enabled, the item's own http(s) link. Nothing is transcoded, so there is no quality ladder, progress stream or seek frontier.
+- **YouTube imports** download the chosen source quality once; the file is then played like any other original.
 
 ### Frontend (webapp/)
 
@@ -223,7 +219,7 @@ The frontend is a **Next.js** application configured for **static export** (outp
 - **Next.js App Router** with a single root layout + page.
 - **Tailwind CSS v4** for styling (the `@tailwindcss/postcss` plugin).
 - **socket.io-client** for real-time bidirectional communication with the backend.
-- **hls.js** for HLS playback (progressive download of EVENT-type playlists, native HLS on Safari).
+- **@tauri-apps/api** to launch and stop the native player in the desktop build (a no-op in the browser).
 - **livekit-client** for the audio-only voice room.
 - **framer-motion** for animated transitions (sofa seating area, menus, etc.).
 - **Vazirmatn** (Persian) and **JetBrains Mono** fonts, loaded from the main vergoboy.ir site.
@@ -239,13 +235,8 @@ bundle at build time, so the value must match the instance it is deployed with.
 
 1. The server maintains `position`, `playing`, and `updated_at`.
 2. `current_position()` estimates the real-time position: if playing, it adds elapsed wall-clock time since `updated_at`.
-3. Clients run a sync interval every 6 seconds: if the local video position drifts more than 1.2 seconds from the server's expected position, the client seeks to correct it.
-4. The seek target is clamped to the **encoded frontier** (the number of seconds the HLS encoder has produced so far) so the sync loop never tries to jump into un-encoded territory.
-5. An optimistic local update in `requestControl()` makes the UI feel instant while the server round-trip completes.
-
-### Fullscreen
-
-Fullscreen uses a **React Portal** pattern: the fullscreen overlay is rendered as a `fixed` child of `document.body`, escaping any ancestor transform/stacking contexts (e.g., framer-motion wrappers). The native `requestFullscreen()` API is called on the portal root to hide browser chrome on desktop. The video uses `object-cover` in fullscreen mode to fill the entire screen.
+3. The room's clock is mirrored to the sync service (`w2g-server`, `/api/room/sync-token`), which the native player connects to and follows. In the desktop client that connection belongs to the **mpv sync plugin**: the app starts mpv with `--script=<plugin>` and `W2G_URL`/`W2G_TOKEN`/`W2G_ROOM`/`W2G_ROLE` from `POST /api/room/sync-token`, and the plugin opens that WebSocket itself, applies the room's pause/drift/seek and reports the user's own commands back. Both mpv and the plugin ship inside the desktop package (`/usr/lib/vergoboy-<instance>/`), which is why one `pacman -U` is enough.
+4. An optimistic local update in `requestControl()` makes the UI feel instant while the server round-trip completes.
 
 ---
 
@@ -274,14 +265,14 @@ HTTPS/WSS domains and refuses missing secrets or LiveKit configuration.
 | STREAM_GITHUB_OAUTH_CLIENT_ID / _SECRET | (empty) | GitHub login |
 | STREAM_DEFAULT_UPLOAD_QUOTA | 50 | Per-user upload quota for new signups |
 | STREAM_MAX_UPLOAD_MB | 8192 | Max video upload size (MB) — mirror in nginx `client_max_body_size` |
-| STREAM_HLS_PRESET | veryfast | x264 speed preset for transcoding (ignored by hardware encodes) |
-| STREAM_HLS_READY_AFTER_SECONDS | 20 | Seconds encoded before an item is playable |
-| STREAM_MAX_CONCURRENT_ENCODES | 2 | Max simultaneous ffmpeg processes |
-| STREAM_ENCODE_STALL_SECONDS | 120 | Kill an encode after this long with no progress |
-| STREAM_ENCODE_MAX_RETRIES | 2 | Retries for the last fallback rung, jittered backoff |
-| STREAM_ENCODE_HW_FAILURES | 3 | Hardware failures before the encoder is disabled |
-| STREAM_ENCODE_HW_DISABLE_SECONDS | 600 | How long the hardware encoder stays disabled |
-| STREAM_MAX_CONCURRENT_REMUX | 4 | Concurrent copy-only jobs (own pool — these are cheap) |
+| STREAM_NATIVE_MEDIA_SECRET | (empty) | Shared with nginx `secure_link`; signs original-file URLs (32+ chars enables them) |
+| STREAM_NATIVE_MEDIA_BASE | /w2g/native/uploads | URL prefix nginx serves signed originals under |
+| STREAM_NATIVE_REMOTE_SOURCES | 1 | Let the player fetch an item's own http(s) link directly (0 hides those links, and makes link-only items unplayable) |
+| STREAM_SYNC_URL | (empty) | Public WebSocket URL of the room sync service (`w2g-server`), e.g. `wss://vergoboy.ir/stream/sync`. Returned by `/api/room/sync-token` and dialled by the client's mpv plugin, so it must be the nginx location that proxies the server's `W2G_BIND` (see `deploy/nginx-stream.conf`) |
+| STREAM_SYNC_SECRET | (empty) | Signs the sync tokens that token endpoint hands out (32+ chars); must be identical to that `w2g-server`'s `W2G_SECRET`. Together with `STREAM_SYNC_URL` it is what makes the endpoint answer 200 instead of 503 — and it is an instance secret, so it belongs in the EnvironmentFile, not the unit |
+| STREAM_SYNC_TOKEN_TTL | 21600 | Lifetime of one sync token in seconds |
+| STREAM_SYNC_INTERNAL_URL | http://127.0.0.1:8766 | Loopback control API of the sync server (room mirror + command relay). Deliberately never proxied by nginx |
+| STREAM_SYNC_MIRROR_INTERVAL | 2.0 | Seconds between re-mirroring a busy room's timeline from the sync authority |
 | STREAM_RTMP_PUSH_TEMPLATE | rtmpps://vergoboy.ir:8443/live/{key} | RTMP push URL template for live streaming |
 | STREAM_RTMP_ALT_PORTS | 1935 | Extra ingest ports advertised to the user |
 | STREAM_HLS_PLAYBACK_TEMPLATE | https://vergoboy.ir/hls/live/{key}/index.m3u8 | HLS playback URL template |
