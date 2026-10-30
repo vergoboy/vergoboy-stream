@@ -9,6 +9,30 @@ import { isTauri } from "./tauri";
 
 type SyncInfo = { url: string; token: string; room: string; role: "controller" | "watcher" };
 
+/**
+ * The two calls the player needs are tiny and idempotent, so a link that drops one of them must not
+ * cost the user a play. Only network-level failures (a rejected fetch, which WebKit reports as
+ * `TypeError: Load failed`) are retried; a real HTTP answer is handed to the caller unchanged.
+ * On mobile links here a single reset used to surface as «ارتباط با سرور برقرار نشد» with no video.
+ */
+async function withRetry<T>(call: () => Promise<T>, attempts = 3): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await call();
+    } catch (e) {
+      last = e;
+      if (!(e instanceof TypeError)) throw e;
+      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+    }
+  }
+  throw last;
+}
+
+function unreachable(): Error {
+  return new Error("ارتباط با سرور برقرار نشد؛ اتصال اینترنت را بررسی کن");
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
@@ -26,7 +50,13 @@ export async function nativePlayerAvailable(): Promise<boolean> {
 
 /** Short-lived token for the room sync service. Role comes from the user's real room permissions. */
 export async function fetchSyncInfo(): Promise<SyncInfo> {
-  const res = await authFetch(`${API_PREFIX}/room/sync-token`, { method: "POST" });
+  let res: Response;
+  try {
+    res = await withRetry(() => authFetch(`${API_PREFIX}/room/sync-token`, { method: "POST" }));
+  } catch (e) {
+    if (e instanceof TypeError) throw unreachable();
+    throw e;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : `خطای سرور (${res.status})`);
   return data as SyncInfo;
@@ -36,7 +66,13 @@ export type NativeSource = { kind: "original" | "remote" | "live"; url: string; 
 
 /** The original file (signed URL) or the item's own source link (opt-in). Nothing is transcoded. */
 export async function fetchNativeSource(itemId: string): Promise<NativeSource> {
-  const res = await authFetch(`${API_PREFIX}/items/${encodeURIComponent(itemId)}/native-source`);
+  let res: Response;
+  try {
+    res = await withRetry(() => authFetch(`${API_PREFIX}/items/${encodeURIComponent(itemId)}/native-source`));
+  } catch (e) {
+    if (e instanceof TypeError) throw unreachable();
+    throw e;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : `خطای سرور (${res.status})`);
   return data as NativeSource;

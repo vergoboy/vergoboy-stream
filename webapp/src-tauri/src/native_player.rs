@@ -5,8 +5,9 @@
 //! plugin are explicit paths (`W2G_MPV` / `W2G_PLUGIN`, else the package's own directory
 //! `/usr/lib/<executable name>/`, else next to this executable) — never a PATH lookup.
 use serde::Deserialize;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
@@ -97,6 +98,11 @@ pub fn command_line(plugin: &Path, a: &StartArgs) -> (Vec<String>, Vec<(String, 
     if let Some(t) = a.access_token.as_deref().filter(|t| !t.is_empty()) {
         args.push(format!("--http-header-fields=Authorization: Bearer {t}"));
     }
+    // A dropped connection must not end playback on a flaky link: libavformat reopens the stream
+    // and mpv waits longer before giving up. Remote sources are third-party hosts, so this is the
+    // only retry layer they get (nothing is cached server-side any more).
+    args.push("--stream-lavf-o=reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=5".into());
+    args.push("--network-timeout=30".into());
     args.push("--".into()); // the URL can never be parsed as an option
     args.push(a.media_url.clone());
     let role = if a.role == "controller" { "controller" } else { "watcher" };
@@ -107,6 +113,32 @@ pub fn command_line(plugin: &Path, a: &StartArgs) -> (Vec<String>, Vec<(String, 
         ("W2G_ROLE".into(), role.into()),
     ];
     (args, env)
+}
+
+/// One line of the player's own output, as it goes into `app.log`.
+///
+/// mpv's status line rewrites itself with carriage returns and ffmpeg quotes whole URLs, so control
+/// characters are dropped and the line is capped: a failure stays readable, and an endless URL
+/// cannot bloat the log.
+fn mpv_log_line(stream: &str, line: &str) -> String {
+    let one_line: String = line.chars().filter(|c| !c.is_control()).take(300).collect();
+    format!("[mpv {stream}] {one_line}")
+}
+
+/// Copies the player's stdout/stderr into `app.log` for the life of the process.
+///
+/// The player is spawned with `--keep-open=yes`, so a failed open leaves a window that only says
+/// "failed to open" on its own OSD and never retries. Without this thread that message is written
+/// to an inherited stderr that a launcher throws away, which makes "no video, no reason" invisible.
+fn forward_mpv_output(stream: &'static str, pipe: impl Read + Send + 'static) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(pipe).lines() {
+            let Ok(line) = line else { return };
+            if !line.trim().is_empty() {
+                crate::log("info", &mpv_log_line(stream, &line));
+            }
+        }
+    });
 }
 
 /// Lets the web UI write into the app's own log (`app.log`), so what happens in the webview can be
@@ -147,10 +179,23 @@ pub fn native_player_start(app: AppHandle, state: State<'_, NativePlayer>, args:
         }
     }
     let (argv, env) = command_line(&plugin, &args);
-    let child = match Command::new(&mpv).args(&argv).envs(env).spawn() {
+    let mut child = match Command::new(&mpv)
+        .args(&argv)
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => return fail(format!("cannot start {}: {e}", mpv.display())),
     };
+    if let Some(pipe) = child.stdout.take() {
+        forward_mpv_output("out", pipe);
+    }
+    if let Some(pipe) = child.stderr.take() {
+        forward_mpv_output("err", pipe);
+    }
     crate::log("info", &format!("native player started: room={} role={}", args.room, args.role));
     *guard = Some(child);
     drop(guard);
@@ -230,6 +275,30 @@ mod tests {
     fn client_log_accepts_any_input_without_panicking() {
         client_log("info".into(), "a\nb\x1b[31m".repeat(1000));
         client_log("nonsense".into(), String::new());
+    }
+
+    // ── the player's own output, which is otherwise invisible ──
+    #[test]
+    fn player_output_is_labelled_and_kept_on_one_line() {
+        assert_eq!(mpv_log_line("err", "[ffmpeg] tls: Error in the pull function."),
+                   "[mpv err] [ffmpeg] tls: Error in the pull function.");
+        // mpv's status line is one "line" full of carriage returns; none may reach the log.
+        assert_eq!(mpv_log_line("out", "AV: 00:00:17 / 01:49:05\rAV: 00:00:18"),
+                   "[mpv out] AV: 00:00:17 / 01:49:05AV: 00:00:18");
+    }
+
+    #[test]
+    fn a_giant_player_line_is_capped() {
+        let line = mpv_log_line("err", &"x".repeat(5_000));
+        assert!(line.len() <= "[mpv err] ".len() + 300, "line was {} bytes", line.len());
+        assert!(line.starts_with("[mpv err] xxx"));
+    }
+
+    #[test]
+    fn the_player_is_started_with_retries_for_a_flaky_link() {
+        let (argv, _) = command_line(Path::new("p"), &args("watcher", None));
+        assert!(argv.iter().any(|a| a.starts_with("--stream-lavf-o=reconnect=1")));
+        assert!(argv.iter().any(|a| a.starts_with("--network-timeout=")));
     }
 
     #[test]
