@@ -8,6 +8,7 @@ import { formatTime, prettyTitle } from "@/lib/format";
 import {
   nativePlayerAvailable,
   onNativePlayerExit,
+  setPlayerSurfaceRect,
   startNativePlayer,
   stopNativePlayer,
   trace,
@@ -52,21 +53,63 @@ export function Stage({
     isTauri() ? "checking" : "browser"
   );
   const [active, setActive] = useState(false);
+  // Whether the picture is drawn inside this window (libmpv surface) or in the player's own window.
+  const [embedded, setEmbedded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lastStarted = useRef<string | null>(null);
+  const surface = useRef<HTMLDivElement>(null);
 
-  const open = useCallback(async (target: PlaylistItem) => {
-    setError(null);
-    trace(`stage: opening item=${target.id}`);
-    try {
-      await startNativePlayer({ itemId: target.id, title: prettyTitle(target.title) });
-      lastStarted.current = target.id;
-      setActive(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setActive(false);
-    }
+  /**
+   * Tells the native side where the video box is. The embedded player draws into a GL surface
+   * positioned over exactly this element, so it has to follow layout, window resizes, the mini
+   * player and fullscreen — hence an observer rather than a single measurement.
+   */
+  const reportSurface = useCallback(() => {
+    const el = surface.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    void setPlayerSurfaceRect(r.left, r.top, r.width, r.height).catch(() => {});
   }, []);
+
+  const open = useCallback(
+    async (target: PlaylistItem) => {
+      setError(null);
+      trace(`stage: opening item=${target.id}`);
+      try {
+        const mode = await startNativePlayer({ itemId: target.id, title: prettyTitle(target.title) });
+        lastStarted.current = target.id;
+        setEmbedded(mode === "embedded");
+        setActive(true);
+        reportSurface();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setActive(false);
+      }
+    },
+    [reportSurface]
+  );
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const el = surface.current;
+    if (!el) return;
+    let frame = 0;
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(reportSurface);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(el);
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, true);
+    schedule();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, true);
+      cancelAnimationFrame(frame);
+    };
+  }, [reportSurface, mode, active]);
 
   // Decide once whether this build can play at all: the mpv fork must be installed next to the
   // app, and the server must run the sync service (otherwise the player could only drift).
@@ -159,7 +202,10 @@ export function Stage({
   return (
     <div className="flex flex-col gap-3">
       <div className="relative overflow-hidden rounded-3xl border border-[color:var(--color-border)] bg-black/70">
-        <div className="relative flex aspect-video w-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <div
+          ref={surface}
+          className="relative flex aspect-video w-full flex-col items-center justify-center gap-3 px-6 text-center"
+        >
           {error && (
             <p className="flex max-w-[46ch] items-start gap-2 rounded-xl border border-[color:var(--color-coral)]/30 bg-[color:var(--color-coral)]/10 px-3 py-2 text-[12px] leading-relaxed text-[color:var(--color-coral)]">
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -193,7 +239,9 @@ export function Stage({
                   ? "پخش زنده — بدون همگام‌سازی با ساعت اتاق"
                   : playable
                     ? active
-                      ? "پخش در پنجره‌ی جداگانه‌ی پخش‌کننده باز است"
+                      ? embedded
+                        ? "پخش در همین پنجره در حال اجراست"
+                        : "پخش در پنجره‌ی جداگانه‌ی پخش‌کننده باز است"
                       : "پخش‌کننده بسته است"
                     : "این آیتم منبع قابل پخشی ندارد"}
               </p>

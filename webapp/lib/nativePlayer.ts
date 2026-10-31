@@ -38,6 +38,12 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   return invoke<T>(cmd, args);
 }
 
+/**
+ * Where the picture goes. `embedded` draws libmpv into this window; `window` is the spawned player
+ * (its own window), which is the only option an install without libmpv has.
+ */
+export type PlayerSurface = "embedded" | "window";
+
 /** True when running in the desktop app AND the mpv fork + sync plugin are installed next to it. */
 export async function nativePlayerAvailable(): Promise<boolean> {
   if (!isTauri()) return false;
@@ -46,6 +52,26 @@ export async function nativePlayerAvailable(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** True when this install can draw video inside the app window (the package ships libmpv). */
+export async function embeddedPlayerAvailable(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await call<boolean>("player_embed_available");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where the video box is, in CSS pixels relative to the web view. The native side converts to
+ * device pixels with the widget's own scale factor, so this is correct on HiDPI and fractional
+ * scaling alike. Safe to call when nothing is playing (it is ignored).
+ */
+export async function setPlayerSurfaceRect(x: number, y: number, w: number, h: number): Promise<void> {
+  if (!isTauri()) return;
+  await call<void>("player_embed_rect", { x, y, w, h });
 }
 
 /** Short-lived token for the room sync service. Role comes from the user's real room permissions. */
@@ -84,7 +110,7 @@ export function trace(message: string, level: "debug" | "info" | "warn" | "error
   call<void>("client_log", { level, message }).catch(() => {});
 }
 
-export async function startNativePlayer(opts: { itemId: string; title: string }): Promise<void> {
+export async function startNativePlayer(opts: { itemId: string; title: string }): Promise<PlayerSurface> {
   trace(`native player: requested item=${opts.itemId}`);
   const sync = await fetchSyncInfo().catch((e: unknown) => {
     trace(`native player: sync token failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
@@ -98,22 +124,37 @@ export async function startNativePlayer(opts: { itemId: string; title: string })
     throw e;
   });
   trace(`native player: source kind=${src.kind}`);
-  await call<void>("native_player_start", {
-    args: {
-      syncUrl: sync.url,
-      syncToken: sync.token,
-      room: sync.room,
-      role: sync.role,
-      mediaUrl: mediaUrl(src.url),
-      title: opts.title,
-      // The signed URL is the credential; a remote source is a third-party host.
-      // Never send our JWT to either.
-    },
-  });
+  const args = {
+    syncUrl: sync.url,
+    syncToken: sync.token,
+    room: sync.room,
+    role: sync.role,
+    mediaUrl: mediaUrl(src.url),
+    title: opts.title,
+    // The signed URL is the credential; a remote source is a third-party host.
+    // Never send our JWT to either.
+  };
+  // Prefer drawing into this window. The spawned player is the fallback for installs that ship no
+  // libmpv, so an old package keeps working instead of refusing to play.
+  if (await embeddedPlayerAvailable()) {
+    try {
+      await call<void>("player_embed_start", { args });
+      trace("native player: embedded surface started");
+      return "embedded";
+    } catch (e) {
+      trace(`native player: embedded surface failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+    }
+  }
+  await call<void>("native_player_start", { args });
+  return "window";
 }
 
 export async function stopNativePlayer(): Promise<void> {
-  if (isTauri()) await call<void>("native_player_stop");
+  if (!isTauri()) return;
+  // Both surfaces are stopped unconditionally: whichever one this build used, the room screen must
+  // never leave a film playing behind a closed room.
+  await call<void>("player_embed_stop").catch(() => {});
+  await call<void>("native_player_stop").catch(() => {});
 }
 
 /** Calls `cb` when the player window closes. Resolves to an unsubscribe function. */

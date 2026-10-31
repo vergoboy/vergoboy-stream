@@ -7,6 +7,7 @@
 //! the same `data/logs` directory as the Python backend, which lets the whole
 //! picture be read from one place after the fact.
 
+mod mpv_surface;
 mod native_player;
 
 use std::fs::{self, OpenOptions};
@@ -156,6 +157,12 @@ pub fn log(level: &str, message: &str) {
     if upper == "WARN" || upper == "ERROR" {
         append("error.log", &line);
     }
+}
+
+/// Tell the web UI that the *embedded* player stopped, on the same event the spawned player uses:
+/// the room screen has one signal for "playback is over", whichever surface was drawing.
+pub fn emit_surface_exit(app: &tauri::AppHandle, success: bool) {
+    let _ = tauri::Emitter::emit(app, "native-player-exit", success);
 }
 
 /// Window/loop events worth recording, as opposed to the ones that are just
@@ -423,6 +430,11 @@ pub fn run() {
             native_player::native_player_available,
             native_player::native_player_start,
             native_player::native_player_stop,
+            mpv_surface::player_embed_available,
+            mpv_surface::player_embed_start,
+            mpv_surface::player_embed_stop,
+            mpv_surface::player_embed_rect,
+            mpv_surface::player_embed_running,
             mpv_start,
             mpv_load,
             mpv_play,

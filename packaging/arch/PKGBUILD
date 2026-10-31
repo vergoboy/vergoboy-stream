@@ -189,8 +189,11 @@ build() {
   #                        is the outcome we want: shipping a player that silently
   #                        refuses --script=w2g.so is the failure mode this
   #                        package exists to prevent.
-  #   -Dlibmpv=false       only the cplayer binary is shipped: libmpv is a second
-  #                        copy of the same code that nothing here links.
+  #   -Dlibmpv=true        the client draws video *inside its own window* through
+  #                        libmpv's render API (src/mpv_surface.rs), so the library
+  #                        is the player the app actually uses. The cplayer binary is
+  #                        still built and shipped as the fallback for installs where
+  #                        the surface cannot be created.
   #   -Dcaca=disabled      libcaca is a terminal video output no desktop client
   #                        uses. -Dauto_features=auto picks it up wherever it is
   #                        installed, and linking it adds a runtime dependency
@@ -198,7 +201,7 @@ build() {
   # -Dgpl=true and -Dauto_features=auto follow the fork's own build script, so
   # the player built here is the one its tests and the plugin are written for.
   ( cd "${srcdir}/w2g-mpv" &&
-    meson setup build/pkg . -Dbuildtype=release -Dgpl=true -Dcplayer=true -Dlibmpv=false \
+    meson setup build/pkg . -Dbuildtype=release -Dgpl=true -Dcplayer=true -Dlibmpv=true \
       -Dcplugins=enabled -Dcaca=disabled -Dauto_features=auto -Dbuild-date=false -Dtests=false &&
     meson compile -C build/pkg )
 
@@ -254,6 +257,19 @@ package() {
   # for its plugin.
   install -Dm755 "${srcdir}/w2g-mpv/build/pkg/mpv" "${pkgdir}/usr/lib/${pkgname}/mpv"
   install -Dm755 "${srcdir}/w2g-mpv/build/w2g.so" "${pkgdir}/usr/lib/${pkgname}/w2g.so"
+  # libmpv from the same build: the embedded surface dlopen's `<this dir>/libmpv.so.2`
+  # (src/mpv_surface.rs). The soname link is created here rather than taken from the
+  # build tree, so the installed name is stable while the real file keeps its version —
+  # the library is never resolved through the system loader's cache, so nothing else on
+  # the machine can pick it up.
+  local _libmpv
+  _libmpv="$(cd "${srcdir}/w2g-mpv/build/pkg" && ls libmpv.so.2.* 2>/dev/null | head -1)"
+  if [ -n "$_libmpv" ]; then
+    install -Dm755 "${srcdir}/w2g-mpv/build/pkg/${_libmpv}" "${pkgdir}/usr/lib/${pkgname}/${_libmpv}"
+    ln -s "${_libmpv}" "${pkgdir}/usr/lib/${pkgname}/libmpv.so.2"
+  else
+    echo "  -> libmpv.so.2.* missing from the mpv build: the client will use the player window"
+  fi
   # namcap refuses LicenseRef-* identifiers without a license file under
   #   /usr/share/licenses/<pkgname>/
   # ("E: Uncommon license identifiers ... Found 0/1 required license files").

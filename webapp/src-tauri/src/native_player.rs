@@ -86,6 +86,19 @@ pub fn paths() -> (PathBuf, PathBuf) {
     (resolve("W2G_MPV", "mpv", "mpv.exe"), resolve("W2G_PLUGIN", "w2g.so", "w2g.dll"))
 }
 
+/// A runtime-loaded library (libmpv) from this app's package: `var` wins when set and non-blank,
+/// else the package directory, else the executable's own directory. Same rule as [`resolve`], kept
+/// separate because a library is never spawned and has no `.exe` variant.
+pub fn resolve_lib(var: &str, unix: &str) -> PathBuf {
+    match std::env::var(var) {
+        Ok(explicit) if !explicit.trim().is_empty() => PathBuf::from(explicit),
+        _ => {
+            let exe = std::env::current_exe().unwrap_or_else(|_| sibling(unix));
+            resolve_at(&exe, unix)
+        }
+    }
+}
+
 /// Pure: the exact command line and environment for the player.
 pub fn command_line(plugin: &Path, a: &StartArgs) -> (Vec<String>, Vec<(String, String)>) {
     let mut args = vec![
