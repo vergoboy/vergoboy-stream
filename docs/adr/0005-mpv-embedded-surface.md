@@ -45,6 +45,11 @@ overlays the room's video box inside the existing Tauri window (`src/mpv_surface
 | VA-API only initialises when the Wayland display is passed | `hwdec-current` is `vaapi` with `MPV_RENDER_PARAM_WL_DISPLAY`, `no` without it |
 | mpv aborts under a non-C numeric locale | the probe died with `Non-C locale detected`; the host calls `setlocale(LC_NUMERIC, "C")` before creating the core |
 | mpv's event queue has one consumer | teardown is owned by the event thread (it calls `mpv_terminate_destroy`); the main thread waits on a channel |
+| the sync plugin needs libmpv's symbols in the global scope | with `RTLD_LOCAL` the plugin failed to load: `undefined symbol: mpv_observe_property`; the library is dlopen'd `RTLD_GLOBAL` |
+| `--script` does not exist on a libmpv handle | it is an `OPT_CLI_ALIAS("scripts-append")`; setting it returns "option not found", the real option is `scripts` |
+| GL functions must be resolved through EGL/GLX here | `libepoxy.so.0` has no `epoxy_get_proc_address`; with it, libmpv logged `Can't load OpenGL functions` and the context failed with "not supported" |
+| glib's `MainContext::invoke` runs inline on the main thread | calling it from mpv's update callback while rendering re-entered the player state and aborted the app (`RefCell already mutably borrowed`); a flag plus a 16 ms redraw timer replaces it |
+| a reparented child of a hidden `GtkOverlay` is hidden with it | the window went blank until the overlay was shown explicitly |
 
 ## Consequences
 

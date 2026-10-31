@@ -226,8 +226,11 @@ fn wayland_display() -> *mut c_void {
 fn library() -> Result<&'static Library, String> {
     LIBRARY.get_or_init(|| {
         let path = libmpv_path();
-        // SAFETY: never closed; see above.
-        let handle = unsafe { libc::dlopen(cstr(&path.display().to_string()).as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        // RTLD_GLOBAL, not LOCAL: the sync plugin is a cplugin, i.e. a shared object that resolves
+        // `mpv_*` at load time. Its symbols have to come from this handle, because the app does not
+        // link libmpv — with RTLD_LOCAL the plugin dies with
+        // "undefined symbol: mpv_observe_property" and the room never syncs.
+        let handle = unsafe { libc::dlopen(cstr(&path.display().to_string()).as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
         if handle.is_null() {
             LOAD_FAILED.store(true, Ordering::Relaxed);
             return Err(format!("libmpv not found at {} (set W2G_LIBMPV)", path.display()));
@@ -261,43 +264,115 @@ fn library() -> Result<&'static Library, String> {
     .clone()
 }
 
-/// libepoxy is what GDK itself resolves GL through, so it always agrees with the GL context GTK
-/// hands us. mpv asks for every entry point through this one callback.
+/// GL entry points for mpv.
+///
+/// mpv resolves every function it uses through this one callback and will not link GL itself. On
+/// this session neither `libepoxy.so.0` exports a generic `epoxy_get_proc_address` nor is GLX the
+/// active path: GTK renders through EGL on Wayland, so EGL is asked first, GLX second, and plain
+/// `dlsym` on libGL last (some drivers do not return core 1.x functions from the extension
+/// resolvers). With only libepoxy, libmpv logged `Can't load OpenGL functions.` and the surface
+/// never came up.
 type GetProc = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 
-fn epoxy() -> Option<GetProc> {
-    static EPOXY: OnceLock<Option<GetProc>> = OnceLock::new();
-    *EPOXY.get_or_init(|| {
-        let handle = unsafe { libc::dlopen(cstr("libepoxy.so.0").as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+fn dl_symbol(lib: &str, symbol: &str) -> Option<*mut c_void> {
+    unsafe {
+        let handle = libc::dlopen(cstr(lib).as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
         if handle.is_null() {
             return None;
         }
-        let sym = unsafe { libc::dlsym(handle, cstr("epoxy_get_proc_address").as_ptr()) };
-        if sym.is_null() {
-            return None;
+        let p = libc::dlsym(handle, cstr(symbol).as_ptr());
+        if p.is_null() {
+            None
+        } else {
+            Some(p)
         }
-        Some(unsafe { std::mem::transmute_copy(&sym) })
-    })
-}
-
-extern "C" fn get_proc_address(_ctx: *mut c_void, name: *const c_char) -> *mut c_void {
-    match epoxy() {
-        Some(f) => unsafe { f(name) },
-        None => std::ptr::null_mut(),
     }
 }
 
-extern "C" fn on_frame_update(_ctx: *mut c_void) {
-    // Runs on an mpv thread: nothing but a wakeup may happen here. The closure captures nothing,
-    // so the GTK objects are still only touched on the main thread.
-    glib::MainContext::default().invoke(|| {
-        PLAYER.with(|p| {
-            if let Some(player) = p.borrow().as_ref() {
-                if player.area.is_realized() {
-                    player.area.queue_render();
-                }
+fn egl_get_proc() -> Option<GetProc> {
+    static F: OnceLock<Option<GetProc>> = OnceLock::new();
+    *F.get_or_init(|| dl_symbol("libEGL.so.1", "eglGetProcAddress").map(|p| unsafe { std::mem::transmute_copy(&p) }))
+}
+
+fn glx_get_proc() -> Option<GetProc> {
+    static F: OnceLock<Option<GetProc>> = OnceLock::new();
+    *F.get_or_init(|| {
+        dl_symbol("libGL.so.1", "glXGetProcAddressARB")
+            .or_else(|| dl_symbol("libGL.so.1", "glXGetProcAddress"))
+            .map(|p| unsafe { std::mem::transmute_copy(&p) })
+    })
+}
+
+fn libgl() -> Option<*mut c_void> {
+    static H: OnceLock<Option<usize>> = OnceLock::new();
+    H.get_or_init(|| unsafe {
+        let handle = libc::dlopen(cstr("libGL.so.1").as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        if handle.is_null() {
+            None
+        } else {
+            Some(handle as usize)
+        }
+    })
+    .map(|h| h as *mut c_void)
+}
+
+fn resolve(name: &CStr) -> *mut c_void {
+    unsafe {
+        if let Some(f) = egl_get_proc() {
+            let p = f(name.as_ptr());
+            if !p.is_null() {
+                return p;
             }
-        });
+        }
+        if let Some(f) = glx_get_proc() {
+            let p = f(name.as_ptr());
+            if !p.is_null() {
+                return p;
+            }
+        }
+        match libgl() {
+            Some(handle) => libc::dlsym(handle, name.as_ptr()),
+            None => std::ptr::null_mut(),
+        }
+    }
+}
+
+extern "C" fn get_proc_address(_ctx: *mut c_void, name: *const c_char) -> *mut c_void {
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    resolve(unsafe { CStr::from_ptr(name) })
+}
+
+/// Set by mpv's update callback (any thread) and consumed by the redraw timer on the main thread.
+///
+/// The callback must not touch GTK, and it must not use `MainContext::invoke` either: glib runs an
+/// invoked closure *inline* when the calling thread already owns the main context, which is exactly
+/// the case while mpv is being rendered from the `render` signal — that re-entered the player state
+/// and killed the app with "RefCell already mutably borrowed". A flag plus one timer has neither
+/// problem and costs an atomic read per tick.
+static WANT_FRAME: AtomicBool = AtomicBool::new(false);
+static REDRAW_TIMER: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_frame_update(_ctx: *mut c_void) {
+    WANT_FRAME.store(true, Ordering::Relaxed);
+}
+
+fn ensure_redraw_timer() {
+    if REDRAW_TIMER.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    glib::timeout_add_local(Duration::from_millis(16), || {
+        if WANT_FRAME.swap(false, Ordering::Relaxed) {
+            PLAYER.with(|p| {
+                if let Some(player) = p.borrow().as_ref() {
+                    if player.area.is_realized() {
+                        player.area.queue_render();
+                    }
+                }
+            });
+        }
+        glib::ControlFlow::Continue
     });
 }
 
@@ -418,6 +493,11 @@ fn install_overlay(window: &gtk::Window) -> Result<(gtk::Overlay, gtk::GLArea), 
         return Err("the web view's parent cannot host an overlay".into());
     }
     overlay.add(&webview);
+    // A GtkOverlay starts hidden; reparenting the already-visible web view into it would hide the
+    // whole window (the app went blank). The web view stays visible; only the GL surface starts
+    // hidden, until there is something to draw.
+    webview.set_visible(true);
+    overlay.set_visible(true);
 
     let area = gtk::GLArea::new();
     area.set_auto_render(false); // frames are drawn only when mpv says there is one
@@ -526,15 +606,16 @@ fn api_type_ptr() -> *mut c_void {
 
 /// Resolve `glGetIntegerv`, the one GL call made outside mpv.
 fn gl_get_integerv() -> Option<unsafe extern "C" fn(c_int, *mut c_void)> {
-    static F: OnceLock<Option<unsafe extern "C" fn(c_int, *mut c_void)>> = OnceLock::new();
-    *F.get_or_init(|| {
-        let p = unsafe { epoxy()?(cstr("glGetIntegerv").as_ptr()) };
+    static F: OnceLock<Option<usize>> = OnceLock::new();
+    F.get_or_init(|| {
+        let p = resolve(&cstr("glGetIntegerv"));
         if p.is_null() {
             None
         } else {
-            Some(unsafe { std::mem::transmute_copy(&p) })
+            Some(p as usize)
         }
     })
+    .map(|p| unsafe { std::mem::transmute_copy(&p) })
 }
 
 fn err(api: &Api, code: c_int) -> String {
@@ -801,6 +882,7 @@ pub fn start(app: AppHandle, args: StartArgs) -> Result<(), String> {
         app: app.clone(),
     };
     PLAYER.with(|p| *p.borrow_mut() = Some(player));
+    ensure_redraw_timer();
 
     // The file is opened from `ensure_context` once the GL surface exists: libmpv's video output
     // cannot be configured before its render context, and loading first leaves a window that
@@ -845,6 +927,9 @@ pub fn set_rect(x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
         player.area.set_margin_start(x);
         player.area.set_margin_top(y);
         player.area.set_size_request(w, h);
+        if player.size != (w, h) {
+            log("info", &format!("surface rect {w}x{h} at {x},{y} (scale {scale})"));
+        }
         player.size = (w, h);
         player.area.queue_resize();
         player.area.queue_render();
