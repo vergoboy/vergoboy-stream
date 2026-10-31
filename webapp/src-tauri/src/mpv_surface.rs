@@ -611,7 +611,10 @@ pub fn start(app: AppHandle, args: StartArgs) -> Result<(), String> {
             ("pause", "yes".to_string()),
             ("osc", "no".to_string()),
             ("input-default-bindings", "no".to_string()),
-            ("script", plugin.display().to_string()),
+            // NOT "script": that name is a command-line alias (`OPT_CLI_ALIAS("scripts-append")`)
+            // that only the CLI parser knows, so setting it on a libmpv handle fails with
+            // "option not found". The option the core actually has is `scripts`.
+            ("scripts", plugin.display().to_string()),
             ("force-media-title", args.title.clone()),
             ("stream-lavf-o", "reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=5".to_string()),
             ("network-timeout", "30".to_string()),
